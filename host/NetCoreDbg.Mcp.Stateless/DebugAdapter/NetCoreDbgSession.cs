@@ -26,7 +26,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private const int MaximumStackFramePathBytes = 4096;
     private const int MaximumInspectionEntryCount = 256;
     private const int MaximumInspectionNameBytes = 1024;
-    private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
+    internal const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
     private const int MaximumContinueReasonBytes = 1024;
     private const int MaximumBreakpointCount = 256;
     private static readonly TimeSpan ContinueTimeout = TimeSpan.FromSeconds(30);
@@ -111,6 +111,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsExceptionInfoRequest;
     private bool _supportsStepInTargetsRequest;
     private bool _supportsLoadedSourcesRequest;
+    private bool _supportsReadMemoryRequest;
+    private bool _supportsDisassembleRequest;
+    private bool _supportsLocationsRequest;
     private bool _supportsSetVariable;
     private bool _supportsExceptionFilters;
     private bool _supportsConditionalBreakpoints;
@@ -849,6 +852,51 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
     internal bool RequiresLoadedSourcesDrain() => Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0;
+
+    internal async Task<(string Status, JsonElement Body, string? Context)> ReadMemoryInspectionAsync(
+        string command, object arguments, bool emptyRead, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        string context;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                var supported = command switch
+                {
+                    "readMemory" => _supportsReadMemoryRequest,
+                    "disassemble" => _supportsDisassembleRequest,
+                    "locations" => _supportsLocationsRequest,
+                    _ => false,
+                };
+                if (!supported) return ("unsupported", default, null);
+                if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing || IsRetirementRequested)
+                    return ("stale", default, null);
+                context = GetOrCreateInspectionContext();
+                if (emptyRead) return ("empty", default, context);
+            }
+            request = await BeginRequestAsync(command, arguments, _requestTimeout, cancellationToken,
+                inspectionContextId: context).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent) return ("stale", default, null);
+            if (!response.Success) return ("refused", default, null);
+            if (response.Body.ValueKind != JsonValueKind.Object || Encoding.UTF8.GetByteCount(response.Body.GetRawText()) > 256 * 1024)
+                throw new InvalidDataException("DAP memory inspection response is invalid or too large.");
+            return ("success", response.Body, context);
+        }
+        catch (OperationCanceledException) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally { RemovePending(request); }
+    }
 
     internal async Task<DapStepTargetsResult> GetStepInTargetsAsync(string inspectionContextId, int frameId, CancellationToken cancellationToken)
     {
@@ -3136,6 +3184,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         _callStackAdmissionGate.Release();
                     }
                 }
+                if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _) ||
+                    capabilities.TryGetProperty("supportsDisassembleRequest", out _) ||
+                    capabilities.TryGetProperty("supportsLocationsRequest", out _))
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _)) _supportsReadMemoryRequest = ReadOptionalBoolean(capabilities, "supportsReadMemoryRequest");
+                            if (capabilities.TryGetProperty("supportsDisassembleRequest", out _)) _supportsDisassembleRequest = ReadOptionalBoolean(capabilities, "supportsDisassembleRequest");
+                            if (capabilities.TryGetProperty("supportsLocationsRequest", out _)) _supportsLocationsRequest = ReadOptionalBoolean(capabilities, "supportsLocationsRequest");
+                        }
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
                 if (capabilities.TryGetProperty("exceptionBreakpointFilters", out _))
                 {
                     var supportsFilters = ReadExceptionFilterSupport(capabilities);
@@ -3643,6 +3707,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _supportsExceptionInfoRequest = false;
                 _supportsStepInTargetsRequest = false;
                 _supportsLoadedSourcesRequest = false;
+                _supportsReadMemoryRequest = false;
+                _supportsDisassembleRequest = false;
+                _supportsLocationsRequest = false;
                 _supportsExceptionFilters = false;
                 _supportsSetVariable = false;
             }
@@ -3671,6 +3738,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _supportsExceptionInfoRequest = supportsExceptionInfo;
             _supportsStepInTargetsRequest = supportsStepInTargets;
             _supportsLoadedSourcesRequest = supportsLoadedSources;
+            _supportsReadMemoryRequest = ReadOptionalBoolean(body, "supportsReadMemoryRequest");
+            _supportsDisassembleRequest = ReadOptionalBoolean(body, "supportsDisassembleRequest");
+            _supportsLocationsRequest = ReadOptionalBoolean(body, "supportsLocationsRequest");
             _supportsExceptionFilters = supportsExceptionFilters;
             _supportsSetVariable = supportsSetVariable;
             _supportsConditionalBreakpoints = supportsConditional;

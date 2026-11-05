@@ -1704,6 +1704,233 @@ public sealed class ModernProtocolContractTests
         }
     }
 
+    private static ModernMcpStartOptions MemoryInspectionOptions(bool? supported, string? mode = null)
+    {
+        var capabilities = new JsonObject();
+        if (supported is { } value)
+        {
+            capabilities["supportsReadMemoryRequest"] = value;
+            capabilities["supportsDisassembleRequest"] = value;
+            capabilities["supportsLocationsRequest"] = value;
+        }
+        var script = new JsonObject { ["breakpointCapabilities"] = capabilities, ["memoryInspectionMode"] = mode };
+        return new ModernMcpStartOptions(ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public async Task LegacyCompat_MemoryInspection_UnsupportedCapabilitiesDoNotWrite(bool? supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(supported));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-unsupported" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            foreach (var (tool, arguments, capability) in new[]
+            {
+                ("read_memory", new JsonObject { ["memory_reference"] = "0x1234", ["count"] = 0 }, "supportsReadMemoryRequest"),
+                ("read_memory", new JsonObject { ["memory_reference"] = "0x1234", ["count"] = 3 }, "supportsReadMemoryRequest"),
+                ("disassemble", new JsonObject { ["memory_reference"] = "0x1234" }, "supportsDisassembleRequest"),
+                ("get_locations", new JsonObject { ["location_reference"] = 42 }, "supportsLocationsRequest"),
+            })
+            {
+                var result = await LegacyConsoleCallAsync(driver, tool, arguments, owner);
+                Assert.Contains(capability, result["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+                Assert.False(result.ContainsKey("data"));
+            }
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command is "readMemory" or "disassemble" or "locations");
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_MemoryInspection_MapsRequestsAndPythonFields()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-supported" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var empty = await LegacyConsoleCallAsync(driver, "read_memory", new JsonObject { ["memory_reference"] = "0x1234", ["count"] = 0 }, owner);
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["address"] = "", ["unreadable_bytes"] = 0, ["data"] = "" }, empty["data"]));
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "readMemory");
+            var read = await LegacyConsoleCallAsync(driver, "read_memory", new JsonObject { ["memory_reference"] = "0x1234", ["offset"] = 4, ["count"] = 5 }, owner);
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["address"] = "0x1238", ["unreadable_bytes"] = 2, ["data"] = "AQID" }, read["data"]));
+            var disassembly = await LegacyConsoleCallAsync(driver, "disassemble", new JsonObject { ["memory_reference"] = "0x1234", ["offset"] = 4, ["instruction_offset"] = -1, ["instruction_count"] = 2, ["resolve_symbols"] = false }, owner);
+            var instructions = Assert.IsType<JsonArray>(disassembly["data"]?["instructions"]);
+            Assert.Equal(2, instructions.Count);
+            Assert.Equal("0x1234", instructions[0]?["address"]?.GetValue<string>());
+            Assert.Equal("55", instructions[0]?["instructionBytes"]?.GetValue<string>());
+            Assert.Equal("push rbp", instructions[0]?["instruction"]?.GetValue<string>());
+            Assert.Equal("main", instructions[0]?["symbol"]?.GetValue<string>());
+            Assert.Equal("normal", instructions[0]?["presentationHint"]?.GetValue<string>());
+            Assert.Equal("nop", instructions[1]?["instruction"]?.GetValue<string>());
+            var location = await LegacyConsoleCallAsync(driver, "get_locations", new JsonObject { ["location_reference"] = 42 }, owner);
+            Assert.Equal("C:/src/Program.cs", location["data"]?["source"]?["path"]?.GetValue<string>());
+            Assert.Equal(12, location["data"]?["line"]?.GetValue<int>());
+            Assert.Equal(3, location["data"]?["column"]?.GetValue<int>());
+            Assert.Equal(13, location["data"]?["end_line"]?.GetValue<int>());
+            Assert.Equal(8, location["data"]?["end_column"]?.GetValue<int>());
+            Assert.Equal(13, location["data"]?["endLine"]?.GetValue<int>());
+            Assert.Equal(8, location["data"]?["endColumn"]?.GetValue<int>());
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            JsonNode? Args(string command) => JsonNode.Parse(Assert.Single(actions, action => action.Command == command).Detail!)?["arguments"];
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["memoryReference"] = "0x1234", ["offset"] = 4, ["count"] = 5 }, Args("readMemory")));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["memoryReference"] = "0x1234", ["offset"] = 4, ["instructionOffset"] = -1, ["instructionCount"] = 2, ["resolveSymbols"] = false }, Args("disassemble")));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["locationReference"] = 42 }, Args("locations")));
+            var defaultsBefore = (await driver.ReadNativeActionsAsync()).Count;
+            var defaultRead = await LegacyConsoleCallAsync(driver, "read_memory", new JsonObject { ["memory_reference"] = "0x1234" }, owner);
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["address"] = "", ["unreadable_bytes"] = 0, ["data"] = "" }, defaultRead["data"]));
+            var defaultDisassembly = await LegacyConsoleCallAsync(driver, "disassemble", new JsonObject { ["memory_reference"] = "0x1234" }, owner);
+            Assert.Equal(2, Assert.IsType<JsonArray>(defaultDisassembly["data"]?["instructions"]).Count);
+            var defaultActions = (await driver.ReadNativeActionsAsync()).Skip(defaultsBefore).ToArray();
+            Assert.DoesNotContain(defaultActions, static action => action.Command == "readMemory");
+            var defaultRequest = Assert.Single(defaultActions, static action => action.Command == "disassemble");
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["memoryReference"] = "0x1234", ["offset"] = 0, ["instructionOffset"] = 0, ["instructionCount"] = 64, ["resolveSymbols"] = true }, JsonNode.Parse(defaultRequest.Detail!)?["arguments"]));
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_MemoryInspection_InvalidBoundariesDoNotWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-invalid" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            foreach (var (tool, arguments) in new[]
+            {
+                ("read_memory", new JsonObject { ["memory_reference"] = "", ["count"] = 0 }),
+                ("read_memory", new JsonObject { ["memory_reference"] = "0x1234", ["count"] = -1 }),
+                ("disassemble", new JsonObject { ["memory_reference"] = "", ["instruction_count"] = 1 }),
+                ("disassemble", new JsonObject { ["memory_reference"] = "0x1234", ["instruction_count"] = 0 }),
+                ("disassemble", new JsonObject { ["memory_reference"] = "0x1234", ["instruction_count"] = -1 }),
+                ("get_locations", new JsonObject { ["location_reference"] = 0 }),
+                ("get_locations", new JsonObject { ["location_reference"] = -1 }),
+            })
+                Assert.NotNull((await LegacyConsoleCallAsync(driver, tool, arguments, owner))["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command is "readMemory" or "disassemble" or "locations");
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Theory]
+    [InlineData("read_memory", "readMemory")]
+    [InlineData("disassemble", "disassemble")]
+    [InlineData("get_locations", "locations")]
+    public async Task LegacyCompat_MemoryInspection_ChangedStoppedEpochRejectsReply(string tool, string command)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true, "stale"));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-stale" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        Task<JsonObject>? pending = null;
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var arguments = tool == "get_locations" ? new JsonObject { ["location_reference"] = 42 } : new JsonObject { ["memory_reference"] = "0x1234", [tool == "read_memory" ? "count" : "instruction_count"] = 1 };
+            pending = LegacyConsoleCallAsync(driver, tool, arguments, owner);
+            await driver.WaitForFixtureRecordAsync("memory-inspection-response-gated", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            driver.ReleaseStackTraceResponse();
+            var response = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.NotNull(response["error"]);
+            Assert.False(response.ContainsKey("data"));
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == command);
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Theory]
+    [InlineData("read_memory", "invalid-read")]
+    [InlineData("disassemble", "invalid-disassemble")]
+    [InlineData("get_locations", "invalid-locations")]
+    public async Task LegacyCompat_MemoryInspection_InvalidAdapterResponseIsRejected(string tool, string mode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true, mode));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-invalid-response" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var arguments = tool == "get_locations" ? new JsonObject { ["location_reference"] = 42 }
+                : new JsonObject { ["memory_reference"] = "0x1234", [tool == "read_memory" ? "count" : "instruction_count"] = 1 };
+            var response = await LegacyConsoleCallAsync(driver, tool, arguments, owner);
+            Assert.NotNull(response["error"]);
+            Assert.False(response.ContainsKey("data"));
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Theory]
+    [InlineData("get_locations", "wide-location")]
+    [InlineData("disassemble", "wide-instruction")]
+    [InlineData("read_memory", "wide-unreadable")]
+    public async Task LegacyCompat_MemoryInspection_WideSafeDapIntegersRemainReadable(string tool, string mode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true, mode));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-wide-response" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var arguments = tool == "get_locations" ? new JsonObject { ["location_reference"] = 42 }
+                : new JsonObject { ["memory_reference"] = "0x1234", [tool == "read_memory" ? "count" : "instruction_count"] = 1 };
+            var response = await LegacyConsoleCallAsync(driver, tool, arguments, owner);
+            var value = tool == "get_locations" ? response["data"]?["column"]
+                : tool == "disassemble" ? response["data"]?["instructions"]?[0]?["column"] : response["data"]?["unreadable_bytes"];
+            Assert.Equal(2_147_483_648L, value?.GetValue<long>());
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Disassemble_OversizedReplyDoesNotReturnPartialData()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryInspectionOptions(true, "large"));
+        var owner = new JsonObject { ["muxSessionId"] = "memory-large" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var response = await LegacyConsoleCallAsync(driver, "disassemble", new JsonObject { ["memory_reference"] = "0x1234", ["instruction_count"] = 2 }, owner);
+            Assert.NotNull(response["error"]);
+            Assert.False(response.ContainsKey("data"));
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "disassemble");
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
     [Fact]
     public async Task LegacyCompat_InspectionUtilities_SnapshotDiffCollectionAndRetention()
     {
