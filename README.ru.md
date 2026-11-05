@@ -51,7 +51,8 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 только `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
-`get_stop_context`, `get_exception_context`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
@@ -70,6 +71,17 @@ Legacy-инструменты контекста возвращают ответ
 В отличие от современного инструмента, `max_inner_exceptions` по умолчанию равен
 5. Вычисление может запускать код программы и требует владения mux. Укажи 0,
 чтобы не выполнять вычисление. Неопределённый результат не повторяется.
+
+Legacy-снимки существуют в процессе, сохраняются после `stop_debug`, отклоняют
+повторные имена и удаляются в порядке создания. `NETCOREDBG_MAX_SNAPSHOTS` по
+умолчанию равен 20 (диапазон 1–1024), `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` — 200
+(1–256). При превышении лимита переменных native host возвращает ошибку вместо
+частичного снимка Python. Для коллекций и объектов сначала вызови `get_call_stack`
+из того же mux-клиента. Один ответ DAP ограничен 256 переменными; обход объекта —
+256 свойствами и 256 запросами. Глубина ограничена диапазоном 1–5. Рабочий лимит
+256 КиБ учитывает накладные расходы на переменные; для сериализованного ответа
+действует отдельный лимит 256 КиБ. При превышении возвращается ошибка. Сортировка
+использует ordinal .NET; бесконечные и другие неконечные числа не поддерживаются.
 
 Три native-инструмента поиска работают до запуска и во время сессии. Их ответы
 в стиле Python содержат состояние, наблюдаемое при формировании ответа. Заданный
@@ -97,7 +109,7 @@ native-правилами и границами проекта. `search_source` 
 транспорта может задержать любой ответ, но запуск, stop и shutdown внутри сервера не ждут уведомлений.
 Output содержит текущий буфер и пуст
 в idle; threads запрашивает native-отладчик и сообщает ошибку при недоступности.
-`debug://state` и полная совместимость ресурсов пока не поддерживаются.
+Полная совместимость ресурсов пока не достигнута.
 Повторный start отклоняется до stop. Наблюдаемое завершение DAP
 и полученный код выхода сохраняются до явного stop, в том числе во время
 очистки. При ошибке очистки или завершении без терминального события возвращается

@@ -2724,6 +2724,8 @@ internal sealed class ControlledDapAdapter
                     new { name = "tupleVar", value = "(\"test\", 123)", variablesReference = 1002, evaluateName = "private tuple expression" },
                     new { name = "longValue", value = new string('v', 16_385), variablesReference = 0 },
                 ];
+        if (command == "variables" && root.GetProperty("arguments").GetProperty("variablesReference").GetInt32() == 1010)
+            entries = [new { name = "self", value = "cycle", type = "Node", variablesReference = 1010 }];
         if (command == "variables" && mode == "paging")
         {
             var arguments = root.GetProperty("arguments");

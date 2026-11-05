@@ -1545,6 +1545,78 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_InspectionUtilities_SnapshotDiffCollectionAndRetention()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsDelayedStackTraceLoading: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_MAX_SNAPSHOTS"] = "2" }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "utility-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "utility-other" };
+        Assert.Empty(Assert.IsType<JsonArray>((await LegacyConsoleCallAsync(driver, "list_snapshots", new JsonObject(), other))["data"]?["snapshots"]));
+        await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner);
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var denied = await LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "before" }, other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var before = await LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "before" }, owner);
+            Assert.Equal("before", before["data"]?["name"]?.GetValue<string>());
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "before" }, owner))["error"]);
+            _ = await LegacyConsoleCallAsync(driver, "step_over", new JsonObject(), owner);
+            var after = await LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "after" }, owner);
+            Assert.Equal("after", after["data"]?["name"]?.GetValue<string>());
+            var diff = await LegacyConsoleCallAsync(driver, "diff_snapshots", new JsonObject { ["name1"] = "before", ["name2"] = "after" }, other);
+            Assert.Contains(Assert.IsType<JsonArray>(diff["data"]?["changed"]), item => item?["name"]?.GetValue<string>() == "intVar");
+            _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+            var collection = await LegacyConsoleCallAsync(driver, "analyze_collection", new JsonObject { ["variables_reference"] = 1002, ["sample_size"] = 1 }, owner);
+            Assert.Equal(2, collection["data"]?["count"]?.GetValue<int>());
+            Assert.Equal(123d, collection["data"]?["sum"]?.GetValue<double>());
+            var summary = await LegacyConsoleCallAsync(driver, "summarize_object", new JsonObject { ["variables_reference"] = 1002 }, owner);
+            Assert.Equal("Item1", summary["data"]?["properties"]?[0]?["path"]?.GetValue<string>());
+            var cycle = await LegacyConsoleCallAsync(driver, "summarize_object", new JsonObject { ["variables_reference"] = 1010 }, owner);
+            Assert.Equal("self", cycle["data"]?["properties"]?[1]?["path"]?.GetValue<string>());
+            Assert.Equal("<circular ref>", cycle["data"]?["properties"]?[1]?["value"]?.GetValue<string>());
+            var third = await LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "third" }, owner);
+            Assert.Equal("third", third["data"]?["name"]?.GetValue<string>());
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+        var retained = await LegacyConsoleCallAsync(driver, "list_snapshots", new JsonObject(), other);
+        Assert.Equal(2, Assert.IsType<JsonArray>(retained["data"]?["snapshots"]).Count);
+        Assert.Equal("after", retained["data"]?["snapshots"]?[0]?["name"]?.GetValue<string>());
+        Assert.Equal("third", retained["data"]?["snapshots"]?[1]?["name"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InspectionUtilities_InvalidatedSnapshotIsNotStored()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsDelayedStackTraceLoading: true,
+                VariablesResponseMode: "hold-then-invalidated")), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "utility-owner" };
+        await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner);
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var pending = LegacyConsoleCallAsync(driver, "create_snapshot", new JsonObject { ["name"] = "stale" }, owner);
+            try
+            {
+                await driver.WaitForFixtureRecordAsync("inspection-response-gated", observation.Token);
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            }
+            finally { driver.ReleaseStackTraceResponse(); }
+            Assert.NotNull((await pending)["error"]);
+            Assert.Empty(Assert.IsType<JsonArray>((await LegacyConsoleCallAsync(driver, "list_snapshots", new JsonObject(), owner))["data"]?["snapshots"]));
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_BreakpointsLocalsAndEvaluation_UseCurrentStoppedEpoch()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
