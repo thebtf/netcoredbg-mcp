@@ -473,6 +473,15 @@ public sealed class StructuredContentSchemaParityTests
     {
         Assert.Equal("object", schema["type"]?.GetValue<string>());
 
+        if (schema["additionalProperties"] is JsonObject additionalSchema)
+        {
+            if (schema["maxProperties"] is JsonValue maximum)
+                Assert.True(content.Count <= maximum.GetValue<int>());
+            foreach (var property in content)
+                ValidateValue(definitions, additionalSchema, property.Value);
+            return;
+        }
+
         var exceptionBody = definitions["exceptionInfoSuccess"]?["properties"]?["exception"];
         var allowsAdditionalProperties = ReferenceEquals(schema, exceptionBody)
             || ReferenceEquals(schema, exceptionBody?["properties"]?["details"]);

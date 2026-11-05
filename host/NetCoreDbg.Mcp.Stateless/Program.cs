@@ -669,7 +669,17 @@ internal static class Program
                 return NotFound();
             }
 
-            return Success("debug_state_success", sessionId!, session.State);
+            var snapshot = session.GetStateWithSources();
+            var serialized = JsonSerializer.Serialize(new
+            {
+                kind = "debug_state_success",
+                debugSessionId = sessionId!,
+                state = new DebugStateContent(snapshot.State.Event, snapshot.State.StopReason, snapshot.State.ExitCode,
+                    snapshot.State.CurrentThreadId, snapshot.Sources, snapshot.Complete),
+            });
+            return Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes
+                ? Error("debug_state_too_large", "DEBUG_STATE_TOO_LARGE")
+                : SerializedResult(serialized, isError: false);
         }
 
         private ValueTask<CallToolResult> GetOutputAsync(
@@ -3494,6 +3504,14 @@ internal static class Program
             string? stopReason,
             int? exitCode,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? currentThreadId = null);
+
+        private sealed record DebugStateContent(
+            string? @event,
+            string? stopReason,
+            int? exitCode,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? currentThreadId,
+            IReadOnlyDictionary<string, DapLoadedSource>? loadedSources,
+            bool loadedSourcesComplete);
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);

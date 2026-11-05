@@ -51,6 +51,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
+    private readonly Dictionary<string, (DapLoadedSource Source, int Bytes)> _loadedSources = new(StringComparer.Ordinal);
+    private int _loadedSourceBytes;
+    private bool _loadedSourcesIncomplete;
+    private const int MaximumLoadedSourceStateBytes = 256 * 1024 - 4096;
     private readonly DapOutputBuffer _outputBuffer = new();
     private readonly object _runtimeInventoryGate = new();
     private readonly Dictionary<RuntimeModuleId, LinkedListNode<RuntimeModuleEntry>> _modules = [];
@@ -143,6 +147,85 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             lock (_stateGate)
             {
                 return _state;
+            }
+        }
+    }
+    internal (DapSessionState State, IReadOnlyDictionary<string, DapLoadedSource>? Sources, bool Complete) GetStateWithSources()
+    {
+        lock (_stateGate)
+        {
+            return (_state, _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
+                static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete);
+        }
+    }
+
+    private void InvalidateLoadedSources()
+    {
+        _loadedSources.Clear();
+        _loadedSourceBytes = 0;
+        _loadedSourcesIncomplete = true;
+    }
+
+    private void StoreLoadedSource(DapLoadedSource source)
+    {
+        var key = DapLoadedSources.Key(source);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(key).Length + JsonSerializer.SerializeToUtf8Bytes(source).Length + 2;
+        _loadedSources.TryGetValue(key, out var previous);
+        if ((_loadedSources.Count >= MaximumInspectionEntryCount && previous.Source is null)
+            || (long)_loadedSourceBytes - previous.Bytes + bytes > MaximumLoadedSourceStateBytes)
+        {
+            InvalidateLoadedSources();
+            return;
+        }
+        _loadedSourceBytes += bytes - previous.Bytes;
+        _loadedSources[key] = (source, bytes);
+    }
+
+    private void RefreshLoadedSources(JsonElement body)
+    {
+        lock (_stateGate)
+        {
+            try
+            {
+                var sources = DapLoadedSources.Parse(body);
+                _loadedSources.Clear();
+                _loadedSourceBytes = 0;
+                _loadedSourcesIncomplete = false;
+                foreach (var source in sources)
+                {
+                    StoreLoadedSource(source);
+                    if (_loadedSourcesIncomplete) break;
+                }
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException or OverflowException)
+            {
+                InvalidateLoadedSources();
+            }
+        }
+    }
+
+    private void HandleLoadedSourceEvent(JsonElement body)
+    {
+        lock (_stateGate)
+        {
+            if (_loadedSourcesIncomplete) return;
+            try
+            {
+                var reason = RequireString(body, "reason");
+                if (reason is not "new" and not "changed" and not "removed"
+                    || !body.TryGetProperty("source", out var sourceElement))
+                    throw new InvalidDataException("Malformed loadedSource transition.");
+                var source = DapLoadedSources.ParseSource(sourceElement);
+                if (reason == "removed")
+                {
+                    if (_loadedSources.Remove(DapLoadedSources.Key(source), out var removed))
+                        _loadedSourceBytes -= removed.Bytes;
+                }
+                else StoreLoadedSource(source);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException or OverflowException)
+            {
+                InvalidateLoadedSources();
             }
         }
     }
@@ -2370,6 +2453,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
         }
+        if (success.ValueKind == JsonValueKind.True && request.Command == "loadedSources")
+        {
+            RefreshLoadedSources(body);
+        }
 
         if (request.StepOver is { } stepOver)
         {
@@ -2541,6 +2628,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 break;
             case "output":
                 HandleOutputEvent(body);
+                break;
+            case "loadedSource":
+                HandleLoadedSourceEvent(body);
                 break;
             case "module":
             case "progressStart":
