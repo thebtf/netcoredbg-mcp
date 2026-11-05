@@ -5,10 +5,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DefineConstants>$(DefineConstants);NETCOREDBG_MODERN_MCP</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../NetCoreDbg.Mcp.Host/ProjectRootResolver.cs" Link="ProjectRootResolver.cs" />
+    <Compile Include="../NetCoreDbg.Mcp.Host/NativeCodeSearch.cs" Link="NativeCodeSearch.cs" />
+    <ProjectReference Include="../NetCoreDbg.Mcp.CodeSearch.Core/NetCoreDbg.Mcp.CodeSearch.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe.schema.json" Link="NativeScene/native-scene-probe.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe.schema.json" />

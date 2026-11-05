@@ -76,18 +76,29 @@ The local netcoredbg 3.1.3-1 on Windows code page 1251 corrupted non-ASCII
 environment names and values in both the native and installed Python paths
 (Engram #551). Do not assume Unicode environment parity from this option.
 
-Set `projectRoot` to an existing directory to load its optional
-`.netcoredbg-mcp.launch.json` (maximum 16 MiB). `launchProfile` selects a named
-profile; otherwise `defaultProfile` or `default` is used. Required inherited
-variables are applied first, then profile values, then direct `env` overrides.
-A missing requested profile or invalid file returns `START_DEBUG_LAUNCH_PROFILE_INVALID`;
-an unavailable root returns `START_DEBUG_PROJECT_UNAVAILABLE`. The optional
-`launchEnvironment` result contains names and counts, never values. Project-root
-discovery is not yet equivalent to Python: this native path uses the explicitly
-supplied root only.
+`start_debug` loads the optional `.netcoredbg-mcp.launch.json` (maximum 16 MiB)
+from the selected project. An explicit `projectRoot` takes precedence; otherwise
+the host uses `NETCOREDBG_PROJECT_ROOT`, `MCP_PROJECT_ROOT`, `--project`, a
+valid local MCP client root, then its startup directory. `--project-from-cwd`
+searches for solution, project, or Git markers before using the startup directory.
+A configured but unavailable operator scope fails closed rather than selecting a
+client root. Modern clients may receive `input_required` for client roots before
+the adapter starts.
+MCP roots are deprecated in protocol version 2026-07-28 but remain supported
+here for existing clients.
 
-This source-only path does not yet provide Python's complete pre-build,
-project-root discovery or launch-default behavior. Python remains the installed default.
+`launchProfile` selects a named profile; otherwise `defaultProfile` or `default`
+is used. Required inherited variables are applied first, then profile values,
+then direct `env` overrides. A missing requested profile or invalid file returns
+`START_DEBUG_LAUNCH_PROFILE_INVALID`; an unavailable root returns
+`START_DEBUG_PROJECT_UNAVAILABLE`. The optional `launchEnvironment` result
+contains names and counts, never values.
+
+The same project selection supports the source-built native `find_code_symbol`,
+`find_code_references`, and `get_source_context` tools. Their results do not
+report an implicit debug-session state. Python's full search and launch contract,
+including pre-build and launch defaults, remains incomplete in the native host.
+Python remains the installed default.
 
 In the source-built stateful host, `start_debug` also accepts an optional
 `breakpoints` array of up to 256 `{file, line}` entries. Each source file must

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
@@ -9,6 +10,267 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 [Trait("Coverage", "Exclude")]
 public sealed class DebuggerLaunchContractTests
 {
+#pragma warning disable MCP9005 // Exercise roots while older clients remain supported.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StartDebug_MissingProgram_ExplicitOrPinnedRootDoesNotRequestClientRoots(bool explicitRoot)
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var root = await CreateProfileRootAsync(scratch, "pinned-input");
+            await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync(options: new ModernMcpStartOptions(
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["NETCOREDBG_PROJECT_ROOT"] = explicitRoot ? null : root,
+                    ["MCP_PROJECT_ROOT"] = null,
+                }));
+            var meta = ModernMcpProcessDriver.CurrentMeta(formElicitation: true);
+            meta[MetaKeys.ClientCapabilities]!["roots"] = new JsonObject();
+            var arguments = new JsonObject();
+            if (explicitRoot) arguments["projectRoot"] = root;
+            var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync("tools/call",
+                new JsonObject { ["name"] = "start_debug", ["arguments"] = arguments, ["_meta"] = meta },
+                new RequestId("pinned-program-input"), timeout: TimeSpan.FromSeconds(10))));
+            Assert.Equal("input_required", result["resultType"]?.GetValue<string>());
+            var request = Assert.Single(Assert.IsType<JsonObject>(result["inputRequests"]));
+            Assert.Equal("elicitation/create", request.Value?["method"]?.GetValue<string>());
+            Assert.Empty(await driver.ReadNativeActionsAsync());
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_MissingProgramAndRoots_AreRequestedTogetherAndOneRetryStarts()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var startup = await CreateProfileRootAsync(scratch, "combined-startup");
+            var root = await CreateProfileRootAsync(scratch, "combined-client");
+            await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync(options: new ModernMcpStartOptions(
+                StartupDirectory: startup,
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null }));
+            var meta = ModernMcpProcessDriver.CurrentMeta(formElicitation: true);
+            meta[MetaKeys.ClientCapabilities]!["roots"] = new JsonObject();
+            var initial = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync("tools/call",
+                new JsonObject { ["name"] = "start_debug", ["arguments"] = new JsonObject(), ["_meta"] = meta.DeepClone() },
+                new RequestId("combined-inputs"), timeout: TimeSpan.FromSeconds(10))));
+            Assert.Equal("input_required", initial["resultType"]?.GetValue<string>());
+            var requests = Assert.IsType<JsonObject>(initial["inputRequests"]);
+            Assert.Equal(2, requests.Count);
+            var programRequest = Assert.Single(requests, entry => entry.Value?["method"]?.GetValue<string>() == "elicitation/create");
+            var rootsRequest = Assert.Single(requests, entry => entry.Value?["method"]?.GetValue<string>() == "roots/list");
+            Assert.Empty(await driver.ReadNativeActionsAsync());
+            await Task.Delay(TimeSpan.FromMilliseconds(2300));
+            Assert.Empty(await driver.ReadNativeActionsAsync());
+
+            JsonObject Retry(string action) => new()
+            {
+                ["name"] = "start_debug",
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = meta.DeepClone(),
+                ["inputResponses"] = new JsonObject
+                {
+                    [programRequest.Key] = new JsonObject { ["action"] = action, ["content"] = new JsonObject { ["program"] = driver.InertProgramPath } },
+                    [rootsRequest.Key] = new JsonObject { ["roots"] = new JsonArray(new JsonObject { ["uri"] = new Uri(root).AbsoluteUri }) },
+                },
+            };
+            var declined = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync("tools/call", Retry("decline"),
+                new RequestId("combined-declined"), timeout: TimeSpan.FromSeconds(10))));
+            Assert.True(declined["isError"]?.GetValue<bool>() ?? false);
+            Assert.Equal("START_DEBUG_PROGRAM_REQUIRED", declined["structuredContent"]?["error"]?.GetValue<string>());
+            Assert.Empty(await driver.ReadNativeActionsAsync());
+
+            var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync("tools/call", Retry("accept"),
+                new RequestId("combined-accepted"), timeout: TimeSpan.FromSeconds(10))));
+            Assert.Equal("complete", result["resultType"]?.GetValue<string>());
+            Assert.False(result["isError"]?.GetValue<bool>() ?? true);
+            var content = Assert.IsType<JsonObject>(result["structuredContent"]);
+            Assert.Equal("combined-client", content["launchEnvironment"]?["profile"]?.GetValue<string>());
+            var sessionId = Assert.IsType<string>(content["debugSessionId"]?.GetValue<string>());
+            await driver.StopSingleControlledSessionAsync(sessionId);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_ModernPerRequestRoots_DoNotLeakBetweenCalls()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var startup = await CreateProfileRootAsync(scratch, "modern-startup");
+            var first = await CreateProfileRootAsync(scratch, "modern-first");
+            var second = await CreateProfileRootAsync(scratch, "modern-second");
+            var calls = 0;
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: startup,
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: _ =>
+                {
+                    var uri = Interlocked.Increment(ref calls) switch
+                    {
+                        1 => new Uri(first).AbsoluteUri,
+                        2 => new Uri(second).AbsoluteUri,
+                        _ => "file://remote.invalid/share",
+                    };
+                    return ValueTask.FromResult(new ListRootsResult { Roots = [new Root { Uri = uri }] });
+                }));
+            for (var index = 0; index < 3; index++)
+            {
+                var meta = ModernMcpProcessDriver.CurrentMeta();
+                meta[MetaKeys.ClientCapabilities]!["roots"] = new JsonObject();
+                await AssertProfileAsync(driver, index switch { 0 => "modern-first", 1 => "modern-second", _ => "modern-startup" },
+                    null, meta, $"modern-root-{index}");
+            }
+            Assert.Equal(3, calls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_OperatorPinsAndExplicitRoot_HavePrecedenceAndInvalidPinFailsClosed()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var envRoot = await CreateProfileRootAsync(scratch, "env");
+            var otherEnvRoot = await CreateProfileRootAsync(scratch, "other-env");
+            var argumentRoot = await CreateProfileRootAsync(scratch, "argument");
+            var explicitRoot = await CreateProfileRootAsync(scratch, "explicit");
+            var rootsCalls = 0;
+            var env = new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = envRoot, ["MCP_PROJECT_ROOT"] = otherEnvRoot };
+            await using (var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                AdditionalEnvironment: env, HostArguments: ["--project", argumentRoot], ClientProtocolVersion: "2025-11-25",
+                RootsHandler: _ => { Interlocked.Increment(ref rootsCalls); return ValueTask.FromResult(new ListRootsResult { Roots = [new Root { Uri = new Uri(argumentRoot).AbsoluteUri }] }); })))
+            {
+                await AssertProfileAsync(driver, "env", null, new JsonObject(), "pinned-env");
+                await AssertProfileAsync(driver, "explicit", explicitRoot, new JsonObject(), "explicit-over-pin");
+                Assert.Equal(0, rootsCalls);
+            }
+
+            env["NETCOREDBG_PROJECT_ROOT"] = null;
+            await using (var secondary = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                AdditionalEnvironment: env, HostArguments: ["--project", argumentRoot])))
+                await AssertProfileAsync(secondary, "other-env", null, ModernMcpProcessDriver.CurrentMeta(), "secondary-env");
+
+            env["MCP_PROJECT_ROOT"] = null;
+            await using (var argument = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                AdditionalEnvironment: env, HostArguments: ["--project", argumentRoot])))
+                await AssertProfileAsync(argument, "argument", null, ModernMcpProcessDriver.CurrentMeta(), "project-argument");
+
+            env["NETCOREDBG_PROJECT_ROOT"] = Path.Combine(scratch, "missing-private-pin");
+            env["MCP_PROJECT_ROOT"] = null;
+            await using var invalid = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                AdditionalEnvironment: env, ClientProtocolVersion: "2025-11-25",
+                RootsHandler: _ => { Interlocked.Increment(ref rootsCalls); return ValueTask.FromResult(new ListRootsResult { Roots = [new Root { Uri = new Uri(argumentRoot).AbsoluteUri }] }); }));
+            var rejected = ModernMcpProcessDriver.RequireResult(await invalid.CallToolRawAsync("start_debug",
+                new JsonObject { ["program"] = invalid.InertProgramPath }, new JsonObject(), new RequestId("invalid-pin"), timeout: TimeSpan.FromSeconds(10)));
+            Assert.True(rejected["isError"]?.GetValue<bool>() ?? false);
+            Assert.Equal("START_DEBUG_PROJECT_UNAVAILABLE", rejected["structuredContent"]?["error"]?.GetValue<string>());
+            Assert.DoesNotContain("missing-private-pin", rejected.ToJsonString(), StringComparison.Ordinal);
+            Assert.Empty(await invalid.ReadNativeActionsAsync());
+            Assert.Equal(0, rootsCalls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_RootsAreResolvedPerCall_AndInvalidRootsFallBackToStartupDirectory()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var startup = await CreateProfileRootAsync(scratch, "startup");
+            var first = await CreateProfileRootAsync(scratch, "first");
+            var second = await CreateProfileRootAsync(scratch, "second");
+            var calls = 0;
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: startup, ClientProtocolVersion: "2025-11-25",
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: _ =>
+                {
+                    var root = Interlocked.Increment(ref calls) switch { 1 => first, 2 => second, _ => null };
+                    return ValueTask.FromResult(new ListRootsResult
+                    {
+                        Roots = root is null
+                        ? [new Root { Uri = "https://example.invalid/project" }, new Root { Uri = "file://remote.invalid/share" }]
+                        : [new Root { Uri = "file://remote.invalid/share" }, new Root { Uri = new Uri(root).AbsoluteUri }]
+                    });
+                }));
+            await AssertProfileAsync(driver, "first", null, new JsonObject(), "roots-first");
+            await AssertProfileAsync(driver, "second", null, new JsonObject(), "roots-second");
+            await AssertProfileAsync(driver, "startup", null, new JsonObject(), "roots-invalid");
+            Assert.Equal(3, calls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_NoRootsCapability_UsesStartupMarker()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var root = await CreateProfileRootAsync(scratch, "marker");
+            var child = Directory.CreateDirectory(Path.Combine(root, "child")).FullName;
+            await File.WriteAllTextAsync(Path.Combine(root, "example.sln"), "");
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: child, HostArguments: ["--project-from-cwd"],
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null }));
+            await AssertProfileAsync(driver, "marker", null, ModernMcpProcessDriver.CurrentMeta(), "no-roots");
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_RootsTimeoutFallsBackToStartupDirectory()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var startup = await CreateProfileRootAsync(scratch, "timeout");
+            var calls = 0;
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: startup, ClientProtocolVersion: "2025-11-25",
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: async ct =>
+                {
+                    Interlocked.Increment(ref calls);
+                    await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                    return new ListRootsResult { Roots = [] };
+                }));
+            await AssertProfileAsync(driver, "timeout", null, new JsonObject(), "roots-timeout");
+            Assert.Equal(1, calls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    private static async Task<string> CreateProfileRootAsync(string parent, string name)
+    {
+        var root = Directory.CreateDirectory(Path.Combine(parent, name)).FullName;
+        var profile = new JsonObject { ["defaultProfile"] = name, ["profiles"] = new JsonObject { [name] = new JsonObject { ["env"] = new JsonObject { ["NCD_PROJECT_ROOT_TEST"] = "private-profile-value" } } } };
+        await File.WriteAllTextAsync(Path.Combine(root, ".netcoredbg-mcp.launch.json"), profile.ToJsonString());
+        return root;
+    }
+
+    private static async Task AssertProfileAsync(ModernMcpProcessDriver driver, string expected, string? explicitRoot, JsonObject meta, string id)
+    {
+        var arguments = new JsonObject { ["program"] = driver.InertProgramPath };
+        if (explicitRoot is not null) arguments["projectRoot"] = explicitRoot;
+        var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", arguments, meta, new RequestId(id), timeout: TimeSpan.FromSeconds(10)));
+        Assert.False(result["isError"]?.GetValue<bool>() ?? true);
+        var content = Assert.IsType<JsonObject>(result["structuredContent"]);
+        Assert.Equal(expected, content["launchEnvironment"]?["profile"]?.GetValue<string>());
+        Assert.DoesNotContain("private-profile-value", result.ToJsonString(), StringComparison.Ordinal);
+        var sessionId = Assert.IsType<string>(content["debugSessionId"]?.GetValue<string>());
+        var stopped = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = sessionId }, meta, new RequestId(id + "-stop"), timeout: TimeSpan.FromSeconds(10)));
+        Assert.False(stopped["isError"]?.GetValue<bool>() ?? true);
+    }
+#pragma warning restore MCP9005
+
     [Fact]
     public async Task StartDebug_ProjectProfile_MergesInheritedAndDirectEnvironmentWithoutLeakingValues()
     {
@@ -113,13 +375,13 @@ public sealed class DebuggerLaunchContractTests
         {
             ["program"] = driver.InertProgramPath,
             ["env"] = new JsonObject { [removeName] = null, ["NCD_LAUNCH_TEST_VALUE"] = "child-new", ["NCD_LAUNCH_TEST_NEW"] = "" },
-        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-first")));
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-first"), timeout: TimeSpan.FromSeconds(10)));
         Assert.False(first["isError"]?.GetValue<bool>() ?? true, "Valid environment overrides must start a session.");
         var firstId = Assert.IsType<string>(first["structuredContent"]?["debugSessionId"]?.GetValue<string>());
         var second = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
         {
             ["program"] = driver.InertProgramPath,
-        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-second")));
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-second"), timeout: TimeSpan.FromSeconds(10)));
         Assert.False(second["isError"]?.GetValue<bool>() ?? true);
         var secondId = Assert.IsType<string>(second["structuredContent"]?["debugSessionId"]?.GetValue<string>());
 
@@ -346,7 +608,7 @@ public sealed class DebuggerLaunchContractTests
             ["args"] = new JsonArray(),
             ["cwd"] = cwd,
             ["stopAtEntry"] = false,
-        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-options-empty")));
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-options-empty"), timeout: TimeSpan.FromSeconds(10)));
         Assert.False(started["isError"]?.GetValue<bool>() ?? true);
         var session = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
         var launch = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "launch");

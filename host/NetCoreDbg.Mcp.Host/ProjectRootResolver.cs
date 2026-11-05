@@ -1,6 +1,11 @@
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
+#if NETCOREDBG_MODERN_MCP
+// Roots remain functional for supported older clients; remove this with that compatibility path.
+#pragma warning disable MCP9005
+#endif
+
 namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
@@ -20,7 +25,7 @@ internal sealed class ProjectRootResolver
     private readonly bool _projectFromCwd;
     private readonly string _startupCwd;
 
-    private ProjectRootResolver(
+    internal ProjectRootResolver(
         string? netCoreDbgProjectRoot,
         string? mcpProjectRoot,
         string? explicitProjectPath,
@@ -69,7 +74,11 @@ internal sealed class ProjectRootResolver
             Path.GetFullPath(startupCwd));
     }
 
-    internal async ValueTask<string?> ResolveAsync(McpServer server, CancellationToken cancellationToken)
+    internal async ValueTask<string?> ResolveAsync(McpServer server, CancellationToken cancellationToken
+#if NETCOREDBG_MODERN_MCP
+        , IDictionary<string, InputResponse>? inputResponses = null
+#endif
+        )
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -80,16 +89,45 @@ internal sealed class ProjectRootResolver
             return ResolveOperatorScope();
         }
 
-        var clientRoot = await TryResolveClientRootAsync(server, cancellationToken).ConfigureAwait(false);
+        string? clientRoot = null;
+        if (SupportsClientRoots(server))
+        {
+#if NETCOREDBG_MODERN_MCP
+            if (server.IsMrtrSupported)
+            {
+                const string rootsRequestId = "project_root_roots";
+                if (inputResponses is null || !inputResponses.TryGetValue(rootsRequestId, out var response))
+                    throw new InputRequiredException(new Dictionary<string, InputRequest>
+                    {
+                        [rootsRequestId] = InputRequest.ForRootsList(new ListRootsRequestParams()),
+                    });
+                try
+                {
+                    clientRoot = SelectClientRoot(response.Deserialize(InputResponse.ListRootsResultJsonTypeInfo), cancellationToken);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
+            else
+#endif
+            {
+                clientRoot = await TryResolveClientRootAsync(server, cancellationToken).ConfigureAwait(false);
+            }
+        }
         if (clientRoot is not null)
         {
             return clientRoot;
         }
+        cancellationToken.ThrowIfCancellationRequested();
 
         return _projectFromCwd
             ? FindDotNetProjectRoot(_startupCwd)
             : TryGetDirectory(_startupCwd, out var startupRoot) ? startupRoot : null;
     }
+
+    internal static bool SupportsClientRoots(McpServer server) => server.ClientCapabilities?.Roots is not null;
 
     private bool HasOperatorScope() =>
         !string.IsNullOrEmpty(_netCoreDbgProjectRoot)
@@ -123,13 +161,30 @@ internal sealed class ProjectRootResolver
         {
             return null;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#if NETCOREDBG_MODERN_MCP
+        catch (InputRequiredException)
+        {
+            throw;
+        }
+#endif
         catch
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // A client without roots support (or an invalid roots response) is equivalent to
             // Python's failed ctx.session.list_roots() fallback.
             return null;
         }
+        return SelectClientRoot(roots, cancellationToken);
+    }
 
+    private static string? SelectClientRoot(ListRootsResult? roots, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (roots?.Roots is null) return null;
         foreach (var root in roots.Roots)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -241,3 +296,7 @@ internal sealed class ProjectRootResolver
         }
     }
 }
+
+#if NETCOREDBG_MODERN_MCP
+#pragma warning restore MCP9005
+#endif

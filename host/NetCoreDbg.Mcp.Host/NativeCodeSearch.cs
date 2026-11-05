@@ -29,12 +29,18 @@ internal sealed class NativeCodeSearch
     ];
 
     private readonly ProjectRootResolver _projectRootResolver;
-    private readonly RelaySession _session;
+    private readonly CancellationToken _sessionEndingToken;
 
-    internal NativeCodeSearch(ProjectRootResolver projectRootResolver, RelaySession session)
+    private readonly bool _useModernResultEnvelope;
+
+    internal NativeCodeSearch(
+        ProjectRootResolver projectRootResolver,
+        CancellationToken sessionEndingToken,
+        bool useModernResultEnvelope = false)
     {
         _projectRootResolver = projectRootResolver;
-        _session = session;
+        _sessionEndingToken = sessionEndingToken;
+        _useModernResultEnvelope = useModernResultEnvelope;
     }
 
     internal static bool IsNativeTool(string name) => NativeCodeSearchCatalog.IsNativeTool(name);
@@ -45,16 +51,16 @@ internal sealed class NativeCodeSearch
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
-            _session.SessionEndingToken);
+            _sessionEndingToken);
 
         try
         {
             var arguments = context.Params.Arguments;
             return context.Params.Name switch
             {
-                "find_code_symbol" => await FindCodeSymbolAsync(context.Server, arguments, linked.Token).ConfigureAwait(false),
-                "find_code_references" => await FindCodeReferencesAsync(context.Server, arguments, linked.Token).ConfigureAwait(false),
-                "get_source_context" => await GetSourceContextAsync(context.Server, arguments, linked.Token).ConfigureAwait(false),
+                "find_code_symbol" => await FindCodeSymbolAsync(context, arguments, linked.Token).ConfigureAwait(false),
+                "find_code_references" => await FindCodeReferencesAsync(context, arguments, linked.Token).ConfigureAwait(false),
+                "get_source_context" => await GetSourceContextAsync(context, arguments, linked.Token).ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Unsupported native code-search tool: {context.Params.Name}"),
             };
         }
@@ -64,6 +70,12 @@ internal sealed class NativeCodeSearch
             // matching request cancellation and interrupts both roots/list and file scanning.
             throw;
         }
+#if NETCOREDBG_MODERN_MCP
+        catch (InputRequiredException)
+        {
+            throw;
+        }
+#endif
         catch (Exception ex)
         {
             return Error(ex.Message);
@@ -71,13 +83,13 @@ internal sealed class NativeCodeSearch
     }
 
     private async ValueTask<CallToolResult> FindCodeSymbolAsync(
-        McpServer server,
+        RequestContext<CallToolRequestParams> context,
         IDictionary<string, JsonElement>? arguments,
         CancellationToken cancellationToken)
     {
         var name = RequiredString(arguments, "name");
         var kind = OptionalString(arguments, "kind");
-        var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
+        var engine = await CreateEngineAsync(context, cancellationToken).ConfigureAwait(false);
         var results = ToJson(engine.FindCodeSymbol(name, kind, cancellationToken));
         return Success(new JsonObject
         {
@@ -88,13 +100,13 @@ internal sealed class NativeCodeSearch
     }
 
     private async ValueTask<CallToolResult> FindCodeReferencesAsync(
-        McpServer server,
+        RequestContext<CallToolRequestParams> context,
         IDictionary<string, JsonElement>? arguments,
         CancellationToken cancellationToken)
     {
         var name = RequiredString(arguments, "name");
         var maxResults = OptionalInt32(arguments, "max_results", 1000);
-        var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
+        var engine = await CreateEngineAsync(context, cancellationToken).ConfigureAwait(false);
         var results = ToJson(engine.FindCodeReferences(name, maxResults, cancellationToken));
         return Success(new JsonObject
         {
@@ -105,23 +117,29 @@ internal sealed class NativeCodeSearch
     }
 
     private async ValueTask<CallToolResult> GetSourceContextAsync(
-        McpServer server,
+        RequestContext<CallToolRequestParams> context,
         IDictionary<string, JsonElement>? arguments,
         CancellationToken cancellationToken)
     {
         var file = RequiredString(arguments, "file");
         var line = RequiredInt32(arguments, "line");
         var radius = OptionalInt32(arguments, "radius", 10);
-        var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
+        var engine = await CreateEngineAsync(context, cancellationToken).ConfigureAwait(false);
         var sourceContext = ToJson(engine.GetSourceContext(file, line, radius, cancellationToken));
         sourceContext["project_root"] = engine.ProjectRoot;
         return Success(sourceContext);
     }
 
 
-    private async ValueTask<SymbolSearchEngine> CreateEngineAsync(McpServer server, CancellationToken cancellationToken)
+    private async ValueTask<SymbolSearchEngine> CreateEngineAsync(
+        RequestContext<CallToolRequestParams> context,
+        CancellationToken cancellationToken)
     {
-        var projectRoot = await _projectRootResolver.ResolveAsync(server, cancellationToken).ConfigureAwait(false);
+        var projectRoot = await _projectRootResolver.ResolveAsync(context.Server, cancellationToken
+#if NETCOREDBG_MODERN_MCP
+            , context.Params.InputResponses
+#endif
+            ).ConfigureAwait(false);
         if (projectRoot is null)
         {
             throw new InvalidOperationException(UnconfiguredProjectMessage);
@@ -238,21 +256,25 @@ internal sealed class NativeCodeSearch
     }
 
 
-    private static CallToolResult Success(JsonObject data) => Result(new JsonObject
-    {
-        ["state"] = IdleState,
-        ["next_actions"] = ActionsArray(),
-        ["message"] = IdleMessage,
-        ["data"] = data,
-    }, isError: false);
+    private CallToolResult Success(JsonObject data) => _useModernResultEnvelope
+        ? Result(new JsonObject { ["data"] = data }, isError: false)
+        : Result(new JsonObject
+        {
+            ["state"] = IdleState,
+            ["next_actions"] = ActionsArray(),
+            ["message"] = IdleMessage,
+            ["data"] = data,
+        }, isError: false);
 
-    private static CallToolResult Error(string error) => Result(new JsonObject
-    {
-        ["error"] = error,
-        ["state"] = IdleState,
-        ["next_actions"] = ActionsArray(),
-        ["message"] = $"Error: {error}. Try one of the suggested next_actions.",
-    }, isError: false);
+    private CallToolResult Error(string error) => _useModernResultEnvelope
+        ? Result(new JsonObject { ["error"] = error }, isError: true)
+        : Result(new JsonObject
+        {
+            ["error"] = error,
+            ["state"] = IdleState,
+            ["next_actions"] = ActionsArray(),
+            ["message"] = $"Error: {error}. Try one of the suggested next_actions.",
+        }, isError: false);
 
     private static JsonArray ActionsArray()
     {
@@ -305,7 +327,7 @@ internal static class NativeCodeSearchCatalog
 
     }
 
-    private static Tool Definition(string name) => name switch
+    internal static Tool Definition(string name) => name switch
     {
         "find_code_symbol" => Tool(
             name,

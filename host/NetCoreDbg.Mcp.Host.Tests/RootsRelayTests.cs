@@ -86,6 +86,54 @@ public sealed class RootsRelayTests
         return builder.Build();
     }
 
+    [Fact]
+    public async Task ProjectRootResolver_CallerCancellationDoesNotFallBackToStartup()
+    {
+        var channel = new DuplexChannel();
+        var resolver = new ProjectRootResolver(null, null, null, false, Environment.CurrentDirectory);
+        using var cancellation = new CancellationTokenSource();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var server = FakePythonServer.Start(channel, new McpServerOptions
+        {
+            ServerInfo = new Implementation { Name = "roots-cancellation-test", Version = "1.0" },
+            Capabilities = new ServerCapabilities { Tools = new ToolsCapability() },
+            Handlers = new McpServerHandlers
+            {
+                CallToolHandler = async (context, _) =>
+                {
+                    string outcome;
+                    try
+                    {
+                        await resolver.ResolveAsync(context.Server, cancellation.Token);
+                        outcome = "fallback";
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        outcome = "cancelled";
+                    }
+                    return new CallToolResult { Content = [new TextContentBlock { Text = outcome }] };
+                },
+            },
+        });
+        await using var client = await McpClient.CreateAsync(channel.CreateClientTransport(), new McpClientOptions
+        {
+            Handlers = new McpClientHandlers
+            {
+                RootsHandler = async (_, ct) =>
+                {
+                    entered.TrySetResult();
+                    await Task.Delay(Timeout.Infinite, ct);
+                    return new ListRootsResult { Roots = [] };
+                },
+            },
+        });
+        var pending = client.CallToolAsync(new CallToolRequestParams { Name = "resolve" }).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        cancellation.Cancel();
+        var result = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("cancelled", Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text);
+    }
+
     // ---- ProjectCapabilities: pure per-instance projection, no I/O ----
 
     [Fact]
