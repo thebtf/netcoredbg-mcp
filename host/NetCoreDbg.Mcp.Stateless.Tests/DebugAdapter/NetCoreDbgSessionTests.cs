@@ -683,6 +683,44 @@ public sealed class NetCoreDbgSessionTests
         }
     }
 
+    [Fact]
+    public async Task Step_ImplicitThread_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "hold"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.StepOptionalThreadAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("next", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("next-response-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+
 
 
     [Fact]

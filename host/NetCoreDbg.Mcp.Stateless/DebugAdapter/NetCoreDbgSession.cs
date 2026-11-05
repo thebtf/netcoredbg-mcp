@@ -708,7 +708,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return DapCallStackResult.Succeeded(normalized, totalFrames, response.InspectionContextId);
     }
 
-    internal async Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken)
+    internal Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken) =>
+        GetExceptionInfoForOptionalThreadAsync(threadId, cancellationToken);
+
+    internal async Task<DapExceptionInfoResult> GetExceptionInfoForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken)
     {
         PendingRequest request;
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -722,13 +725,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
             }
 
-            var target = CaptureCallStackTarget(threadId, includeInspectionContext: true);
+            var target = CaptureOptionalCallStackTarget(threadId, includeInspectionContext: true);
             if (target is null)
             {
                 return DapExceptionInfoResult.Refused;
             }
 
-            request = await BeginRequestAsync("exceptionInfo", new { threadId }, _requestTimeout,
+            request = await BeginRequestAsync("exceptionInfo", new { threadId = target.Value.ThreadId }, _requestTimeout,
                 cancellationToken, stackTraceTarget: target).ConfigureAwait(false);
         }
         finally
@@ -1207,7 +1210,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapStepOverResult> StepOutAsync(int threadId, CancellationToken cancellationToken) =>
         StepAsync(threadId, DapStepKind.Out, cancellationToken);
 
-    private async Task<DapStepOverResult> StepAsync(int threadId, DapStepKind kind, CancellationToken cancellationToken)
+    internal Task<DapStepOverResult> StepForOptionalThreadAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken) =>
+        StepAsync(threadId, kind, cancellationToken);
+
+    private async Task<DapStepOverResult> StepAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -1223,14 +1229,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                int selectedThreadId;
                 lock (_stateGate)
                 {
-                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    var selected = threadId ?? _state.CurrentThreadId;
+                    if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapStepOverResult.Refused;
                     }
 
-                    active = new StepOverRecord(threadId, kind, cancellationToken);
+                    selectedThreadId = resolved;
+                    active = new StepOverRecord(selectedThreadId, kind, cancellationToken);
                     _activeStepOver = active;
                     _state = _state with { CurrentThreadId = null };
                     ClearCallStackEligibility();
@@ -1239,7 +1249,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 request = await BeginRequestAsync(
                     active.Command,
-                    new { threadId },
+                    new { threadId = selectedThreadId },
                     _requestTimeout,
                     cancellationToken,
                     stepOver: active).ConfigureAwait(false);
@@ -1269,7 +1279,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 Interlocked.Exchange(ref _stepOverDrainRequired, 1);
                 closeAdmission = true;
-                return DapStepOverResult.TimedOut(threadId);
+                return DapStepOverResult.TimedOut(active!.ThreadId);
             }
             catch (Exception exception)
             {

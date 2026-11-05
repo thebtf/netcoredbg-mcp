@@ -630,8 +630,7 @@
     "stepOverArguments": {
       "type": "object",
       "required": [
-        "debugSessionId",
-        "threadId"
+        "debugSessionId"
       ],
       "properties": {
         "debugSessionId": {
@@ -639,12 +638,33 @@
           "minLength": 1
         },
         "threadId": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": -2147483648,
           "maximum": 2147483647
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        }
+      ]
     },
     "stepIntoArguments": {
       "$ref": "#/$defs/stepOverArguments"
@@ -691,6 +711,9 @@
           }
         }
       ]
+    },
+    "getExceptionInfoArguments": {
+      "$ref": "#/$defs/continueArguments"
     },
     "pauseArguments": {
       "type": "object",

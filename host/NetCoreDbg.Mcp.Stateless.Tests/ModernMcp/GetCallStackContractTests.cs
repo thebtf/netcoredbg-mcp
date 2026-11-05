@@ -1016,13 +1016,51 @@ public sealed class GetCallStackContractTests
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static item => item?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static item => item?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(2, properties.Count);
+        Assert.Equal(3, properties.Count);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static item => item?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
+
+    [Theory]
+    [InlineData("omitted")]
+    [InlineData("null")]
+    [InlineData("alias")]
+    [InlineData("alias-null")]
+    [InlineData("zero")]
+    public async Task GetExceptionInfo_OptionalThread_UsesObservedStoppedThread(string input)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, $"exception-optional-{input}-start");
+        await ExceptionInfoReaderBarrierAsync(driver, session, $"exception-optional-{input}-barrier");
+        var args = new JsonObject { ["debugSessionId"] = session };
+        if (input == "null") args["threadId"] = null;
+        if (input == "alias") args["thread_id"] = JsonNode.Parse("1.0");
+        if (input == "alias-null") args["thread_id"] = null;
+        if (input == "zero") args["threadId"] = 0;
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, args,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"exception-optional-{input}")), isError: false);
+        Assert.Equal("exception_info_success", result["kind"]?.GetValue<string>());
+        AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), input == "zero" ? 0 : 1);
+    }
+
+    [Fact]
+    public async Task GetExceptionInfo_OptionalThreadWithoutCurrentStop_RefusesWithoutWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(lifecycleMode: "partial-stop-missing-thread"));
+        var session = await StartStoppedSessionAsync(driver, "exception-optional-missing-start");
+        await ExceptionInfoReaderBarrierAsync(driver, session, "exception-optional-missing-barrier");
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-optional-missing")), isError: true);
+        AssertExceptionInfoFailure(result, "refused");
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
 
     [Theory]
     [InlineData(1, "success", "always")]
@@ -1149,10 +1187,10 @@ public sealed class GetCallStackContractTests
     [InlineData("missing-session")]
     [InlineData("blank-session")]
     [InlineData("non-string-session")]
-    [InlineData("missing-thread")]
-    [InlineData("null-thread")]
+    [InlineData("conflicting-thread-aliases")]
     [InlineData("string-thread")]
     [InlineData("fractional-thread")]
+    [InlineData("inexact-thread-alias")]
     [InlineData("thread-above-int32")]
     [InlineData("thread-below-int32")]
     [InlineData("extra-field")]
@@ -1167,10 +1205,10 @@ public sealed class GetCallStackContractTests
             case "missing-session": arguments.Remove("debugSessionId"); break;
             case "blank-session": arguments["debugSessionId"] = " \t"; break;
             case "non-string-session": arguments["debugSessionId"] = 17; break;
-            case "missing-thread": arguments.Remove("threadId"); break;
-            case "null-thread": arguments["threadId"] = null; break;
+            case "conflicting-thread-aliases": arguments["thread_id"] = null; break;
             case "string-thread": arguments["threadId"] = "1"; break;
             case "fractional-thread": arguments["threadId"] = 1.5; break;
+            case "inexact-thread-alias": arguments.Remove("threadId"); arguments["thread_id"] = JsonNode.Parse("1.0000000000000000001"); break;
             case "thread-above-int32": arguments["threadId"] = 2_147_483_648L; break;
             case "thread-below-int32": arguments["threadId"] = -2_147_483_649L; break;
             case "extra-field": arguments["inspectionContextId"] = "not-an-input"; break;
@@ -1229,14 +1267,16 @@ public sealed class GetCallStackContractTests
     }
 
     [Theory]
-    [InlineData("hold-then-continued")]
-    [InlineData("hold-then-continued-restop")]
-    public async Task GetExceptionInfo_ResponseAfterReaderOrderedInvalidation_RefusesStaleBodyWithoutRetry(string mode)
+    [InlineData("hold-then-continued", false)]
+    [InlineData("hold-then-continued", true)]
+    [InlineData("hold-then-continued-restop", false)]
+    [InlineData("hold-then-continued-restop", true)]
+    public async Task GetExceptionInfo_ResponseAfterReaderOrderedInvalidation_RefusesStaleBodyWithoutRetry(string mode, bool implicitThread)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(mode), startupTimeout: TimeSpan.FromSeconds(10));
         var session = await StartStoppedSessionAsync(driver, "exception-info-held-start");
         var before = await driver.ReadNativeActionsAsync();
-        var response = driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+        var response = driver.CallToolRawAsync(ExceptionInfoTool, implicitThread ? new JsonObject { ["debugSessionId"] = session } : Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
             new RequestId("exception-info-held"), timeout: TimeSpan.FromSeconds(35));
         try
         {

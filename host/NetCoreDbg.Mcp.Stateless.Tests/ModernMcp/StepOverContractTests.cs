@@ -16,7 +16,7 @@ public sealed class StepOverContractTests
     {
         { "missing_arguments", null },
         { "omitted_debug_session_id", new JsonObject { ["threadId"] = 1 } },
-        { "omitted_thread_id", new JsonObject { ["debugSessionId"] = "opaque" } },
+        { "conflicting_aliases", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 } },
         { "empty_token", new JsonObject { ["debugSessionId"] = string.Empty, ["threadId"] = 1 } },
         { "whitespace_token", new JsonObject { ["debugSessionId"] = " \t", ["threadId"] = 1 } },
         { "non_string_token", new JsonObject { ["debugSessionId"] = 1, ["threadId"] = 1 } },
@@ -45,10 +45,11 @@ public sealed class StepOverContractTests
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
@@ -501,7 +502,7 @@ public sealed class StepOverContractTests
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             Tool,
-            Arguments(debugSessionId, 1),
+            new JsonObject { ["debugSessionId"] = debugSessionId },
             ModernMcpProcessDriver.CurrentMeta(),
             new RequestId("step-over-timeout"),
             timeout: TimeSpan.FromSeconds(35)), isError: false);

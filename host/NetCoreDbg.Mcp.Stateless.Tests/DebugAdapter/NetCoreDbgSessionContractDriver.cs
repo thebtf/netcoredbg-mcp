@@ -162,6 +162,13 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         _ = await AwaitAsyncResult(method.Invoke(_session, [null, cancellationToken]), "ContinueForOptionalThreadAsync", CancellationToken.None);
     }
 
+    public async Task StepOptionalThreadAsync(CancellationToken cancellationToken)
+    {
+        var kind = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.DebugAdapter.DapStepKind");
+        var method = RequireTaskMethod(_session.GetType(), "StepForOptionalThreadAsync", typeof(int?), kind, typeof(CancellationToken));
+        _ = await AwaitAsyncResult(method.Invoke(_session, [null, Enum.Parse(kind, "Over"), cancellationToken]), "StepForOptionalThreadAsync", CancellationToken.None);
+    }
+
     public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)
     {
         var add = RequireTaskMethod(_session.GetType(), "AddBreakpointAsync", typeof(string), typeof(int), typeof(CancellationToken));

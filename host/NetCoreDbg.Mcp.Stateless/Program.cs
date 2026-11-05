@@ -1512,7 +1512,7 @@ internal static class Program
 
         private async ValueTask<CallToolResult> GetExceptionInfoAsync(CallToolRequestParams request, CancellationToken cancellationToken)
         {
-            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            if (!TryReadContinueArguments(request.Arguments, out var arguments))
             {
                 return InvalidArguments(GetExceptionInfo);
             }
@@ -1539,7 +1539,7 @@ internal static class Program
                 }
 
                 using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
-                var result = await session.GetExceptionInfoAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                var result = await session.GetExceptionInfoForOptionalThreadAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
                 switch (result.Outcome)
                 {
                     case DapExceptionInfoOutcome.Unsupported:
@@ -1864,7 +1864,7 @@ internal static class Program
                 DapStepKind.Out => StepOut,
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
             };
-            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            if (!TryReadContinueArguments(request.Arguments, out var arguments))
             {
                 return InvalidArguments(tool);
             }
@@ -1894,12 +1894,7 @@ internal static class Program
                     return NotFound();
                 }
 
-                var stepOver = await (kind switch
-                {
-                    DapStepKind.Into => session.StepIntoAsync(arguments.ThreadId, operation.Token),
-                    DapStepKind.Out => session.StepOutAsync(arguments.ThreadId, operation.Token),
-                    _ => session.StepOverAsync(arguments.ThreadId, operation.Token),
-                }).ConfigureAwait(false);
+                var stepOver = await session.StepForOptionalThreadAsync(arguments.ThreadId, kind, operation.Token).ConfigureAwait(false);
                 if (stepOver.Outcome == DapStepOverOutcome.Refused)
                 {
                     return kind switch
@@ -3789,27 +3784,6 @@ internal static class Program
             return true;
         }
 
-        private static bool TryReadStepOverArguments(
-            IDictionary<string, JsonElement>? arguments,
-            out StepOverArguments result)
-        {
-            result = null!;
-            if (arguments is null
-                || arguments.Count != 2
-                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId")
-                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
-                || sessionIdElement.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
-                || !arguments.TryGetValue("threadId", out var threadIdElement)
-                || threadIdElement.ValueKind != JsonValueKind.Number
-                || !threadIdElement.TryGetInt32(out var threadId))
-            {
-                return false;
-            }
-
-            result = new StepOverArguments(sessionIdElement.GetString()!, threadId);
-            return true;
-        }
 
         private static bool TryReadOptionalThread(IDictionary<string, JsonElement> arguments, out int? threadId)
         {
@@ -4158,7 +4132,6 @@ internal static class Program
             IReadOnlyList<DapStackFrame> frames,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? totalFrames,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? inspectionContextId = null);
-        private sealed record StepOverArguments(string SessionId, int ThreadId);
         private sealed record StepOverSuccessContent(string kind, int threadId);
         private sealed record StepOverTerminalContent(
             string kind,
@@ -4197,6 +4170,9 @@ internal static class Program
 
     private static class ToolCatalog
     {
+        private const string OptionalStoppedThreadSchema = """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}""";
+        private const string OptionalStoppedThreadStrictSessionSchema = """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}""";
+
         internal static ListToolsResult List() => new()
         {
             Tools =
@@ -4206,7 +4182,7 @@ internal static class Program
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_call_stack", "Get a bounded stack-frame page for a stopped thread. Omit threadId or use null to select the current observed stopped thread; thread_id is an alternative spelling. Carry numeric IDs with an opted-in inspection context from the same observation.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"startFrame":{"type":"integer","minimum":0,"maximum":4294967295},"levels":{"type":"integer","minimum":1,"maximum":256},"includeInspectionContext":{"type":"boolean","default":false}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}"""),
-                Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("step_over", "Step over an explicit or current observed stopped thread. Omitted or null threadId selects the current thread; thread_id is an alternative spelling.", OptionalStoppedThreadSchema),
                 Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
                 Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. Optional start and count are sent to the debugger; adapter support determines the result. Zero count requests all remaining children. A returned reference of zero is a leaf. Filtering is not supported.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","variablesReference"],"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue from an explicit or current observed stopped thread; the request resumes all threads. Omitted or null threadId selects the current thread; thread_id is an alternative spelling. Observe the next stop or terminal event for up to 30 seconds.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}"""),
@@ -4221,13 +4197,13 @@ internal static class Program
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("search_output", "Search retained output without clearing it. The pattern uses case-insensitive, culture-invariant .NET regular expressions, not Python regex parity. Category filtering precedes Python-style line splitting. Up to 50 matches and their context are returned with the total count; timeouts and application content over 256 KiB fail without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"pattern":{"type":"string"},"contextLines":{"type":"integer","default":2},"category":{"type":["string","null"],"default":null}},"required":["debugSessionId","pattern"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
-                Tool("step_into", "Step into one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish whether the adapter entered a callee or stepped over.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
-                Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("step_into", "Step into an explicit or current observed stopped thread. Completion requires acknowledgement and a later exact step stop; inspect the stack to see whether the adapter entered a callee.", OptionalStoppedThreadSchema),
+                Tool("step_out", "Step out of an explicit or current observed stopped thread. Completion requires acknowledgement and a later exact step stop; inspect the stack to establish the caller.", OptionalStoppedThreadSchema),
                 Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
                 Tool("set_variable", "Set an exact named variable in an explicit container and current inspection context. This may execute code or mutate the debuggee. Old references expire; use the returned context with the new reference. Never automatically retry an uncertain outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["debugSessionId","inspectionContextId","variablesReference","name","value"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
-                Tool("get_exception_info", "Get exception information for one explicitly named stopped Int32 thread when the adapter advertises support. Returns the complete current adapter body, including nested details and extension fields, within 256 KiB. A later stop is a different observation; no implicit thread selection, exception cache, combined autopsy or automatic retry.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId","threadId"],"additionalProperties":false}"""),
+                Tool("get_exception_info", "Get bounded exception information for an explicit or current observed stopped thread when the adapter advertises support. A later stop is a different observation; no exception cache or automatic retry.", OptionalStoppedThreadStrictSessionSchema),
                 Tool("get_modules", "Read insertion-ordered module events retained by this live session, preserving numeric and string IDs distinctly. No DAP request or OS module scan is made; unseen events are not inferred. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 Tool("get_progress", "Read insertion-ordered active progress from this live session's DAP reader. Initialization advertises progress reporting; only reported starts, updates and ends are reflected. No DAP request is made. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
