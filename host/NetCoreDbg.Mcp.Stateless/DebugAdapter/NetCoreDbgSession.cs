@@ -260,6 +260,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 && HasStepOverAuthority(threadId) && StringComparer.Ordinal.Equals(_inspectionContextId, context);
     }
 
+    internal DapSessionState? CaptureInspectionState(string context)
+    {
+        lock (_stateGate)
+        {
+            return !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing
+                && StringComparer.Ordinal.Equals(_inspectionContextId, context) ? _state : null;
+        }
+    }
+
     internal DapRuntimeInventorySnapshot GetRuntimeInventory(bool modules, int maximumSerializedBytes)
     {
         lock (_runtimeInventoryGate)
