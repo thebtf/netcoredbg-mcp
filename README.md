@@ -67,10 +67,23 @@ identified mux owner exists, unlike Python. An identified owner may expire
 after `NETCOREDBG_SESSION_TIMEOUT` seconds (default 60), but never during an
 in-flight start or stop. Rejected starts do not acquire ownership. `stop_debug`
 waits for an in-flight start, including pre-build, and cannot interrupt it; the
-start request's cancellation route remains available. MCP resources are not
-advertised. A second start is refused until the bound session is stopped;
-unknown, retired or pending-execution state
-is reported as `unknown` when native evidence does not establish a state. State
+start request's cancellation route remains available. The legacy route exposes
+`debug://output` (text/plain) and `debug://threads` (application/json) with
+connection-scoped subscriptions. Subscriptions survive stop/start on the same
+connection. Updates are coalesced URI invalidations, not session snapshots;
+pending invalidations can carry across stop/start, and reads resolve the current
+session. If a notification send is blocked, the server waits at most two seconds
+for the subscribe/unsubscribe notification gate and returns an error if it cannot
+synchronize. A blocked transport can delay any response, but debugger start, stop
+and shutdown do not wait for notification delivery internally.
+Output reads return the current retained buffer, including an empty idle buffer;
+thread reads issue a native threads request and report errors when unavailable.
+`debug://state`, `debug://breakpoints`, and complete resource parity remain open.
+A second start is refused until the bound session is stopped. An observed DAP
+exit or termination and its observed exit code remain visible until explicit
+stop, including while cleanup is in progress; failed cleanup or a retirement
+without a terminal event reports `unknown`. Pending execution also reports
+`unknown` when native evidence does not establish a state. State
 fields, stack source context, application-type detection, notifications,
 terminal and timeout results, and Python's full action hints are not equivalent.
 `get_call_stack` selects the top frame and stopped inspection context for later
@@ -103,7 +116,7 @@ size bounds still apply.
 `get_modules` and `get_progress` read bounded, reader-observed event inventories;
 incomplete or oversized inventories return errors. `get_loaded_sources` asks the
 adapter and refreshes the native live-source view when supported. This does not
-add legacy resources, state exposure or subscription notifications. The legacy
+expose that source view through a legacy state resource or its notifications. The legacy
 progress response retains Python's snake-case and camel-case ID/time aliases;
 the expanded response is also size-limited.
 

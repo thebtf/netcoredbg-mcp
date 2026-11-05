@@ -30,6 +30,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private readonly List<ModernMcpRequestObservation> _requests = [];
     private readonly List<string> _standardErrorLines = [];
     private readonly object _gate = new();
+    private long _lifecycleOrder;
     private bool _clientClosed;
     private bool _disposed;
     private Task? _disposeTask;
@@ -103,12 +104,20 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
             var clientOptions = new McpClientOptions();
             if (options.ClientProtocolVersion is not null) clientOptions.ProtocolVersion = options.ClientProtocolVersion;
+            if (options.NotificationHandler is { } notificationHandler)
+            {
+                clientOptions.Handlers = new McpClientHandlers
+                {
+                    NotificationHandlers = [new(NotificationMethods.ResourceUpdatedNotification, notificationHandler)],
+                };
+            }
 #pragma warning disable MCP9005 // The fixture exercises supported legacy roots clients.
             var rootsHandler = options.RootsHandler;
             if (rootsHandler is not null)
             {
                 clientOptions.Capabilities = new ClientCapabilities { Roots = new RootsCapability() };
-                clientOptions.Handlers = new McpClientHandlers { RootsHandler = (_, ct) => rootsHandler(ct) };
+                clientOptions.Handlers ??= new McpClientHandlers();
+                clientOptions.Handlers.RootsHandler = (_, ct) => rootsHandler(ct);
             }
 #pragma warning restore MCP9005
             client = await McpClient.CreateAsync(transport, clientOptions,
@@ -311,6 +320,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             {
                 _fixture.MarkAdapterStartAttempted();
             }
+            if (name is "start_debug" or "stop_debug") observation.StartedOrder = ++_lifecycleOrder;
             _requests.Add(observation);
         }
         return observation;
@@ -326,6 +336,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         lock (_gate)
         {
             observation.Result = result?.DeepClone().AsObject();
+            observation.CompletedOrder = ++_lifecycleOrder;
         }
     }
 
@@ -641,21 +652,13 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     Result = request.Result?.DeepClone().AsObject(),
                     ControlledProcessesExited = request.ControlledProcessesExited,
                     NoLaunchConfirmed = request.NoLaunchConfirmed,
+                    StartedOrder = request.StartedOrder,
+                    CompletedOrder = request.CompletedOrder,
                 }).ToArray();
         }
 
         var legacyStarts = history.Where(static request => StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
-        if (_legacyCompat)
-        {
-            var successful = legacyStarts.Where(static request =>
-                LegacyPayload(request.Result)?["data"]?["success"]?.GetValue<bool>() == true).ToArray();
-            if (successful.Length == 1 && legacyStarts.All(request => ReferenceEquals(request, successful[0])
-                || StringValue(LegacyPayload(request.Result)?["error"]) == "A debug session is already active; stop it before starting another."))
-                return await StopKnownLegacySessionAsync(successful[0], history).ConfigureAwait(false);
-            if (legacyStarts.Length == 1
-                && string.IsNullOrEmpty(StringValue(legacyStarts[0].Result?["structuredContent"]?["debugSessionId"])))
-                return await StopKnownLegacySessionAsync(legacyStarts[0], history).ConfigureAwait(false);
-        }
+        if (_legacyCompat) return await StopKnownLegacySessionsAsync(history).ConfigureAwait(false);
 
         var starts = new HashSet<string>(StringComparer.Ordinal);
         var exited = new HashSet<string>(StringComparer.Ordinal);
@@ -731,6 +734,49 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         return !unconfirmed;
     }
 
+    private async Task<bool> StopKnownLegacySessionsAsync(ModernMcpRequestObservation[] history)
+    {
+        ModernMcpRequestObservation? active = null;
+        long lastTransition = 0;
+        foreach (var request in history)
+        {
+            var name = StringValue(request.Parameters?["name"]);
+            var payload = LegacyPayload(request.Result);
+            if (name == "start_debug")
+            {
+                if (StringValue(payload?["error"]) == "A debug session is already active; stop it before starting another.")
+                    continue;
+                if (request.StartedOrder <= lastTransition || request.CompletedOrder == 0 || active is not null)
+                    return false;
+                if (IsComplete(request.Result, false) && payload?["data"]?["success"]?.GetValue<bool>() == true
+                    && payload["error"] is null)
+                {
+                    active = request;
+                    lastTransition = request.CompletedOrder;
+                }
+                else if (IsComplete(request.Result, false) && payload?["state"]?.GetValue<string>() == "idle"
+                    && StringValue(payload["error"]) == "DAP_LAUNCH_REFUSED")
+                {
+                    // The native launch-refused result is emitted only after its owned failed-start cleanup succeeds.
+                    lastTransition = request.CompletedOrder;
+                }
+                else return false;
+            }
+            else if (name == "stop_debug")
+            {
+                if (IsComplete(request.Result, false)
+                    && StringValue(payload?["error"]) is "Debug session is owned by another agent." or "No active debug session.")
+                    continue;
+                if (active is null || request.StartedOrder <= lastTransition || request.CompletedOrder == 0
+                    || !JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])
+                    || !LegacyStopped(request.Result)) return false;
+                active = null;
+                lastTransition = request.CompletedOrder;
+            }
+        }
+        return active is null || await StopKnownLegacySessionAsync(active, []).ConfigureAwait(false);
+    }
+
     private async Task<bool> StopKnownLegacySessionAsync(ModernMcpRequestObservation start, ModernMcpRequestObservation[] history)
     {
         var startPayload = LegacyPayload(start.Result);
@@ -755,7 +801,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private static bool LegacyStopped(JsonObject? result)
     {
         var content = LegacyPayload(result);
-        return content?["state"]?.GetValue<string>() == "idle"
+        return IsComplete(result, false) && content?["state"]?.GetValue<string>() == "idle"
             && content["data"]?["success"]?.GetValue<bool>() == true && content["error"] is null;
     }
 
@@ -1065,7 +1111,8 @@ internal sealed record ModernMcpStartOptions(
     string? ClientProtocolVersion = null,
     IReadOnlyList<string>? HostArguments = null,
     string? StartupDirectory = null,
-    Func<CancellationToken, ValueTask<ListRootsResult>>? RootsHandler = null);
+    Func<CancellationToken, ValueTask<ListRootsResult>>? RootsHandler = null,
+    Func<JsonRpcNotification, CancellationToken, ValueTask>? NotificationHandler = null);
 #pragma warning restore MCP9005
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
@@ -1076,6 +1123,8 @@ internal sealed record ModernMcpRequestObservation(RequestId Id, string Method, 
     internal JsonObject? Result { get; set; }
     internal bool ControlledProcessesExited { get; set; }
     internal bool NoLaunchConfirmed { get; set; }
+    internal long StartedOrder { get; set; }
+    internal long CompletedOrder { get; set; }
 }
 
 

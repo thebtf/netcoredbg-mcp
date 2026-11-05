@@ -13,22 +13,24 @@ internal sealed class DapOutputBuffer
     private readonly Queue<(string Text, string Category, int Scalars)> _entries = new();
     private long _retainedScalars;
 
-    internal void Append(string text, string category)
+    internal bool Append(string text, string category)
     {
         var (retainedText, scalars) = BoundEntry(text);
         if (retainedText.Length == 0)
         {
-            return;
+            return false;
         }
 
         lock (_gate)
         {
+            var hadEntries = _entries.Count != 0;
             _entries.Enqueue((retainedText, category, scalars));
             _retainedScalars += scalars;
             while (_retainedScalars > MaximumTotalScalars && _entries.TryDequeue(out var removed))
             {
                 _retainedScalars -= removed.Scalars;
             }
+            return hadEntries || _entries.Count != 0;
         }
     }
 

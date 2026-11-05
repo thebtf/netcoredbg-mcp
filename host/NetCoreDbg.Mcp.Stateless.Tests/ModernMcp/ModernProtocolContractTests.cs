@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
@@ -544,7 +545,9 @@ public sealed class ModernProtocolContractTests
             Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
             var malformedPause = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
             {
-                ["name"] = "pause_execution", ["arguments"] = new JsonArray(), ["_meta"] = owner.DeepClone(),
+                ["name"] = "pause_execution",
+                ["arguments"] = new JsonArray(),
+                ["_meta"] = owner.DeepClone(),
             }, new RequestId("legacy-malformed-pause")));
             Assert.NotNull(ModernMcpProcessDriver.LegacyPayload(malformedPause)?["error"]);
             Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
@@ -932,7 +935,9 @@ public sealed class ModernProtocolContractTests
         var owner = new JsonObject { ["muxSessionId"] = "filter-owner" };
         var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
         {
-            ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true,
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
         }, owner);
         Assert.True(started["data"]?["success"]?.GetValue<bool>());
         try
@@ -954,7 +959,9 @@ public sealed class ModernProtocolContractTests
             {
                 var result = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
                 {
-                    ["name"] = "configure_exceptions", ["arguments"] = invalid[index], ["_meta"] = owner.DeepClone(),
+                    ["name"] = "configure_exceptions",
+                    ["arguments"] = invalid[index],
+                    ["_meta"] = owner.DeepClone(),
                 }, new RequestId($"legacy-malformed-filters-{index}")));
                 responses.Add(Assert.IsType<JsonObject>(ModernMcpProcessDriver.LegacyPayload(result)));
             }
@@ -1223,6 +1230,209 @@ public sealed class ModernProtocolContractTests
             Assert.DoesNotContain(writes, action => action.Command == "stepIn");
         }
         finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_LiveResources_ReadSubscribeAndUnsubscribeObservedEvents()
+    {
+        var updates = new ConcurrentQueue<string>();
+        using var signal = new SemaphoreSlim(0);
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "initial\n" }),
+            ["threads"] = new JsonArray(
+                new JsonObject
+                {
+                    ["entries"] = new JsonArray(
+                    new JsonObject { ["category"] = "stderr", ["output"] = "subscribed\n" },
+                    new JsonObject { ["event"] = "thread", ["body"] = new JsonObject { ["reason"] = "started", ["threadId"] = 2 } })
+                },
+                new JsonObject { ["entries"] = new JsonArray() },
+                new JsonObject
+                {
+                    ["entries"] = new JsonArray(
+                    new JsonObject { ["category"] = "stdout", ["output"] = "after-unsubscribe\n" },
+                    new JsonObject { ["event"] = "thread", ["body"] = new JsonObject { ["reason"] = "exited", ["threadId"] = 2 } })
+                }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() },
+            NotificationHandler: (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() is { } uri)
+                {
+                    updates.Enqueue(uri);
+                    signal.Release();
+                }
+                return ValueTask.CompletedTask;
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "resource-owner" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var list = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/list", new JsonObject(), new RequestId("legacy-resources-list")));
+            var resources = Assert.IsType<JsonArray>(list["resources"]);
+            var output = Assert.Single(resources, item => item?["uri"]?.GetValue<string>() == "debug://output");
+            var threads = Assert.Single(resources, item => item?["uri"]?.GetValue<string>() == "debug://threads");
+            Assert.Equal("text/plain", output?["mimeType"]?.GetValue<string>());
+            Assert.Equal("application/json", threads?["mimeType"]?.GetValue<string>());
+            Assert.True(driver.Client.ServerCapabilities?.Resources?.Subscribe);
+            foreach (var uri in new[] { "debug://output", "debug://output", "debug://threads", "debug://threads" })
+                _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/subscribe", new JsonObject { ["uri"] = uri }, new RequestId(Guid.NewGuid().ToString("N"))));
+            var invalid = await Assert.ThrowsAsync<McpProtocolException>(async () => await driver.SendRawRequestAsync("resources/subscribe", new JsonObject { ["uri"] = "debug://unknown" }, new RequestId("unknown-resource")));
+            Assert.Equal(McpErrorCode.InvalidParams, invalid.ErrorCode);
+            await Assert.ThrowsAsync<McpProtocolException>(async () => await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://unknown" }, new RequestId("unknown-resource-read")));
+
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var seen = new List<string>();
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            {
+                while (!seen.Contains("debug://output") || !seen.Contains("debug://threads"))
+                {
+                    await signal.WaitAsync(timeout.Token);
+                    while (updates.TryDequeue(out var uri)) seen.Add(uri);
+                }
+            }
+            Assert.All(seen, uri => Assert.Contains(uri, new[] { "debug://output", "debug://threads" }));
+            var outputResult = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("read-output")));
+            var outputContent = Assert.Single(Assert.IsType<JsonArray>(outputResult["contents"]));
+            Assert.Equal("debug://output", outputContent?["uri"]?.GetValue<string>());
+            Assert.Equal("text/plain", outputContent?["mimeType"]?.GetValue<string>());
+            Assert.Equal("initial\nsubscribed\n", outputContent?["text"]?.GetValue<string>());
+            var threadResult = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://threads" }, new RequestId("read-threads")));
+            var threadContent = Assert.Single(Assert.IsType<JsonArray>(threadResult["contents"]));
+            Assert.Equal("application/json", threadContent?["mimeType"]?.GetValue<string>());
+            var threadList = Assert.IsType<JsonArray>(JsonNode.Parse(threadContent!["text"]!.GetValue<string>()));
+            Assert.Equal(2, threadList.Count);
+            Assert.Equal(1, threadList[0]?["id"]?.GetValue<int>());
+            Assert.Equal("worker", threadList[0]?["name"]?.GetValue<string>());
+            Assert.Equal(2, threadList[1]?["id"]?.GetValue<int>());
+            foreach (var uri in new[] { "debug://output", "debug://threads", "debug://output", "debug://threads" })
+                _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/unsubscribe", new JsonObject { ["uri"] = uri }, new RequestId(Guid.NewGuid().ToString("N"))));
+            while (updates.TryDequeue(out _)) { }
+            while (signal.Wait(0)) { }
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.False(await signal.WaitAsync(TimeSpan.FromSeconds(1)), "No resource updates may be delivered after unsubscribe.");
+            var after = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("read-output-after")));
+            Assert.Equal("initial\nsubscribed\nafter-unsubscribe\n", after["contents"]?[0]?["text"]?.GetValue<string>());
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_ResourceSubscription_FollowsConnectionAcrossDebugSessions()
+    {
+        using var signal = new SemaphoreSlim(0);
+        var script = new JsonObject
+        {
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "session-output\n" }),
+            })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() },
+            NotificationHandler: (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() == "debug://output") signal.Release();
+                return ValueTask.CompletedTask;
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "resource-session-owner" };
+        var launch = new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true };
+        _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/subscribe", new JsonObject { ["uri"] = "debug://output" }, new RequestId("connection-subscribe")));
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", launch, owner))["data"]?["success"]?.GetValue<bool>());
+        var active = true;
+        try
+        {
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            await Task.Delay(250);
+            while (signal.Wait(0)) { }
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", launch, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)), "The connection subscription must receive the replacement session's output update.");
+            var output = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("replacement-output")));
+            Assert.Equal("session-output\n", output["contents"]?[0]?["text"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (active) Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_ResourceLaunchPublicationAndClear_OnlyNotifyCommittedChanges(bool refused)
+    {
+        using var signal = new SemaphoreSlim(0);
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "launch-output\n" }),
+            ["launchRefused"] = refused,
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() },
+            NotificationHandler: (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() == "debug://output") signal.Release();
+                return ValueTask.CompletedTask;
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "resource-publication-owner" };
+        _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/subscribe", new JsonObject { ["uri"] = "debug://output" }, new RequestId("publication-subscribe")));
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        if (refused)
+        {
+            Assert.NotNull(started["error"]);
+            Assert.False(await signal.WaitAsync(TimeSpan.FromSeconds(1)), "A failed start must not publish output updates.");
+            var idle = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("failed-start-output")));
+            Assert.Equal(string.Empty, idle["contents"]?[0]?["text"]?.GetValue<string>());
+            return;
+        }
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)), "Committed launch output must notify a pre-start subscriber.");
+            var before = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("launch-output")));
+            Assert.Equal("launch-output\n", before["contents"]?[0]?["text"]?.GetValue<string>());
+            while (signal.Wait(0)) { }
+            var cleared = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["clear"] = true }, owner);
+            Assert.Equal("launch-output\n", cleared["data"]?["output"]?.GetValue<string>());
+            Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)));
+            var empty = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read", new JsonObject { ["uri"] = "debug://output" }, new RequestId("cleared-output")));
+            Assert.Equal(string.Empty, empty["contents"]?[0]?["text"]?.GetValue<string>());
+            while (signal.Wait(0)) { }
+            _ = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["clear"] = true }, owner);
+            Assert.False(await signal.WaitAsync(TimeSpan.FromSeconds(1)), "Clearing an empty buffer must not notify.");
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Fact]
+    public async Task ModernRoute_DoesNotAdvertiseLegacyResources()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        Assert.Null(driver.Client.ServerCapabilities?.Resources);
     }
 
     private static async Task<JsonObject> LegacyConsoleCallAsync(ModernMcpProcessDriver driver, string tool,
