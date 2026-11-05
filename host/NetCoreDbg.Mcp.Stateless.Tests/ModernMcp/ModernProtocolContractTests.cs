@@ -454,6 +454,228 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_StepIntoOut_UsesCurrentThreadAndInvalidatesInspection()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsDelayedStackTraceLoading: true)),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "navigation-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "navigation-other" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+        _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+        _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+
+        var before = await driver.ReadNativeActionsAsync();
+        foreach (var tool in new[] { "step_into", "step_out", "pause_execution" })
+        {
+            var denied = await LegacyConsoleCallAsync(driver, tool, new JsonObject(), other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+        }
+        var target = await LegacyConsoleCallAsync(driver, "step_into", new JsonObject { ["target_id"] = 17 }, owner);
+        Assert.NotNull(target["error"]);
+        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before.Count), action => action.Command is "stepIn" or "stepOut" or "pause");
+
+        foreach (var (tool, arguments, command) in new[]
+        {
+            ("step_into", new JsonObject(), "stepIn"),
+            ("step_into", new JsonObject { ["target_id"] = null }, "stepIn"),
+            ("step_out", new JsonObject(), "stepOut"),
+        })
+        {
+            var from = (await driver.ReadNativeActionsAsync()).Count;
+            var step = await LegacyConsoleCallAsync(driver, tool, arguments, owner, TimeSpan.FromSeconds(35));
+            Assert.Equal("stopped", step["state"]?.GetValue<string>());
+            Assert.Equal("step", step["reason"]?.GetValue<string>());
+            Assert.Equal(1, step["thread_id"]?.GetValue<int>());
+            Assert.False(step["timed_out"]?.GetValue<bool>() ?? true);
+            var action = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(from), entry => entry.Command == command);
+            Assert.Equal(1, JsonNode.Parse(action.Detail!)?["arguments"]?["threadId"]?.GetValue<int>());
+            var staleBefore = (await driver.ReadNativeActionsAsync()).Count;
+            var stale = await LegacyConsoleCallAsync(driver, "get_scopes", new JsonObject(), owner);
+            Assert.NotNull(stale["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(staleBefore), entry => entry.Command == "scopes");
+            _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+        }
+        var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_PauseCanInterruptPendingContinue_AndIsOwnerBound()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", NextResponseMode: "continue-ack-only", PauseResponseMode: "ack-before-stopped-held")),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "pause-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "pause-other" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+        _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+        _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+        var continuation = LegacyConsoleCallAsync(driver, "continue_execution", new JsonObject(), owner, TimeSpan.FromSeconds(35));
+        var stoppedByOwner = false;
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("continue-acknowledged", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.False(continuation.IsCompleted);
+            var pendingState = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), other);
+            Assert.Equal("running", pendingState["state"]?.GetValue<string>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var denied = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject(), other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
+            var pause = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject { ["thread_id"] = 1 }, owner);
+            Assert.True(pause["data"]?["success"]?.GetValue<bool>());
+            Assert.Equal(1, pause["data"]?["threadId"]?.GetValue<int>());
+            Assert.Equal("running", pause["state"]?.GetValue<string>());
+            var pauseWrite = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
+            Assert.Equal(1, JsonNode.Parse(pauseWrite.Detail!)?["arguments"]?["threadId"]?.GetValue<int>());
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", observation.Token);
+            Assert.False(continuation.IsCompleted, "Pause acknowledgement must not wait for or imply a stopped event.");
+            driver.ReleasePauseStoppedEvent();
+            var stopped = await continuation.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("stopped", stopped["state"]?.GetValue<string>());
+            Assert.Equal("pause", stopped["reason"]?.GetValue<string>());
+            var beforeInspection = (await driver.ReadNativeActionsAsync()).Count;
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "get_scopes", new JsonObject(), owner))["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(beforeInspection), action => action.Command == "scopes");
+            var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+            stoppedByOwner = true;
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            driver.ReleaseContinueResponse();
+            if (!stoppedByOwner)
+                await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+            await Record.ExceptionAsync(async () => await continuation.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_OutputReadsAreShared_OnlyOwnerCanConsumeWholeBuffer()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["category"] = "stdout", ["output"] = "one\n" },
+                new JsonObject { ["category"] = "stderr", ["output"] = "err\n" },
+                new JsonObject { ["category"] = "stdout", ["output"] = "two\n" }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "output-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "output-other" };
+        var idle = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), other);
+        Assert.Equal("idle", idle["state"]?.GetValue<string>());
+        Assert.Equal(string.Empty, idle["data"]?["output"]?.GetValue<string>());
+        var idleTail = await LegacyConsoleCallAsync(driver, "get_output_tail", new JsonObject(), other);
+        Assert.Equal(0, idleTail["data"]?["total_lines"]?.GetValue<int>());
+        Assert.Equal(string.Empty, idleTail["data"]?["output"]?.GetValue<string>());
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+        _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+        var all = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), other);
+        Assert.Equal("one\nerr\ntwo\n", all["data"]?["output"]?.GetValue<string>());
+        var stdout = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["category"] = "stdout" }, other);
+        Assert.Equal("one\ntwo\n", stdout["data"]?["output"]?.GetValue<string>());
+        var tail = await LegacyConsoleCallAsync(driver, "get_output_tail", new JsonObject { ["lines"] = 2 }, other);
+        Assert.Equal(3, tail["data"]?["total_lines"]?.GetValue<int>());
+        Assert.Equal(2, tail["data"]?["returned_lines"]?.GetValue<int>());
+        Assert.Equal("err\ntwo", tail["data"]?["output"]?.GetValue<string>());
+        var stdoutTail = await LegacyConsoleCallAsync(driver, "get_output_tail", new JsonObject { ["lines"] = 1, ["category"] = "stdout" }, other);
+        Assert.Equal(2, stdoutTail["data"]?["total_lines"]?.GetValue<int>());
+        Assert.Equal(1, stdoutTail["data"]?["returned_lines"]?.GetValue<int>());
+        Assert.Equal("two", stdoutTail["data"]?["output"]?.GetValue<string>());
+        var filtered = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["category"] = "stdout", ["clear"] = true }, other);
+        Assert.Equal("one\ntwo\n", filtered["data"]?["output"]?.GetValue<string>());
+        foreach (var arguments in new[]
+        {
+            new JsonObject { ["clear"] = true },
+            new JsonObject { ["clear"] = true, ["category"] = null },
+            new JsonObject { ["clear"] = true, ["category"] = "" },
+        })
+        {
+            var denied = await LegacyConsoleCallAsync(driver, "get_output", arguments, other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Equal("one\nerr\ntwo\n", (await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), other))["data"]?["output"]?.GetValue<string>());
+        var cleared = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["clear"] = true }, owner);
+        Assert.Equal("one\nerr\ntwo\n", cleared["data"]?["output"]?.GetValue<string>());
+        Assert.Equal(string.Empty, (await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), other))["data"]?["output"]?.GetValue<string>());
+        var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+        var afterStop = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), other);
+        Assert.Equal("idle", afterStop["state"]?.GetValue<string>());
+        Assert.Equal(string.Empty, afterStop["data"]?["output"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("exited")]
+    [InlineData("terminated")]
+    public async Task LegacyCompat_OutputSurvivesNaturalTerminationUntilStop(string terminalEvent)
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "before\n" }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(new JsonObject { ["category"] = "stderr", ["output"] = "final\n" }),
+                ["terminal"] = terminalEvent,
+            }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "terminal-output-owner" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+        var retained = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), owner);
+        Assert.Equal("before\nfinal\n", retained["data"]?["output"]?.GetValue<string>());
+        var stderr = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["category"] = "stderr" }, owner);
+        Assert.Equal("final\n", stderr["data"]?["output"]?.GetValue<string>());
+        var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+        Assert.Equal(string.Empty, (await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), owner))["data"]?["output"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task LegacyCompat_BreakpointsLocalsAndEvaluation_UseCurrentStoppedEpoch()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(

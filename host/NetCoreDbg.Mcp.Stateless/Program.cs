@@ -327,7 +327,8 @@ internal static class Program
         internal async ValueTask<CallToolResult> CallLegacyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
         {
             var name = context.Params.Name;
-            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or ContinueExecution or StopDebug
+            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
+                or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or GetScopes or GetVariables or EvaluateExpression))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
@@ -346,7 +347,12 @@ internal static class Program
                 gateHeld = true;
                 if (HasInvalidLegacyArguments(name, arguments))
                     return LegacyError("Unsupported or invalid argument.");
-                var mutation = name is StartDebug or StopDebug or StepOver or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression;
+                var consumesOutput = name == GetOutput && arguments.TryGetValue("clear", out var clearOption)
+                    && clearOption.ValueKind == JsonValueKind.True
+                    && (!arguments.TryGetValue("category", out var categoryOption) || categoryOption.ValueKind == JsonValueKind.Null
+                        || (categoryOption.ValueKind == JsonValueKind.String && categoryOption.GetString() == string.Empty));
+                var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression || consumesOutput;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -463,9 +469,29 @@ internal static class Program
                         exitCode = snapshot.ExitCode
                     }, snapshot.State);
                 }
+                if (_legacySessionId is null && name is (GetOutput or GetOutputTail))
+                {
+                    var idleArguments = LegacyRequest(name, "idle", arguments).Arguments;
+                    if (name == GetOutput)
+                        return TryReadOutputArguments(idleArguments, out _, out _, out _)
+                            ? LegacyResponse(new { output = string.Empty }) : LegacyError("Unsupported or invalid argument.");
+                    return TryReadOutputTailArguments(idleArguments, out _, out _, out _)
+                        ? LegacyResponse(new { total_lines = 0, returned_lines = 0, output = string.Empty })
+                        : LegacyError("Unsupported or invalid argument.");
+                }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)
+                    return LegacyError("target_id is not supported.");
+                if (name == PauseExecution && arguments.Remove("thread_id", out var pauseThread))
+                {
+                    if (pauseThread.ValueKind == JsonValueKind.Null)
+                        arguments["threadId"] = pauseThread;
+                    else if (TryReadOutputLineCount(pauseThread, out var threadNumber) && threadNumber is >= int.MinValue and <= int.MaxValue)
+                        arguments["threadId"] = JsonSerializer.SerializeToElement((int)threadNumber);
+                    else return LegacyError("Invalid thread_id.");
+                }
                 var stackRevision = _legacyInspectionRevision;
-                if (name is GetCallStack or StepOver or ContinueExecution or StopDebug)
+                if (name is GetCallStack or StepOver or StepInto or StepOut or PauseExecution or ContinueExecution or StopDebug)
                 {
                     _legacyInspectionSessionId = null;
                     _legacyInspectionContextId = null;
@@ -551,6 +577,11 @@ internal static class Program
                     GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                     GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                     StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    StepInto => await StepIntoAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    StepOut => await StepOutAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    PauseExecution => await PauseAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                     GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                     GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                     EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
@@ -564,7 +595,7 @@ internal static class Program
                 if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
                     return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression
                         ? LegacyInspectionChanged(name)
-                        : LegacyError("Debug session changed before operation completed.", "unknown");
+                        : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically." : "Debug session changed before operation completed.", "unknown");
                 var observedState = LegacySnapshot(sessionId).State;
                 if (name is GetScopes or GetVariables or EvaluateExpression)
                 {
@@ -611,8 +642,21 @@ internal static class Program
                     return LegacyResponse(new { file = content.GetProperty("file"), line = content.GetProperty("line"), condition = (string?)null, verified = content.GetProperty("verified") }, observedState);
                 if (name == RemoveBreakpoint && kind == "breakpoint_removed")
                     return LegacyResponse(new { removed = content.GetProperty("removed") }, observedState);
+                if (name == GetOutput && kind == "output_success")
+                    return LegacyResponse(new { output = content.GetProperty("output") }, observedState);
+                if (name == GetOutputTail && kind == "output_tail_success")
+                    return LegacyResponse(new { total_lines = content.GetProperty("totalLines"), returned_lines = content.GetProperty("returnedLines"), output = content.GetProperty("output") }, observedState);
+                if (name == PauseExecution && kind == "pause_acknowledged")
+                    return LegacyResponse(new { success = true, threadId = content.GetProperty("threadId") }, observedState);
+                if ((name == StepInto && kind == "step_into_success") || (name == StepOut && kind == "step_out_success"))
+                    return LegacyExecution("stopped", "step", content.GetProperty("threadId").GetInt32(), false, null);
                 if (name == StepOver && kind == "step_over_success")
                     return LegacyExecution("stopped", "step", content.GetProperty("threadId").GetInt32(), false, null);
+                if ((name == StepInto && kind == "step_into_terminal") || (name == StepOut && kind == "step_out_terminal"))
+                    return LegacyExecution("terminated", null, null, false,
+                        content.TryGetProperty("exitCode", out var stepExit) ? stepExit.GetInt32() : null);
+                if ((name == StepInto && kind == "step_into_timed_out") || (name == StepOut && kind == "step_out_timed_out"))
+                    return LegacyExecution("unknown", null, content.GetProperty("threadId").GetInt32(), true, null);
                 if (name == ContinueExecution && kind == "continue_stopped")
                     return LegacyExecution("stopped", content.GetProperty("reason").GetString(),
                         content.TryGetProperty("threadId", out var thread) ? thread.GetInt32() : null, false, null);
@@ -643,7 +687,10 @@ internal static class Program
                     GetScopes => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
                     EvaluateExpression => key is not ("expression" or "frame_id"),
-                    StepOver or ContinueExecution => key != "thread_id",
+                    StepOver or StepOut or PauseExecution or ContinueExecution => key != "thread_id",
+                    StepInto => key is not ("thread_id" or "target_id"),
+                    GetOutput => key is not ("clear" or "category"),
+                    GetOutputTail => key is not ("lines" or "category"),
                     _ => true,
                 };
                 if (invalid) return true;
@@ -686,8 +733,9 @@ internal static class Program
         private static string[] LegacyActions(string state) => state switch
         {
             "idle" => ["start_debug"],
-            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "continue_execution", "stop_debug"],
-            _ => ["get_debug_state", "stop_debug"],
+            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "get_output", "get_output_tail", "stop_debug"],
+            "running" => ["get_debug_state", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
+            _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
         };
 
         private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
@@ -4686,6 +4734,11 @@ internal static class Program
                 Tool("get_variables", "Get variables for a reference in the current stopped context. Filtering is unsupported; paging is nonnegative.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":"null"},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["variables_reference"],"additionalProperties":false}"""),
                 Tool("evaluate_expression", "Evaluate in the current stopped context. Expressions may mutate the debuggee; mux ownership is required and uncertain writes are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
                 Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
+                Tool("step_into", "Step into using a stopped thread. Non-null target_id is unsupported; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"target_id":{"type":"null"}},"additionalProperties":false}"""),
+                Tool("step_out", "Step out using a stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
+                Tool("pause_execution", "Request pause; acknowledgement does not itself prove a stopped event.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
+                Tool("get_output", "Read captured output. Clearing the whole buffer requires mux ownership; filtered reads do not clear it.", """{"type":"object","properties":{"clear":{"type":"boolean"},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
+                Tool("get_output_tail", "Read the tail of captured output.", """{"type":"object","properties":{"lines":{"type":"integer","minimum":-9223372036854775808,"maximum":9223372036854775807},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue one stopped thread and observe the next stop, terminal event, or timeout; uncertain writes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 Tool("stop_debug", "Stop the implicit session and release its owner.", """{"type":"object","properties":{},"additionalProperties":false}"""),
             ],
