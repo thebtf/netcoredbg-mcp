@@ -53,11 +53,19 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
 `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail` и `stop_debug`. Они
-используют неявную привязку сессии и отдельные форматы ответов в стиле Python.
+`get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
+`find_code_references` и `get_source_context`. Debug-команды используют неявную
+привязку сессии и отдельные форматы ответов в стиле Python.
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+Три native-инструмента поиска работают до запуска и во время сессии. Их ответы
+в стиле Python содержат состояние, наблюдаемое при формировании ответа. Заданный
+оператором корень проекта имеет приоритет; иначе корни клиента запрашиваются
+для каждого запроса с прежним fallback на рабочий каталог запуска. Поиск ограничен
+native-правилами и границами проекта. `search_source` в этом режиме не реализован,
+хотя он указан в совместимых с Python подсказках действий.
 
 Изменяющие запросы проверяют владельца `_meta.muxSessionId`; чтение доступно
 во время ожидания исполнения. Режим объявляет `experimental.x-mux` со значением

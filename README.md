@@ -52,11 +52,19 @@ only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
 `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, and `stop_debug`. Calls
-use implicit session binding and selected Python-style response envelopes.
+`get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
+`find_code_references`, and `get_source_context`. Debug operations use implicit
+session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+The three native code-search tools work before and during a session. Their
+Python-style envelopes report the current observed state at response time.
+Operator project pins remain authoritative; otherwise initialize-era client
+roots are resolved per request, with the existing startup-directory fallback.
+Search remains bounded by native policy and project boundaries; `search_source`
+is not implemented in this mode, even though Python-compatible action hints name it.
 
 Mux mutation admission uses `_meta.muxSessionId`; reads remain available while
 execution waits, and the opt-in mode advertises `experimental.x-mux` with

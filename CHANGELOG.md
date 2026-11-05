@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The source-built `--legacy-compat` host exposes the three existing native project search tools with Python-style envelopes and the currently observed session state. Operator pins and request-local client roots remain in force; `search_source` and full Python parity remain open.
 - The opt-in legacy route retains observed terminal state and exit code through native retirement until explicit stop, without treating unobserved termination or failed cleanup as success. Resource invalidations survive failed replacement starts, and session retirement no longer cancels an already-started notification frame.
 - The opt-in legacy host adds `debug://output` and `debug://threads` resources and connection-scoped change subscriptions. Native event generations are buffered before start publication and retired across sessions; thread reads use the debugger and can fail when unavailable. State/breakpoint resources and full parity remain open.
 - The opt-in legacy console route adds bounded module/progress inventories, live loaded-source queries and owner-guarded step-target queries and targeted step-in. Target queries and steps use the selecting mux client's stopped context; target IDs are not tracked as issued. Native capability absence and DAP refusal return errors rather than Python's empty target list. Full resource and subscription parity and real consumer verification remain open.
