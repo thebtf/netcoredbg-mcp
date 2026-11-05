@@ -16,6 +16,182 @@ public sealed class ModernProtocolContractTests
 {
     private const string ValidProgram = "controlled-program.dll";
 
+#pragma warning disable MCP9005 // These tests exercise supported initialize-era roots.
+    [Fact]
+    public async Task LegacyCompat_ProjectSearch_UsesCurrentStateAndPythonEnvelope()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var root = Path.Combine(scratch, "project");
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(Path.Combine(root, "Alpha.cs"), "public class VisibleProbe\n{\n    public VisibleProbe Next;\n}\n");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "Outside.cs"), "outside-project-secret");
+            var rootsCalls = 0;
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = root, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: _ => { Interlocked.Increment(ref rootsCalls); return ValueTask.FromResult(new ListRootsResult { Roots = [new Root { Uri = new Uri(scratch).AbsoluteUri }] }); }),
+                startupTimeout: TimeSpan.FromSeconds(10));
+            var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(new JsonObject(), new RequestId("legacy-search-list")));
+            var names = Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => item!["name"]!.GetValue<string>()).ToArray();
+            foreach (var name in new[] { "find_code_symbol", "find_code_references", "get_source_context" }) Assert.Contains(name, names);
+            Assert.DoesNotContain("search_source", names);
+            var owner = new JsonObject { ["muxSessionId"] = "legacy-search-owner" };
+
+            async Task<JsonObject> SearchAsync(string name, JsonObject arguments, string state)
+            {
+                var response = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync(name, arguments, owner,
+                    new RequestId($"legacy-search-{Guid.NewGuid():N}")));
+                Assert.False(response["isError"]?.GetValue<bool>() ?? false);
+                var payload = Assert.IsType<JsonObject>(response["structuredContent"]);
+                var text = Assert.IsType<JsonArray>(response["content"])[0]?["text"]?.GetValue<string>();
+                Assert.True(JsonNode.DeepEquals(payload, JsonNode.Parse(Assert.IsType<string>(text))));
+                Assert.Equal(state, payload["state"]?.GetValue<string>());
+                Assert.Equal(new[] { "find_code_symbol", "find_code_references", "get_source_context", "search_source" },
+                    Assert.IsType<JsonArray>(payload["next_actions"]).Select(static item => item!.GetValue<string>()));
+                return payload;
+            }
+
+            async Task CheckAsync(string state)
+            {
+                var symbols = await SearchAsync("find_code_symbol", new JsonObject { ["name"] = "VisibleProbe", ["kind"] = "class" }, state);
+                Assert.Equal(root, symbols["data"]?["project_root"]?.GetValue<string>());
+                Assert.Equal("Alpha.cs", Assert.Single(Assert.IsType<JsonArray>(symbols["data"]?["results"]))?["file"]?.GetValue<string>());
+                var references = await SearchAsync("find_code_references", new JsonObject { ["name"] = "VisibleProbe" }, state);
+                Assert.Equal(2, references["data"]?["count"]?.GetValue<int>());
+                var context = await SearchAsync("get_source_context", new JsonObject { ["file"] = "Alpha.cs", ["line"] = 2, ["radius"] = 1 }, state);
+                Assert.Equal(3, Assert.IsType<JsonArray>(context["data"]?["lines"]).Count);
+                var outside = await SearchAsync("get_source_context", new JsonObject { ["file"] = "../Outside.cs", ["line"] = 1 }, state);
+                Assert.NotNull(outside["error"]);
+                Assert.False(outside.ContainsKey("data"));
+                Assert.DoesNotContain("outside-project-secret", outside.ToJsonString(), StringComparison.Ordinal);
+            }
+
+            await CheckAsync("idle");
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, owner);
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            try
+            {
+                using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+                await CheckAsync("stopped");
+                Assert.Equal(0, rootsCalls);
+            }
+            finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_ProjectSearch_ResolvesClientRootsPerRequestAndInvalidPinFailsClosed()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var first = Path.Combine(scratch, "first");
+            var second = Path.Combine(scratch, "second");
+            Directory.CreateDirectory(first);
+            Directory.CreateDirectory(second);
+            await File.WriteAllTextAsync(Path.Combine(first, "Marker.cs"), "public class FirstMarker {}\n");
+            await File.WriteAllTextAsync(Path.Combine(second, "Marker.cs"), "public class SecondMarker {}\n");
+            var calls = 0;
+            ValueTask<ListRootsResult> Roots(CancellationToken _) => ValueTask.FromResult(new ListRootsResult
+            {
+                Roots = [new Root { Uri = new Uri(Interlocked.Increment(ref calls) == 1 ? first : second).AbsoluteUri }],
+            });
+            var env = new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null };
+            await using (var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"], AdditionalEnvironment: env, RootsHandler: Roots)))
+            {
+                for (var index = 0; index < 2; index++)
+                {
+                    var response = await LegacyConsoleCallAsync(driver, "get_source_context", new JsonObject { ["file"] = "Marker.cs", ["line"] = 1, ["radius"] = 0 }, new JsonObject());
+                    Assert.Equal(index == 0 ? first : second, response["data"]?["project_root"]?.GetValue<string>());
+                }
+                Assert.Equal(2, calls);
+            }
+            env["NETCOREDBG_PROJECT_ROOT"] = Path.Combine(scratch, "missing-pin");
+            await using var invalid = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"], AdditionalEnvironment: env, RootsHandler: Roots));
+            var rejected = await LegacyConsoleCallAsync(invalid, "find_code_symbol", new JsonObject { ["name"] = "FirstMarker" }, new JsonObject());
+            Assert.NotNull(rejected["error"]);
+            Assert.Equal("idle", rejected["state"]?.GetValue<string>());
+            Assert.Equal(2, calls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_ProjectSearch_DoesNotHoldLifecycleDuringClientRoots()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(scratch, "Marker.cs"), "public class SearchMarker {}\n");
+            var hold = 0;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: async token =>
+                {
+                    if (Volatile.Read(ref hold) != 0)
+                    {
+                        entered.TrySetResult();
+                        await release.Task.WaitAsync(token);
+                    }
+                    return new ListRootsResult { Roots = [new Root { Uri = new Uri(scratch).AbsoluteUri }] };
+                }));
+            var owner = new JsonObject { ["muxSessionId"] = "search-concurrency-owner" };
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, owner);
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            Task<JsonObject>? search = null;
+            Task<JsonObject>? stop = null;
+            try
+            {
+                using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+                Volatile.Write(ref hold, 1);
+                search = LegacyConsoleCallAsync(driver, "find_code_symbol", new JsonObject { ["name"] = "SearchMarker" }, owner);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                stop = LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+                var finished = await Task.WhenAny(stop, Task.Delay(TimeSpan.FromSeconds(1)));
+                Assert.Same(stop, finished);
+                Assert.True((await stop)["data"]?["success"]?.GetValue<bool>());
+                release.TrySetResult();
+                var result = await search.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal("idle", result["state"]?.GetValue<string>());
+                Assert.Equal(1, result["data"]?["count"]?.GetValue<int>());
+            }
+            finally
+            {
+                release.TrySetResult();
+                if (search is not null) await Record.ExceptionAsync(async () => await search.WaitAsync(TimeSpan.FromSeconds(10)));
+                if (stop is not null) await Record.ExceptionAsync(async () => await stop.WaitAsync(TimeSpan.FromSeconds(10)));
+                else await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+            }
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+#pragma warning restore MCP9005
+
     [Theory]
     [InlineData("2025-11-25")]
     [InlineData("2026-07-28")]

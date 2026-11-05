@@ -105,7 +105,9 @@ internal static class Program
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
                 if (sessions.LegacyCompat)
-                    return await sessions.CallLegacyAsync(context, cancellationToken).ConfigureAwait(false);
+                    return NativeCodeSearch.IsNativeTool(context.Params.Name)
+                        ? await sessions.CallLegacySearchAsync(projectSearch, context, cancellationToken).ConfigureAwait(false)
+                        : await sessions.CallLegacyAsync(context, cancellationToken).ConfigureAwait(false);
                 if (!NativeCodeSearch.IsNativeTool(context.Params.Name))
                     return await sessions.CallAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -567,6 +569,35 @@ internal static class Program
                     throw new McpProtocolException("Resource read failed.", McpErrorCode.InvalidRequest);
                 var text = uri == "debug://output" ? content.GetProperty("output").GetString()! : content.GetProperty("threads").GetRawText();
                 return new ReadResourceResult { Contents = [new TextResourceContents { Uri = uri, MimeType = uri == "debug://output" ? "text/plain" : "application/json", Text = text }] };
+            }
+            finally { _legacyGate.Release(); }
+        }
+
+        internal async ValueTask<CallToolResult> CallLegacySearchAsync(
+            NativeCodeSearch search, RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
+        {
+            var result = await search.CallAsync(context, cancellationToken).ConfigureAwait(false);
+            await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var state = LegacySnapshot().State;
+                string[] actions = ["find_code_symbol", "find_code_references", "get_source_context", "search_source"];
+                var content = result.StructuredContent!.Value;
+                if (result.IsError == true)
+                {
+                    var error = content.GetProperty("error").GetString()!;
+                    return Result(new { error, state, next_actions = actions, message = $"Error: {error}. Try one of the suggested next_actions." }, false);
+                }
+                var message = state switch
+                {
+                    "idle" => "No active debug session.",
+                    "initializing" => "Debug session is initializing.",
+                    "running" => "Program is RUNNING. Variable references from previous stops are INVALID. Do NOT call get_variables — wait for the program to stop.",
+                    "stopped" => "Program is PAUSED. UI is frozen, app cannot respond to input. Inspect state with get_call_stack/get_variables, then resume.",
+                    "terminated" => "Program has terminated. Check output for errors, then stop the session.",
+                    _ => string.Empty,
+                };
+                return Result(new { state, next_actions = actions, message, data = content.GetProperty("data") }, false);
             }
             finally { _legacyGate.Release(); }
         }
@@ -5155,6 +5186,9 @@ internal static class Program
                 Tool("get_output", "Read captured output. Clearing the whole buffer requires mux ownership; filtered reads do not clear it.", """{"type":"object","properties":{"clear":{"type":"boolean"},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("get_output_tail", "Read the tail of captured output.", """{"type":"object","properties":{"lines":{"type":"integer","minimum":-9223372036854775808,"maximum":9223372036854775807},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue one stopped thread and observe the next stop, terminal event, or timeout; uncertain writes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
+                NativeCodeSearchCatalog.Definition("find_code_symbol"),
+                NativeCodeSearchCatalog.Definition("find_code_references"),
+                NativeCodeSearchCatalog.Definition("get_source_context"),
                 Tool("stop_debug", "Stop the implicit session and release its owner.", """{"type":"object","properties":{},"additionalProperties":false}"""),
             ],
         };
