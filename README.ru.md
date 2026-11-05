@@ -50,7 +50,7 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `--legacy-compat` для **одной console-сессии в процессе**. Он предоставляет
 только `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
-`add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
+`add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
@@ -60,6 +60,19 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+Точки останова функций хранятся в процессе host между stop и start. Общий
+`list_breakpoints` возвращает их в `__function_breakpoints__`; список с фильтром
+по файлу и ресурс `debug://breakpoints` содержат только точки исходного кода.
+Общий clear удаляет и точки функций. При активной сессии изменение требует
+владения mux и передаёт отладчику полный набор функций. Если отладчик не объявил
+`supportsFunctionBreakpoints`, отложенные точки сохраняются без отправки, а
+добавление в активной сессии отклоняется. `verified` показывает последний
+подтверждённый ответ DAP, но не попадание и не последующее событие. Условия и
+условия счётчика передаются отладчику, который может их игнорировать без
+соответствующих DAP-возможностей. Неопределённую запись автоматически не повторяют.
+Если активны точки функций и исходного кода, общий breakpoint stop может сделать
+счётчики попаданий исходного кода недоступными вместо неверного приписывания.
 
 Legacy-инструменты контекста возвращают ответ `data` в стиле Python для одной
 эпохи остановки. Контекст остановки содержит до пяти кадров, 15 переменных

@@ -1059,6 +1059,9 @@ internal sealed class ControlledDapAdapter
             case "setBreakpoints":
                 await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
                 return false;
+            case "setFunctionBreakpoints":
+                await HandleSetFunctionBreakpointsRequestAsync(sequence, root, cancellationToken);
+                return false;
             case "setExceptionBreakpoints":
                 return await HandleSetExceptionBreakpointsRequestAsync(sequence, root, cancellationToken);
             default:
@@ -1151,6 +1154,52 @@ internal sealed class ControlledDapAdapter
         }
         await WriteResponseAsync(sequence, "setExceptionBreakpoints", body, cancellationToken);
         return false;
+    }
+
+    private async Task HandleSetFunctionBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var requested = root.GetProperty("arguments").GetProperty("breakpoints").EnumerateArray().ToArray();
+        var refusal = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionBreakpointRefusal", out var mode) ? mode.GetString() : null;
+        if (!_initializedEventSent || (refusal == "empty" && requested.Length == 0) ||
+            (refusal == "nonempty" && requested.Length != 0))
+        {
+            await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { message = "function breakpoints refused" }, cancellationToken, success: false);
+            return;
+        }
+
+        var runtimeOnly = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncEventRuntimeOnly", out var runtimeEvent) && runtimeEvent.ValueKind == JsonValueKind.True;
+        if ((!runtimeOnly || _launchCompleted) && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncSourceEvent", out var sourceEvent) && sourceEvent.ValueKind == JsonValueKind.Object)
+            await WriteEventAsync("breakpoint", sourceEvent, cancellationToken);
+        if (_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncRefuseAfterEvent", out var refuseAfterEvent) && refuseAfterEvent.ValueKind == JsonValueKind.True)
+        {
+            await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { message = "function breakpoints refused" }, cancellationToken, success: false);
+            return;
+        }
+
+
+        var reuseSourceId = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncReuseSourceId", out var reuse) && reuse.ValueKind == JsonValueKind.True;
+        var breakpoints = requested.Select((_, index) => new Dictionary<string, object?>
+        {
+            ["id"] = reuseSourceId && index == 0 ? 1 : _nextBreakpointId++,
+            ["verified"] = index % 2 == 0,
+        }).ToArray();
+        if (_outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionBreakpointZeroLine", out var zeroLine) && zeroLine.ValueKind == JsonValueKind.True)
+            foreach (var breakpoint in breakpoints) { breakpoint["line"] = 0; breakpoint["verified"] = false; }
+        var body = new { breakpoints };
+        if (_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncHold", out var hold) && hold.ValueKind == JsonValueKind.True)
+        {
+            await RecordAsync(new { kind = "function-breakpoints-response-gated", sequence }, cancellationToken);
+            _heldBreakpointsResponse = CompleteHeldBreakpointsResponseAsync(sequence, body, _lifecycleEventsCancellation.Token, "setFunctionBreakpoints");
+            return;
+        }
+        await WriteResponseAsync(sequence, "setFunctionBreakpoints", body, cancellationToken);
     }
 
     private async Task HandleSetBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)

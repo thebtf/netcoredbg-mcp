@@ -49,7 +49,7 @@ The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
-`add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
+`add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
@@ -59,6 +59,19 @@ session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+Function breakpoint requests persist in the host process across stop/start.
+Global `list_breakpoints` includes `__function_breakpoints__`; file-filtered
+listing and `debug://breakpoints` contain source breakpoints only. Global clear
+also removes function breakpoints. Active changes replace the complete function
+set and require mux ownership. The adapter must advertise
+`supportsFunctionBreakpoints`: deferred entries are retained but not sent when
+support is absent, and active adds are rejected. `verified` reflects the last
+acknowledged DAP response, not a hit or later breakpoint event. Conditions and
+hit conditions are passed to the adapter; it may ignore them without the
+corresponding DAP capabilities. An uncertain write is not retried automatically.
+When function and source breakpoints are both active, a generic breakpoint stop
+can make source hit counts unavailable rather than attributing it incorrectly.
 
 The legacy context tools return Python-style `data` envelopes from one native
 stopped epoch. Stop context includes up to five frames, 15 first-scope locals,
