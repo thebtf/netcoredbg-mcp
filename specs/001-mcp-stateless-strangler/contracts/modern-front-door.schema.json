@@ -164,6 +164,12 @@
             "null"
           ]
         },
+        "stop_at_entry": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "justMyCode": {
           "type": [
             "boolean",
@@ -194,8 +200,104 @@
             "string",
             "null"
           ]
+        },
+        "launch_profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preBuild": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "pre_build": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "buildProject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "build_project": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "buildConfiguration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "Debug",
+            "Release",
+            null
+          ]
+        },
+        "build_configuration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "Debug",
+            "Release",
+            null
+          ]
         }
       },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "stopAtEntry",
+              "stop_at_entry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "launchProfile",
+              "launch_profile"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "preBuild",
+              "pre_build"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "buildProject",
+              "build_project"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "buildConfiguration",
+              "build_configuration"
+            ]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "launchEnvironmentMetadata": {
@@ -3289,6 +3391,163 @@
       },
       "additionalProperties": false
     },
+    "startDebugBuildProjectRequired": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_project_required"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_PROJECT_REQUIRED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildProjectInvalid": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_project_invalid"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_PROJECT_INVALID"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildBusy": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_busy"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_BUSY"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildCleanupUnconfirmed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_cleanup_unconfirmed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_CLEANUP_UNCONFIRMED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_timeout"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildStartFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_start_failed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_START_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugProgramUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_program_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_PROGRAM_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "stage",
+        "exitCode",
+        "stdout",
+        "stderr",
+        "stdoutTruncated",
+        "stderrTruncated"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_failed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_FAILED"
+        },
+        "stage": {
+          "enum": [
+            "restore",
+            "build"
+          ]
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "stdout": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "stderr": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "stdoutTruncated": {
+          "type": "boolean"
+        },
+        "stderrTruncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugProjectUnavailable": {
       "type": "object",
       "required": [
@@ -3485,6 +3744,30 @@
       "oneOf": [
         {
           "$ref": "#/$defs/startDebugSuccess"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildProjectRequired"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildProjectInvalid"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildBusy"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildCleanupUnconfirmed"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildTimeout"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildStartFailed"
+        },
+        {
+          "$ref": "#/$defs/startDebugProgramUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildFailed"
         },
         {
           "$ref": "#/$defs/startDebugProjectUnavailable"

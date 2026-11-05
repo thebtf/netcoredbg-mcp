@@ -10,6 +10,40 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Unicode;
 
+if (args.Length > 0 && args[0] == "--controlled-build-observe")
+{
+    Console.OutputEncoding = Encoding.UTF8;
+    Console.Write(JsonSerializer.Serialize(new { workingDirectory = Environment.CurrentDirectory, arguments = args[1..] }));
+    Console.Error.Write("controlled stderr: λ");
+    Environment.ExitCode = 37;
+    return;
+}
+
+if (args.Length is 2 or 3 && args[0] == "--controlled-build-tree")
+{
+    var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Fixture executable is unavailable.");
+    var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
+    if (args.Length == 3 && args[2] == "--redirect-child-output")
+    {
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+    }
+    start.ArgumentList.Add("--controlled-dap-descendant");
+    using var descendant = Process.Start(start) ?? throw new InvalidOperationException("Could not start controlled descendant.");
+    using var root = Process.GetCurrentProcess();
+    var observation = JsonSerializer.Serialize(new
+    {
+        rootId = root.Id,
+        rootStart = root.StartTime.ToUniversalTime().Ticks,
+        descendantId = descendant.Id,
+        descendantStart = descendant.StartTime.ToUniversalTime().Ticks,
+    });
+    await File.WriteAllTextAsync(args[1] + ".tmp", observation);
+    File.Move(args[1] + ".tmp", args[1]);
+    await Task.Delay(Timeout.InfiniteTimeSpan);
+    return;
+}
+
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
 {
     if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")

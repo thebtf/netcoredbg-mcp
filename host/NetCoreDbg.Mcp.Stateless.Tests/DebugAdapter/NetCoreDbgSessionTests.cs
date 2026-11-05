@@ -92,6 +92,163 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public async Task BuildRunner_PreservesWorkingDirectoryArgumentsOutputAndExitCode()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"build runner {Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var cleanupConfirmed = false;
+        try
+        {
+            var fixture = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+            Assert.Empty(fixture.Arguments);
+            string[] arguments = ["--controlled-build-observe", "", "two words", "quote\"here", "trailing\\", "雪"];
+            var result = await RunBuildCommandAsync(fixture.Command, arguments, scratch, CancellationToken.None);
+            cleanupConfirmed = true;
+            using var output = JsonDocument.Parse((string)result.GetType().GetProperty("Stdout")!.GetValue(result)!);
+            Assert.Equal(Path.GetFullPath(scratch), output.RootElement.GetProperty("workingDirectory").GetString());
+            Assert.Equal(arguments[1..], output.RootElement.GetProperty("arguments").EnumerateArray().Select(value => value.GetString()).ToArray());
+            Assert.Equal("controlled stderr: λ", result.GetType().GetProperty("Stderr")!.GetValue(result));
+            Assert.Equal(37, result.GetType().GetProperty("ExitCode")!.GetValue(result));
+        }
+        finally
+        {
+            if (cleanupConfirmed) Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BuildRunner_CancellationReturnsAfterOwnedRootAndDescendantExit(bool redirectChildOutput)
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) return;
+        var fixture = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+        Assert.Empty(fixture.Arguments);
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"build-tree-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var ready = Path.Combine(scratch, "ready.json");
+        using var cancellation = new CancellationTokenSource();
+        var cleanupConfirmed = false;
+        var arguments = redirectChildOutput
+            ? new[] { "--controlled-build-tree", ready, "--redirect-child-output" }
+            : new[] { "--controlled-build-tree", ready };
+        var run = RunBuildCommandAsync(fixture.Command, arguments, scratch, cancellation.Token);
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (!File.Exists(ready))
+            {
+                if (run.IsCompleted)
+                {
+                    await run;
+                    throw new InvalidOperationException("The build command returned before publishing its process identities.");
+                }
+                await Task.Delay(20, observation.Token);
+            }
+            using var identity = JsonDocument.Parse(await File.ReadAllTextAsync(ready, observation.Token));
+            using var root = OpenBuildWitness(identity.RootElement, "rootId", "rootStart");
+            using var descendant = OpenBuildWitness(identity.RootElement, "descendantId", "descendantStart");
+            Assert.False(root.Exited);
+            Assert.False(descendant.Exited);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await run);
+            var rootExitedOnReturn = root.Exited;
+            var descendantExitedOnReturn = descendant.Exited;
+            if (!rootExitedOnReturn || !descendantExitedOnReturn) await Task.Delay(250);
+            var rootExitedLater = root.Exited;
+            var descendantExitedLater = descendant.Exited;
+            cleanupConfirmed = rootExitedLater && descendantExitedLater;
+            Assert.True(rootExitedOnReturn, $"The retained root must be exited on return (after 250ms: {rootExitedLater}).");
+            Assert.True(descendantExitedOnReturn, $"The retained descendant must be exited on return (after 250ms: {descendantExitedLater}).");
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await run.WaitAsync(TimeSpan.FromSeconds(25)); }
+            catch (Exception) when (run.IsCompleted) { }
+            if (cleanupConfirmed && Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    private static async Task<object> RunBuildCommandAsync(string executable, IReadOnlyList<string> arguments, string directory, CancellationToken cancellationToken)
+    {
+        var path = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
+        var name = OperatingSystem.IsWindows() ? "DapBuildWindowsRunner" : "DapBuildUnixRunner";
+        var type = Assert.IsAssignableFrom<Type>(assembly.GetType($"NetCoreDbg.Mcp.Stateless.DebugAdapter.{name}"));
+        var method = Assert.IsAssignableFrom<MethodInfo>(type.GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic));
+        var task = Assert.IsAssignableFrom<Task>(method.Invoke(null, [executable, arguments, directory, TimeSpan.FromSeconds(30), cancellationToken]));
+        await task;
+        return Assert.IsAssignableFrom<object>(task.GetType().GetProperty("Result")!.GetValue(task));
+    }
+
+    private static BuildProcessWitness OpenBuildWitness(JsonElement identity, string idName, string startName)
+    {
+        var process = Process.GetProcessById(identity.GetProperty(idName).GetInt32());
+        BuildProcessWitness? witness = null;
+        try
+        {
+            witness = new BuildProcessWitness(process);
+            Assert.Equal(identity.GetProperty(startName).GetInt64(), process.StartTime.ToUniversalTime().Ticks);
+            return witness;
+        }
+        catch
+        {
+            if (witness is null) process.Dispose();
+            else witness.Dispose();
+            throw;
+        }
+    }
+
+    private sealed class BuildProcessWitness : IDisposable
+    {
+        private readonly Process _process;
+        private readonly SafeFileHandle? _pidfd;
+        public BuildProcessWitness(Process process)
+        {
+            _process = process;
+            if (OperatingSystem.IsWindows())
+            {
+                _ = process.SafeHandle;
+            }
+            else
+            {
+                var descriptor = LinuxSyscall(434, process.Id, 0);
+                if (descriptor < 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "pidfd_open failed");
+                _pidfd = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            }
+        }
+        public bool Exited
+        {
+            get
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    var wait = WaitForSingleObject(_process.SafeHandle, 0);
+                    if (wait == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "Process handle wait failed");
+                    return wait == 0;
+                }
+                var descriptor = new PollDescriptor { FileDescriptor = _pidfd!.DangerousGetHandle().ToInt32(), Events = 1 };
+                var result = Poll(ref descriptor, 1, 0);
+                if (result < 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "poll failed");
+                return result == 1 && (descriptor.ReturnedEvents & 1) != 0;
+            }
+        }
+        public void Dispose() { _pidfd?.Dispose(); _process.Dispose(); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollDescriptor { public int FileDescriptor; public short Events; public short ReturnedEvents; }
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
+    private static extern long LinuxSyscall(long number, int pid, uint flags);
+    [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
+    private static extern int Poll(ref PollDescriptor descriptor, uint count, int timeout);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
+
+    [Fact]
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
         NetCoreDbgSessionContractDriver.AssertUnixGuardianOwnershipContract();
 
