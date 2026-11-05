@@ -89,6 +89,14 @@ public class Program
         return x * x; // 3 frames deep: Main → Outer → Middle → Inner
     }
 
+    [System.Diagnostics.DebuggerNonUserCode]
+    static void NonUserFrame() => UserFrame();
+
+    static void UserFrame()
+    {
+        Console.WriteLine("SMOKE_JUST_MY_CODE_BREAKPOINT");
+    }
+
     // Scenario 6: Long-running for quick_evaluate testing
     static void LongRunning()
     {
@@ -555,6 +563,10 @@ public class Program
             case "stepping":
                 var result = Outer(1);
                 Console.WriteLine($"Outer(1) = {result}");
+                break;
+
+            case "justmycode":
+                NonUserFrame();
                 break;
 
             case "longrun":

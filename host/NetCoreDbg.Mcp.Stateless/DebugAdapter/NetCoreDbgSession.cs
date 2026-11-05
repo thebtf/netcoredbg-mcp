@@ -1500,7 +1500,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         var launchArguments = new DapLaunchArguments(debuggeeProgram,
             launchEnvironment is { Count: > 0 } ? launchEnvironment : null,
-            launchOptions?.WorkingDirectory, debuggeeArguments, launchOptions?.StopAtEntry);
+            launchOptions?.WorkingDirectory, debuggeeArguments, launchOptions?.StopAtEntry, launchOptions?.JustMyCode);
         var launch = await BeginRequestAsync(
             "launch",
             launchArguments,
@@ -5230,6 +5230,7 @@ internal sealed record DapLaunchOptions(
     string? WorkingDirectory,
     string[]? Arguments,
     bool? StopAtEntry,
+    bool? JustMyCode,
     IReadOnlyDictionary<string, string?>? Environment,
     string? DotnetHostPath = null);
 
@@ -5238,7 +5239,8 @@ internal sealed record DapLaunchArguments(
     [property: JsonPropertyName("env"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? Environment,
     [property: JsonPropertyName("cwd"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkingDirectory,
     [property: JsonPropertyName("args"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? Arguments,
-    [property: JsonPropertyName("stopAtEntry"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? StopAtEntry);
+    [property: JsonPropertyName("stopAtEntry"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? StopAtEntry,
+    [property: JsonPropertyName("justMyCode"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? JustMyCode);
 
 internal sealed record DapThread(
     [property: JsonPropertyName("id")] int Id,

@@ -196,6 +196,7 @@ public sealed class DebuggerLaunchContractTests
             new JsonObject { ["args"] = new JsonArray((JsonNode?)null) },
             new JsonObject { ["cwd"] = 12 },
             new JsonObject { ["stopAtEntry"] = "true" },
+            new JsonObject { ["justMyCode"] = "false" },
             new JsonObject { ["env"] = "not-an-object" },
             new JsonObject { ["env"] = new JsonObject { ["BAD"] = 12 } },
             new JsonObject { ["env"] = new JsonObject { [""] = "value" } },
@@ -227,6 +228,7 @@ public sealed class DebuggerLaunchContractTests
             ["args"] = null,
             ["cwd"] = null,
             ["stopAtEntry"] = null,
+            ["justMyCode"] = null,
             ["env"] = null,
         }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-options-null")));
         Assert.False(started["isError"]?.GetValue<bool>() ?? true, "Null launch options must retain the existing launch behavior.");
@@ -237,6 +239,7 @@ public sealed class DebuggerLaunchContractTests
         Assert.False(arguments.TryGetProperty("args", out _));
         Assert.False(arguments.TryGetProperty("cwd", out _));
         Assert.False(arguments.TryGetProperty("stopAtEntry", out _));
+        Assert.False(arguments.TryGetProperty("justMyCode", out _));
         await driver.StopSingleControlledSessionAsync(session);
     }
 

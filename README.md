@@ -58,6 +58,9 @@ starts, or the host returns `START_DEBUG_CWD_UNAVAILABLE` without a token.
 Relative paths are checked from the host working directory. This is a point-in-time
 check, not a pinned directory identity or proof that the debuggee later used it.
 
+The optional `justMyCode` boolean controls the adapter's user-code filtering;
+omitting it leaves the adapter default. Python launches with `justMyCode: false`.
+
 The optional `env` object passes string values, including empty strings, to the
 debugger for the debuggee; a `null` value removes that name from the owned adapter
 and its debuggee. It does not change the host environment or another session.

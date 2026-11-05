@@ -28,7 +28,7 @@ public sealed class ModernProtocolContractTests
         var started = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
         {
             ["name"] = "start_debug",
-            ["arguments"] = new JsonObject { ["program"] = driver.InertProgramPath },
+            ["arguments"] = new JsonObject { ["program"] = driver.InertProgramPath, ["justMyCode"] = false },
         }, new RequestId("legacy-start")));
         Assert.False(started["isError"]?.GetValue<bool>() ?? false);
         var id = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
