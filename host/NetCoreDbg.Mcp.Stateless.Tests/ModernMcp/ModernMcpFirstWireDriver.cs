@@ -18,12 +18,15 @@ internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
     private bool _multipleUnconfirmedStarts;
     private int _requestInFlight;
 
-    internal ModernMcpFirstWireDriver(FixtureProcess fixture, string scratchDirectory, ITransport transport)
+    internal ModernMcpFirstWireDriver(FixtureProcess fixture, string scratchDirectory, ITransport transport, string inertProgramPath)
     {
         _fixture = fixture;
         _scratchDirectory = scratchDirectory;
         _transport = transport;
+        InertProgramPath = inertProgramPath;
     }
+
+    internal string InertProgramPath { get; }
 
     internal async Task<JsonRpcMessage> SendFirstRequestAsync(
         string method,

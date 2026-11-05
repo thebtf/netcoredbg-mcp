@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The source-built native `start_debug` resolves an explicitly supplied project root's launch profile, merges inherited, profile and direct environment values, and returns value-free metadata. Python's automatic project-root discovery and pre-build behavior remain open.
+- The source-built native host resolves project roots for launch profiles and the existing three project-scoped code-search tools. Modern client roots use request-local `input_required` responses; operator pins remain authoritative unless an explicit `projectRoot` is supplied. Python pre-build and full client parity remain open.
 - The source-built native stateful host can negotiate initialize-era MCP clients as well as modern per-request clients. Its native tool schemas and explicit session IDs are unchanged; this is not yet Python-client or resource parity (Engram #552). The separately published read-only preview remains modern-only.
 - The source-built native `start_debug` accepts optional `justMyCode` to control adapter code filtering; omission retains the adapter default, while Python uses `false`.
 - The source-built native `start_debug` accepts session-local string or null environment overrides. Null removes an inherited name from the owned adapter and debuggee; internal probe names are reserved. DLL launches with `PATH` removed resolve the host first or return `START_DEBUG_DOTNET_UNAVAILABLE`. Local netcoredbg 3.1.3-1 on Windows code page 1251 corrupted non-ASCII environment data in both native and installed Python paths (Engram #551); Unicode parity is not claimed. The installed Python default is unchanged.

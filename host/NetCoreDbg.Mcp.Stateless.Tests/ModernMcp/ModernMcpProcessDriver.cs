@@ -90,17 +90,26 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
                 Command = candidate.Command,
-                Arguments = candidate.Arguments,
+                Arguments = options.HostArguments is null ? candidate.Arguments : candidate.Arguments.Concat(options.HostArguments).ToArray(),
                 Name = "netcoredbg-mcp-stateless-modern-contract",
-                WorkingDirectory = RepositoryLayout.Root,
+                WorkingDirectory = options.StartupDirectory ?? RepositoryLayout.Root,
                 InheritEnvironmentVariables = options.InheritEnvironmentVariables,
                 EnvironmentVariables = environment,
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
                 StandardErrorLines = line => driver?.AddStandardErrorLine(line),
             });
 
-            client = await McpClient.CreateAsync(transport,
-                options.ClientProtocolVersion is null ? null : new McpClientOptions { ProtocolVersion = options.ClientProtocolVersion },
+            var clientOptions = new McpClientOptions();
+            if (options.ClientProtocolVersion is not null) clientOptions.ProtocolVersion = options.ClientProtocolVersion;
+#pragma warning disable MCP9005 // The fixture exercises supported legacy roots clients.
+            var rootsHandler = options.RootsHandler;
+            if (rootsHandler is not null)
+            {
+                clientOptions.Capabilities = new ClientCapabilities { Roots = new RootsCapability() };
+                clientOptions.Handlers = new McpClientHandlers { RootsHandler = (_, ct) => rootsHandler(ct) };
+            }
+#pragma warning restore MCP9005
+            client = await McpClient.CreateAsync(transport, clientOptions,
                 cancellationToken: operation.Token).ConfigureAwait(false);
             driver = new ModernMcpProcessDriver(
                 fixture,
@@ -121,15 +130,16 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    internal static async Task<ModernMcpFirstWireDriver> StartFirstWireAsync(CancellationToken cancellationToken = default, FixtureConfiguration? fixtureConfiguration = null)
+    internal static async Task<ModernMcpFirstWireDriver> StartFirstWireAsync(CancellationToken cancellationToken = default, FixtureConfiguration? fixtureConfiguration = null, ModernMcpStartOptions? options = null)
     {
+        options ??= new ModernMcpStartOptions();
         var scratchDirectory = ModernMcpScratchDirectory.Create();
         FixtureProcess? fixture = null;
         StdioClientTransport? transport = null;
         ITransport? connection = null;
         try
         {
-            fixture = FixtureProcess.Create(fixtureConfiguration ?? new FixtureConfiguration());
+            fixture = FixtureProcess.Create(options.FixtureConfiguration ?? fixtureConfiguration ?? new FixtureConfiguration());
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
@@ -139,14 +149,15 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
                 Command = candidate.Command,
-                Arguments = candidate.Arguments,
+                Arguments = options.HostArguments is null ? candidate.Arguments : candidate.Arguments.Concat(options.HostArguments).ToArray(),
                 Name = "netcoredbg-mcp-stateless-first-wire-contract",
-                WorkingDirectory = RepositoryLayout.Root,
-                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath),
+                WorkingDirectory = options.StartupDirectory ?? RepositoryLayout.Root,
+                InheritEnvironmentVariables = options.InheritEnvironmentVariables,
+                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment, options.InheritEnvironmentVariables),
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
             });
             connection = await transport.ConnectAsync(operation.Token).ConfigureAwait(false);
-            var driver = new ModernMcpFirstWireDriver(fixture, scratchDirectory, connection);
+            var driver = new ModernMcpFirstWireDriver(fixture, scratchDirectory, connection, inertProgramPath);
             connection = null;
             transport = null;
             fixture = null;
@@ -234,7 +245,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     {
         Assert.Single(await _fixture.ReadTranscriptAsync(), static entry => entry.Kind == "startup");
         var result = RequireResult(await CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = sessionId },
-            CurrentMeta(), new RequestId("controlled-cleanup")));
+            CurrentMeta(), new RequestId("controlled-cleanup"), timeout: TimeSpan.FromSeconds(10)));
         Assert.False(result["isError"]?.GetValue<bool>() ?? false);
         Assert.Equal("stop_debug_success", result["structuredContent"]?["kind"]?.GetValue<string>());
     }
@@ -980,6 +991,7 @@ internal sealed record RegistryCleanupFailureObservation(
     JsonElement UnusableContent,
     JsonElement MissingContent);
 
+#pragma warning disable MCP9005 // Roots options remain necessary for compatibility tests.
 internal sealed record ModernMcpStartOptions(
     JsonObject? InitialMeta = null,
     bool DisableFormElicitation = false,
@@ -987,7 +999,11 @@ internal sealed record ModernMcpStartOptions(
     FixtureConfiguration? FixtureConfiguration = null,
     IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null,
     bool InheritEnvironmentVariables = true,
-    string? ClientProtocolVersion = null);
+    string? ClientProtocolVersion = null,
+    IReadOnlyList<string>? HostArguments = null,
+    string? StartupDirectory = null,
+    Func<CancellationToken, ValueTask<ListRootsResult>>? RootsHandler = null);
+#pragma warning restore MCP9005
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);

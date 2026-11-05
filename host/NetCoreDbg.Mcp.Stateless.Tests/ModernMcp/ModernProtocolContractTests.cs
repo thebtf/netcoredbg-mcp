@@ -16,6 +16,142 @@ public sealed class ModernProtocolContractTests
     private const string ValidProgram = "controlled-program.dll";
 
     [Theory]
+    [InlineData("2025-11-25")]
+    [InlineData("2026-07-28")]
+    public async Task ProjectSearch_UsesPinnedProjectAndExistingConsumerContract(string protocolVersion)
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var root = Path.Combine(scratch, "project");
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(Path.Combine(root, "Alpha.cs"),
+                "public class VisibleProbe\n{\n    public VisibleProbe Next;\n}\n");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "Outside.cs"), "outside-project-secret");
+
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["NETCOREDBG_PROJECT_ROOT"] = root,
+                    ["MCP_PROJECT_ROOT"] = null,
+                },
+                ClientProtocolVersion: protocolVersion), startupTimeout: TimeSpan.FromSeconds(10));
+
+            async Task<JsonObject> InvokeAsync(string name, JsonObject arguments, bool expectedError = false)
+            {
+                var request = new JsonObject { ["name"] = name, ["arguments"] = arguments };
+                if (protocolVersion == "2026-07-28") request["_meta"] = ModernMcpProcessDriver.CurrentMeta();
+                var response = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync(
+                    "tools/call", request, new RequestId($"project-search-{name}")));
+                Assert.Equal("complete", response["resultType"]?.GetValue<string>());
+                Assert.Equal(expectedError, response["isError"]?.GetValue<bool>() ?? false);
+                var content = Assert.IsType<JsonObject>(response["structuredContent"]);
+                Assert.False(content.ContainsKey("state"));
+                Assert.False(content.ContainsKey("message"));
+                return content;
+            }
+
+            var symbols = await InvokeAsync("find_code_symbol", new JsonObject { ["name"] = "VisibleProbe", ["kind"] = "class" });
+            var symbolData = Assert.IsType<JsonObject>(symbols["data"]);
+            Assert.Equal(root, symbolData["project_root"]?.GetValue<string>());
+            var symbol = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(symbolData["results"])));
+            Assert.Equal("Alpha.cs", symbol["file"]?.GetValue<string>());
+            Assert.Equal(1, symbol["line"]?.GetValue<int>());
+            Assert.Equal("class", symbol["kind"]?.GetValue<string>());
+
+            var references = await InvokeAsync("find_code_references", new JsonObject { ["name"] = "VisibleProbe" });
+            var referenceData = Assert.IsType<JsonObject>(references["data"]);
+            Assert.Equal(2, referenceData["count"]?.GetValue<int>());
+            Assert.Equal([1, 3], Assert.IsType<JsonArray>(referenceData["results"]).Select(static item => item!["line"]!.GetValue<int>()));
+
+            var context = await InvokeAsync("get_source_context", new JsonObject { ["file"] = "Alpha.cs", ["line"] = 2, ["radius"] = 1 });
+            var contextData = Assert.IsType<JsonObject>(context["data"]);
+            Assert.Equal("Alpha.cs", contextData["file"]?.GetValue<string>());
+            Assert.Equal(["public class VisibleProbe", "{", "    public VisibleProbe Next;"],
+                Assert.IsType<JsonArray>(contextData["lines"]).Select(static item => item!["text"]!.GetValue<string>()));
+
+            var outside = await InvokeAsync("get_source_context", new JsonObject { ["file"] = "../Outside.cs", ["line"] = 1 }, expectedError: true);
+            Assert.NotNull(outside["error"]);
+            Assert.DoesNotContain("outside-project-secret", outside.ToJsonString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSearch_ModernRootsAreRequestedAndResolvedPerCall()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var firstRoot = Path.Combine(scratch, "first");
+            var secondRoot = Path.Combine(scratch, "second");
+            Directory.CreateDirectory(firstRoot);
+            Directory.CreateDirectory(secondRoot);
+            await File.WriteAllTextAsync(Path.Combine(firstRoot, "Marker.cs"), "public class FirstProjectMarker {}\n");
+            await File.WriteAllTextAsync(Path.Combine(secondRoot, "Marker.cs"), "public class SecondProjectMarker {}\n");
+
+            await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync(options: new ModernMcpStartOptions(
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["NETCOREDBG_PROJECT_ROOT"] = null,
+                    ["MCP_PROJECT_ROOT"] = null,
+                }));
+
+            async Task CheckRootAsync(string root, string expectedLine, string id)
+            {
+                var meta = ModernMcpProcessDriver.CurrentMeta();
+                Assert.IsType<JsonObject>(meta[MetaKeys.ClientCapabilities])["roots"] = new JsonObject();
+                var request = new JsonObject
+                {
+                    ["name"] = "get_source_context",
+                    ["arguments"] = new JsonObject { ["file"] = "Marker.cs", ["line"] = 1, ["radius"] = 0 },
+                    ["_meta"] = meta,
+                };
+                var initial = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync(
+                    "tools/call", request, new RequestId($"{id}-roots-request"))));
+                Assert.Equal("input_required", initial["resultType"]?.GetValue<string>());
+                var input = Assert.Single(Assert.IsType<JsonObject>(initial["inputRequests"]));
+                Assert.Equal("roots/list", input.Value?["method"]?.GetValue<string>());
+                Assert.False(initial.ContainsKey("requestState"));
+
+                request["inputResponses"] = new JsonObject
+                {
+                    [input.Key] = new JsonObject
+                    {
+                        ["roots"] = new JsonArray(
+                            new JsonObject { ["uri"] = "file://remote.invalid/share" },
+                            new JsonObject { ["uri"] = new Uri(root + Path.DirectorySeparatorChar).AbsoluteUri }),
+                    },
+                };
+                var completed = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync(
+                    "tools/call", request, new RequestId($"{id}-roots-response"))));
+                Assert.Equal("complete", completed["resultType"]?.GetValue<string>());
+                var data = Assert.IsType<JsonObject>(completed["structuredContent"]?["data"]);
+                Assert.Equal(root, data["project_root"]?.GetValue<string>());
+                Assert.Equal(expectedLine, Assert.Single(Assert.IsType<JsonArray>(data["lines"]))?["text"]?.GetValue<string>());
+            }
+
+            await CheckRootAsync(firstRoot, "public class FirstProjectMarker {}", "first");
+            await CheckRootAsync(secondRoot, "public class SecondProjectMarker {}", "second");
+
+            var fallback = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "get_source_context",
+                ["arguments"] = new JsonObject { ["file"] = "host/NetCoreDbg.Mcp.Stateless/Program.cs", ["line"] = 1, ["radius"] = 0 },
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId("no-roots-fallback"))));
+            Assert.Equal(Path.GetFullPath(RepositoryLayout.Root), fallback["structuredContent"]?["data"]?["project_root"]?.GetValue<string>());
+        }
+        finally
+        {
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+    [Theory]
     [InlineData("2025-06-18")]
     [InlineData("2025-11-25")]
     public async Task LegacyHandshake_CanUseTheExplicitNativeSession(string version)
@@ -1003,7 +1139,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(33, tools.Count);
+        Assert.Equal(36, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -1039,6 +1175,9 @@ public sealed class ModernProtocolContractTests
                 "wait_for_ui_stable",
                 "capture_element_snapshot",
                 "capture_native_scene",
+                "find_code_symbol",
+                "find_code_references",
+                "get_source_context",
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(

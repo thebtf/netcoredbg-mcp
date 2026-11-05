@@ -27,7 +27,7 @@ internal static class ToolsRelay
     {
         nativeCodeSearch ??= new NativeCodeSearch(
             ProjectRootResolver.FromHostArguments(Array.Empty<string>(), Environment.CurrentDirectory),
-            session);
+            session.SessionEndingToken);
         catalog.Add(new RelayRoute(RequestMethods.ToolsList, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request));
         catalog.Add(new RelayRoute(RequestMethods.ToolsCall, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request));
 

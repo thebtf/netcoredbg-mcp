@@ -11,6 +11,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using NetCoreDbg.Mcp.Host;
 using NetCoreDbg.Mcp.Stateless.DebugAdapter;
 using NetCoreDbg.Mcp.Stateless.NativeScene;
 using NetCoreDbg.Mcp.Stateless.NativeUi;
@@ -49,18 +50,22 @@ internal static class Program
         var sessions = new DebugSessionRegistry(
             Environment.GetEnvironmentVariable("NETCOREDBG_PATH"),
             Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
-            Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"));
+            Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"))
+        {
+            ProjectRootResolver = ProjectRootResolver.FromHostArguments(arguments, Environment.CurrentDirectory),
+        };
         var host = BuildHost(sessions);
         await host.RunAsync().ConfigureAwait(false);
     }
 
     private static IHost BuildHost(DebugSessionRegistry sessions)
     {
-        var builder = Host.CreateApplicationBuilder();
+        var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
         builder.Services.AddSingleton(sessions);
         builder.Services.AddHostedService(_ => new SessionDisposer(sessions));
+        var projectSearch = new NativeCodeSearch(sessions.ProjectRootResolver, sessions.ShutdownToken, useModernResultEnvelope: true);
 
         builder.Services.AddMcpServer(options =>
             {
@@ -72,8 +77,15 @@ internal static class Program
             .WithStdioServerTransport()
             .WithListToolsHandler((context, cancellationToken) =>
                 ValueTask.FromResult(ToolCatalog.List()))
-            .WithCallToolHandler((context, cancellationToken) =>
-                sessions.CallAsync(context, cancellationToken))
+            .WithCallToolHandler(async (context, cancellationToken) =>
+            {
+                if (!NativeCodeSearch.IsNativeTool(context.Params.Name))
+                    return await sessions.CallAsync(context, cancellationToken).ConfigureAwait(false);
+
+                var result = await projectSearch.CallAsync(context, cancellationToken).ConfigureAwait(false);
+                result.ResultType = "complete";
+                return result;
+            })
             .WithMessageFilters(filters =>
             {
                 filters.AddIncomingFilter(next => async (context, cancellationToken) =>
@@ -267,6 +279,13 @@ internal static class Program
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
         private readonly Action? _failedStartCleanupCompleted;
+        private ProjectRootResolver? _projectRootResolver;
+        internal ProjectRootResolver ProjectRootResolver
+        {
+            get => _projectRootResolver ??= NetCoreDbg.Mcp.Host.ProjectRootResolver.FromHostArguments([], Environment.CurrentDirectory);
+            init => _projectRootResolver = value;
+        }
+        internal CancellationToken ShutdownToken => _startShutdown.Token;
         private readonly bool _supportsNativeSceneCapture = !StringComparer.OrdinalIgnoreCase.Equals(
             Environment.GetEnvironmentVariable("NETCOREDBG_MCP_NATIVE_SCENE_CAPTURE"),
             "unsupported");
@@ -408,7 +427,7 @@ internal static class Program
                         return Error("start_debug_input_unavailable", "START_DEBUG_PROGRAM_REQUIRED");
                     }
 
-                    throw new InputRequiredException(new Dictionary<string, InputRequest>
+                    var inputRequests = new Dictionary<string, InputRequest>
                     {
                         [InputRequestId] = InputRequest.ForElicitation(new ElicitRequestParams
                         {
@@ -427,7 +446,23 @@ internal static class Program
                                 Required = ["program"],
                             },
                         }),
-                    });
+                    };
+                    if (projectRoot is null && global::NetCoreDbg.Mcp.Host.ProjectRootResolver.SupportsClientRoots(context.Server))
+                    {
+                        try
+                        {
+                            // Request roots again even if this attempt supplied them: SDK clients replace
+                            // inputResponses on retry, so both inputs must travel in the same round trip.
+                            _ = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (InputRequiredException rootsRequired)
+                        {
+                            if (rootsRequired.Result.InputRequests is { } rootsRequests)
+                                foreach (var (key, request) in rootsRequests) inputRequests.Add(key, request);
+                        }
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new InputRequiredException(inputRequests);
                 }
             }
 
@@ -472,6 +507,12 @@ internal static class Program
             {
                 startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _startShutdown.Token);
                 startupCancellation.Token.ThrowIfCancellationRequested();
+                if (projectRoot is null)
+                {
+                    projectRoot = await ProjectRootResolver.ResolveAsync(context.Server, startupCancellation.Token, context.Params.InputResponses).ConfigureAwait(false);
+                    if (projectRoot is null)
+                        return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
+                }
                 DapLaunchProfileResult profile;
                 try
                 {
@@ -578,6 +619,10 @@ internal static class Program
                     await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken).ConfigureAwait(false);
                 }
 
+                throw;
+            }
+            catch (InputRequiredException)
+            {
                 throw;
             }
             catch (Exception exception)
@@ -3654,6 +3699,9 @@ internal static class Program
                 Tool("get_loaded_sources", "Request the current loaded-source snapshot when the adapter advertises support. Duplicate normalized source identities replace earlier entries. The result is a snapshot, not a live event cache, and content above 256 KiB fails without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 .. NativeSceneToolDispatcher.ListTools(),
+                NativeCodeSearchCatalog.Definition("find_code_symbol"),
+                NativeCodeSearchCatalog.Definition("find_code_references"),
+                NativeCodeSearchCatalog.Definition("get_source_context"),
             ],
             TimeToLive = CacheLifetime,
             CacheScope = CacheScope.Public,
