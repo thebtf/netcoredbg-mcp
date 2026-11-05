@@ -158,6 +158,8 @@ searches for solution, project, or Git markers before using the startup director
 A configured but unavailable operator scope fails closed rather than selecting a
 client root. Modern clients may receive `input_required` for client roots before
 the adapter starts.
+For initialize-era clients, a failed or timed-out `roots/list` falls back to the
+startup directory or `--project-from-cwd` selection; an operator pin still wins.
 MCP roots are deprecated in protocol version 2026-07-28 but remain supported
 here for existing clients.
 

@@ -318,6 +318,34 @@ public sealed class DebuggerLaunchContractTests
     }
 
     [Fact]
+    public async Task LegacyClient_RootsErrorFallsBackForLaunchAndSearch()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var startup = await CreateProfileRootAsync(scratch, "fallback");
+            await File.WriteAllTextAsync(Path.Combine(startup, "FallbackMarker.cs"), "public class FallbackMarker {}\n");
+            var calls = 0;
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: startup, ClientProtocolVersion: "2025-11-25",
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null },
+                RootsHandler: _ =>
+                {
+                    Interlocked.Increment(ref calls);
+                    throw new McpProtocolException("List roots not supported", McpErrorCode.InvalidRequest);
+                }));
+
+            var search = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("find_code_symbol",
+                new JsonObject { ["name"] = "FallbackMarker" }, new JsonObject(), new RequestId("roots-error-search")));
+            Assert.False(search["isError"]?.GetValue<bool>() ?? true);
+            Assert.Equal(startup, search["structuredContent"]?["data"]?["project_root"]?.GetValue<string>());
+            await AssertProfileAsync(driver, "fallback", null, new JsonObject(), "roots-error-launch");
+            Assert.Equal(2, calls);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
     public async Task StartDebug_NoRootsCapability_UsesStartupMarker()
     {
         var scratch = ModernMcpScratchDirectory.Create();

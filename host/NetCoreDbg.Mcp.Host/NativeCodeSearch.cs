@@ -137,7 +137,7 @@ internal sealed class NativeCodeSearch
     {
         var projectRoot = await _projectRootResolver.ResolveAsync(context.Server, cancellationToken
 #if NETCOREDBG_MODERN_MCP
-            , context.Params.InputResponses
+            , context.Params.InputResponses, context.JsonRpcRequest.Context?.ProtocolVersion
 #endif
             ).ConfigureAwait(false);
         if (projectRoot is null)
