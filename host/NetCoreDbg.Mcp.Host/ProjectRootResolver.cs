@@ -76,7 +76,7 @@ internal sealed class ProjectRootResolver
 
     internal async ValueTask<string?> ResolveAsync(McpServer server, CancellationToken cancellationToken
 #if NETCOREDBG_MODERN_MCP
-        , IDictionary<string, InputResponse>? inputResponses = null
+        , IDictionary<string, InputResponse>? inputResponses = null, string? requestProtocolVersion = null
 #endif
         )
     {
@@ -93,7 +93,7 @@ internal sealed class ProjectRootResolver
         if (SupportsClientRoots(server))
         {
 #if NETCOREDBG_MODERN_MCP
-            if (server.IsMrtrSupported)
+            if (UsesNativeMrtr(server, requestProtocolVersion))
             {
                 const string rootsRequestId = "project_root_roots";
                 if (inputResponses is null || !inputResponses.TryGetValue(rootsRequestId, out var response))
@@ -128,6 +128,12 @@ internal sealed class ProjectRootResolver
     }
 
     internal static bool SupportsClientRoots(McpServer server) => server.ClientCapabilities?.Roots is not null;
+
+#if NETCOREDBG_MODERN_MCP
+    // IsMrtrSupported also includes SDK emulation for stateful initialize-era clients.
+    internal static bool UsesNativeMrtr(McpServer server, string? requestProtocolVersion) =>
+        server.IsMrtrSupported && string.CompareOrdinal(requestProtocolVersion ?? server.NegotiatedProtocolVersion, "2026-07-28") >= 0;
+#endif
 
     private bool HasOperatorScope() =>
         !string.IsNullOrEmpty(_netCoreDbgProjectRoot)

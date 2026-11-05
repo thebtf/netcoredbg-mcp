@@ -1007,13 +1007,15 @@ internal static class Program
                             },
                         }),
                     };
-                    if (projectRoot is null && global::NetCoreDbg.Mcp.Host.ProjectRootResolver.SupportsClientRoots(context.Server))
+                    if (projectRoot is null && global::NetCoreDbg.Mcp.Host.ProjectRootResolver.SupportsClientRoots(context.Server)
+                        && global::NetCoreDbg.Mcp.Host.ProjectRootResolver.UsesNativeMrtr(context.Server, context.JsonRpcRequest.Context?.ProtocolVersion))
                     {
                         try
                         {
                             // Request roots again even if this attempt supplied them: SDK clients replace
                             // inputResponses on retry, so both inputs must travel in the same round trip.
-                            _ = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken).ConfigureAwait(false);
+                            _ = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken,
+                                requestProtocolVersion: context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
                         }
                         catch (InputRequiredException rootsRequired)
                         {
@@ -1080,7 +1082,8 @@ internal static class Program
                 startupCancellation.Token.ThrowIfCancellationRequested();
                 if (projectRoot is null)
                 {
-                    projectRoot = await ProjectRootResolver.ResolveAsync(context.Server, startupCancellation.Token, context.Params.InputResponses).ConfigureAwait(false);
+                    projectRoot = await ProjectRootResolver.ResolveAsync(context.Server, startupCancellation.Token,
+                        context.Params.InputResponses, context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
                     if (projectRoot is null)
                         return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
                 }
