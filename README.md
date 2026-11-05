@@ -94,6 +94,23 @@ then direct `env` overrides. A missing requested profile or invalid file returns
 `START_DEBUG_PROJECT_UNAVAILABLE`. The optional `launchEnvironment` result
 contains names and counts, never values.
 
+Set `preBuild: true` and `buildProject` to restore and build before launching;
+`buildConfiguration` is `Debug` or `Release` (default `Debug`). The equivalent
+snake-case fields and `stop_at_entry`/`launch_profile` are accepted; supplying
+both spellings of one field is invalid. Pre-build defaults to false in this
+native host, unlike Python's tool default. Relative build-project and program
+paths resolve from the host working directory. Network/device paths and build
+project paths containing links or reparse points are refused.
+These are point-in-time path checks, not a pin against later project changes.
+
+The build uses the selected project root as its working directory, does not use
+debuggee `env` overrides, and disables persistent build servers. It refuses to
+start while another native session or start is active; it never stops another
+session. Completed build failures include bounded stdout/stderr tails and
+truncation flags. On Windows, command cleanup requires zero active processes in
+the owned Job. On Unix, cleanup covers the owned process group, not descendants
+that escape it. Unconfirmed cleanup blocks later starts until the host restarts.
+
 The same project selection supports the source-built native `find_code_symbol`,
 `find_code_references`, and `get_source_context` tools. Their results do not
 report an implicit debug-session state. Python's full search and launch contract,

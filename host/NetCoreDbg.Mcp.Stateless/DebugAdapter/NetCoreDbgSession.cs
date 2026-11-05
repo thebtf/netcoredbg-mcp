@@ -4118,13 +4118,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
 
         public static WindowsProcessTreeLaunch Start(string debuggerPath, WindowsChildEnvironmentBlock environment) =>
-            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment);
+            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment, workingDirectory: null);
 
         internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments) =>
-            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null);
+            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory: null);
+
+        internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments, string workingDirectory) =>
+            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory);
 
         private static WindowsProcessTreeLaunch StartCore(
-            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment)
+            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment, string? workingDirectory)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
             ArgumentNullException.ThrowIfNull(arguments);
@@ -4162,7 +4165,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     childInput.DangerousGetHandle(),
                     childOutput.DangerousGetHandle(),
                     childError.DangerousGetHandle(),
-                    atomicJobAssignment ? job : null, environment);
+                    atomicJobAssignment ? job : null, environment, workingDirectory);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -4194,17 +4197,33 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 standardOutput = null;
                 error = new FileStream(standardError, FileAccess.Read, bufferSize: 4096, isAsync: false);
                 standardError = null;
+                var ownership = new WindowsProcessTreeOwnership(job);
+                var launch = new WindowsProcessTreeLaunch(process, input, output, error, ownership);
                 CloseHandle(processHandle);
                 processHandle = IntPtr.Zero;
-                var ownership = new WindowsProcessTreeOwnership(job);
                 job = null;
-                return new WindowsProcessTreeLaunch(process, input, output, error, ownership);
+                return launch;
             }
-            catch
+            catch (Exception failure)
             {
+                Exception? cleanupFailure = null;
                 if (processHandle != IntPtr.Zero)
                 {
-                    TerminateProcess(processHandle, 1);
+                    if (atomicJobAssignment && job is not null)
+                    {
+                        try
+                        {
+                            TerminateAndDrainFailedLaunch(job, processHandle);
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = exception;
+                        }
+                    }
+                    else
+                    {
+                        TerminateProcess(processHandle, 1);
+                    }
                 }
 
                 input?.Dispose();
@@ -4212,6 +4231,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 error?.Dispose();
                 process?.Dispose();
                 job?.Dispose();
+                if (cleanupFailure is not null)
+                    throw new AggregateException("Process launch failed and owned job cleanup could not be confirmed.", failure, cleanupFailure);
                 throw;
             }
             finally
@@ -4239,6 +4260,37 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         internal bool Contains(SafeProcessHandle process) =>
             !process.IsInvalid && IsProcessInJob(process, _job, out var inJob) && inJob;
+
+        internal uint ActiveProcessCount() => ActiveProcessCount(_job);
+
+        private static uint ActiveProcessCount(SafeKernelHandle job)
+        {
+            if (!QueryInformationJobObject(job, 1, out var accounting,
+                    (uint)Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero))
+            {
+                throw LastWin32Error("Could not query the process job object accounting.");
+            }
+
+            return accounting.ActiveProcesses;
+        }
+
+        private static void TerminateAndDrainFailedLaunch(SafeKernelHandle job, IntPtr process)
+        {
+            if (!TerminateJobObject(job.DangerousGetHandle(), 1))
+                throw LastWin32Error("Could not terminate the failed launch job object.");
+            var elapsed = Stopwatch.StartNew();
+            var wait = WaitForSingleObject(process, 5000);
+            if (wait == uint.MaxValue)
+                throw LastWin32Error("Could not wait for the failed launch process.");
+            if (wait != 0)
+                throw new TimeoutException("The failed launch process did not exit.");
+            while (ActiveProcessCount(job) != 0)
+            {
+                if (elapsed.Elapsed >= TimeSpan.FromSeconds(5))
+                    throw new TimeoutException("The failed launch job did not drain.");
+                Thread.Sleep(50);
+            }
+        }
 
         public void Terminate()
         {
@@ -4318,7 +4370,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             IntPtr standardOutput,
             IntPtr standardError,
             SafeKernelHandle? atomicJob,
-            WindowsChildEnvironmentBlock? environment)
+            WindowsChildEnvironmentBlock? environment,
+            string? workingDirectory)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
@@ -4396,7 +4449,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         inheritHandles: true,
                         CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent | (environment is null ? 0 : CreateUnicodeEnvironment),
                         environment?.DangerousGetHandle() ?? IntPtr.Zero,
-                        currentDirectory: null,
+                        currentDirectory: workingDirectory,
                         ref startupInfo,
                         out var processInformation))
                 {
@@ -4546,6 +4599,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryInformationJobObject(
+            SafeKernelHandle job, uint informationClass,
+            out JobObjectBasicAccountingInformation information, uint informationLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -4555,6 +4614,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -4618,6 +4680,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             public IntPtr Thread;
             public uint ProcessId;
             public uint ThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicAccountingInformation
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
         }
 
         [StructLayout(LayoutKind.Sequential)]

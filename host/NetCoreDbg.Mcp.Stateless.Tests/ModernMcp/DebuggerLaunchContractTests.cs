@@ -10,6 +10,115 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 [Trait("Coverage", "Exclude")]
 public sealed class DebuggerLaunchContractTests
 {
+    [Fact]
+    public async Task StartDebug_PreBuildBuildsThenRefusesACompilerFailure()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var project = Path.Combine(scratch, "BuildProbe.csproj");
+            var source = Path.Combine(scratch, "Program.cs");
+            var output = Path.Combine(scratch, "bin", "Debug", "net8.0", "BuildProbe.dll");
+            await File.WriteAllTextAsync(project, """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>""");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "NuGet.Config"), """<configuration><packageSources><clear /></packageSources></configuration>""");
+            await File.WriteAllTextAsync(source, "System.Console.WriteLine(\"build-probe\");\n");
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                StartupDirectory: scratch,
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null }),
+                startupTimeout: TimeSpan.FromSeconds(10));
+            var started = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+            {
+                ["program"] = output,
+                ["projectRoot"] = scratch,
+                ["pre_build"] = true,
+                ["build_project"] = project,
+                ["build_configuration"] = "Debug",
+                ["stop_at_entry"] = false,
+            }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-success"), timeout: TimeSpan.FromSeconds(90)));
+            Assert.False(started["isError"]?.GetValue<bool>() ?? true);
+            Assert.True(File.Exists(output));
+            var id = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+            await driver.StopSingleControlledSessionAsync(id);
+
+            await File.WriteAllTextAsync(source, "public static class Program { public static void Main() {\n"
+                + string.Concat(Enumerable.Range(0, 100).Select(static index => $"int value{index} = ;\n")) + "} }\n");
+            var failed = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+            {
+                ["program"] = output,
+                ["projectRoot"] = scratch,
+                ["preBuild"] = true,
+                ["buildProject"] = project,
+                ["buildConfiguration"] = "Debug",
+            }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-failure"), timeout: TimeSpan.FromSeconds(90)));
+            Assert.True(failed["isError"]?.GetValue<bool>() ?? false);
+            var content = Assert.IsType<JsonObject>(failed["structuredContent"]);
+            Assert.Equal("START_DEBUG_BUILD_FAILED", content["error"]?.GetValue<string>());
+            Assert.Equal("build", content["stage"]?.GetValue<string>());
+            Assert.NotEqual(0, content["exitCode"]?.GetValue<int>());
+            Assert.Contains("CS", (content["stdout"]?.GetValue<string>() ?? "") + (content["stderr"]?.GetValue<string>() ?? ""), StringComparison.Ordinal);
+            Assert.False(content.ContainsKey("debugSessionId"));
+            Assert.True((content["stdoutTruncated"]?.GetValue<bool>() ?? false) || (content["stderrTruncated"]?.GetValue<bool>() ?? false));
+            Assert.True((content["stdout"]?.GetValue<string>()?.Length ?? 0) <= 4096);
+            Assert.True((content["stderr"]?.GetValue<string>()?.Length ?? 0) <= 4096);
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+            Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Kind == "startup");
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task StartDebug_PreBuildDoesNotStopAnExistingSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var started = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("prebuild-existing-start"), timeout: TimeSpan.FromSeconds(10)));
+        var id = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+        var refused = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["preBuild"] = true,
+            ["buildProject"] = driver.InertProgramPath,
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-busy"), timeout: TimeSpan.FromSeconds(10)));
+        var content = Assert.IsType<JsonObject>(refused["structuredContent"]);
+        Assert.Equal("START_DEBUG_BUILD_BUSY", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var state = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = id }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-existing-state")));
+        Assert.Equal("debug_state_success", state["structuredContent"]?["kind"]?.GetValue<string>());
+        await driver.StopSingleControlledSessionAsync(id);
+    }
+
+    [Fact]
+    public async Task StartDebug_PreBuildRequiresAProjectBeforeLaunchingAnything()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["preBuild"] = true,
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-no-project")));
+        var content = Assert.IsType<JsonObject>(result["structuredContent"]);
+        Assert.Equal("START_DEBUG_BUILD_PROJECT_REQUIRED", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var invalidProgram = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = "invalid\0target.dll",
+            ["preBuild"] = true,
+            ["buildProject"] = driver.InertProgramPath,
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-invalid-program")));
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", invalidProgram["structuredContent"]?["error"]?.GetValue<string>());
+        var invalidCwd = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["cwd"] = "invalid\0directory",
+            ["preBuild"] = true,
+            ["buildProject"] = driver.InertProgramPath,
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("prebuild-invalid-cwd")));
+        Assert.Equal("START_DEBUG_CWD_UNAVAILABLE", invalidCwd["structuredContent"]?["error"]?.GetValue<string>());
+        Assert.Empty(await driver.ReadNativeActionsAsync());
+    }
+
 #pragma warning disable MCP9005 // Exercise roots while older clients remain supported.
     [Theory]
     [InlineData(false)]
@@ -549,6 +658,13 @@ public sealed class DebuggerLaunchContractTests
             new JsonObject { ["projectRoot"] = "" },
             new JsonObject { ["launchProfile"] = true },
             new JsonObject { ["launchProfile"] = "bad\0name" },
+            new JsonObject { ["preBuild"] = "true" },
+            new JsonObject { ["preBuild"] = true, ["pre_build"] = true },
+            new JsonObject { ["buildProject"] = "a", ["build_project"] = "b" },
+            new JsonObject { ["buildConfiguration"] = "Other" },
+            new JsonObject { ["buildConfiguration"] = "Debug", ["build_configuration"] = "Debug" },
+            new JsonObject { ["stopAtEntry"] = true, ["stop_at_entry"] = true },
+            new JsonObject { ["launchProfile"] = "a", ["launch_profile"] = "a" },
             new JsonObject { ["justMyCode"] = "false" },
             new JsonObject { ["env"] = "not-an-object" },
             new JsonObject { ["env"] = new JsonObject { ["BAD"] = 12 } },

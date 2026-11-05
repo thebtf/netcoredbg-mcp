@@ -27,6 +27,22 @@ internal static class Program
     {
         if (!OperatingSystem.IsWindows()
             && arguments.Length == 3
+            && string.Equals(arguments[0], "--unix-build-group-anchor", StringComparison.Ordinal))
+        {
+            await DapBuildUnixRunner.RunAnchorAsync(arguments).ConfigureAwait(false);
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows()
+            && arguments.Length >= 5
+            && string.Equals(arguments[0], "--unix-build-command-proxy", StringComparison.Ordinal))
+        {
+            await DapBuildUnixRunner.RunGuardianAsync(arguments).ConfigureAwait(false);
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows()
+            && arguments.Length == 3
             && string.Equals(arguments[0], UnixProcessGroupProxy, StringComparison.Ordinal)
             && !string.IsNullOrWhiteSpace(arguments[1])
             && !string.IsNullOrWhiteSpace(arguments[2]))
@@ -270,6 +286,8 @@ internal static class Program
         private bool _startShutdownDisposed;
         private Task? _shutdownTask;
         private bool _shutdownRequested;
+        private bool _buildActive;
+        private bool _buildCleanupUnconfirmed;
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _stepOverRequests = new();
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _uiInvokeRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
@@ -407,12 +425,16 @@ internal static class Program
             if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram)
                 || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints)
                 || !TryReadLaunchOptions(context.Params.Arguments, out var launchOptions)
-                || !TryReadLaunchProfileArguments(context.Params.Arguments, out var projectRoot, out var profileName))
+                || !TryReadLaunchProfileArguments(context.Params.Arguments, out var projectRoot, out var profileName)
+                || !TryReadPreBuildArguments(context.Params.Arguments, out var preBuild))
             {
                 return InvalidArguments(StartDebug);
             }
 
-            if (launchOptions?.WorkingDirectory is { } workingDirectory && !Directory.Exists(workingDirectory))
+            if (preBuild.Enabled && preBuild.Project is null)
+                return Error("start_debug_build_project_required", "START_DEBUG_BUILD_PROJECT_REQUIRED");
+
+            if (!preBuild.Enabled && launchOptions?.WorkingDirectory is { } workingDirectory && !Directory.Exists(workingDirectory))
             {
                 return Error("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE");
             }
@@ -466,6 +488,12 @@ internal static class Program
                 }
             }
 
+            if (preBuild.Enabled && !DapBuildCoordinator.TryNormalizeProgram(program!, out program))
+                return InvalidArguments(StartDebug);
+            if (preBuild.Enabled && launchOptions?.WorkingDirectory is { } futureWorkingDirectory &&
+                !DapBuildCoordinator.IsValidDirectoryPath(futureWorkingDirectory))
+                return Error("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE");
+
 
             if (!TryNormalizeBreakpointSources(breakpoints))
             {
@@ -494,6 +522,11 @@ internal static class Program
                 {
                     return NotFound();
                 }
+                if (_buildCleanupUnconfirmed)
+                    return Error("start_debug_build_cleanup_unconfirmed", "START_DEBUG_BUILD_CLEANUP_UNCONFIRMED");
+                if (_buildActive || (preBuild.Enabled && (_starts != 0 || _ownedSlots.Count != 0)))
+                    return Error("start_debug_build_busy", "START_DEBUG_BUILD_BUSY");
+                if (preBuild.Enabled) _buildActive = true;
 
                 _starts++;
             }
@@ -521,6 +554,40 @@ internal static class Program
                 catch (DapLaunchProfileException)
                 {
                     return Error("start_debug_launch_profile_invalid", "START_DEBUG_LAUNCH_PROFILE_INVALID");
+                }
+
+                if (preBuild.Enabled)
+                {
+                    if (!DapBuildCoordinator.TryCreatePlan(projectRoot, preBuild.Project, preBuild.Configuration, out var plan))
+                        return Error("start_debug_build_project_invalid", "START_DEBUG_BUILD_PROJECT_INVALID");
+                    DapBuildResult build;
+                    try
+                    {
+                        build = await DapBuildCoordinator.BuildAsync(plan!, startupCancellation.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is DapBuildCleanupException or AggregateException)
+                    {
+                        lock (_lifetimeGate) { _buildCleanupUnconfirmed = true; }
+                        if (cancellationToken.IsCancellationRequested) throw;
+                        return Error("start_debug_build_cleanup_unconfirmed", "START_DEBUG_BUILD_CLEANUP_UNCONFIRMED");
+                    }
+                    catch (TimeoutException)
+                    {
+                        return Error("start_debug_build_timeout", "START_DEBUG_BUILD_TIMEOUT");
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        return Error("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE");
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception or ArgumentException)
+                    {
+                        return Error("start_debug_build_start_failed", "START_DEBUG_BUILD_START_FAILED");
+                    }
+                    if (build.Command.ExitCode != 0) return BuildFailure(build);
+                    if (!DapBuildCoordinator.TryResolveBuiltProgram(program!, out program))
+                        return Error("start_debug_program_unavailable", "START_DEBUG_PROGRAM_UNAVAILABLE");
+                    if (launchOptions?.WorkingDirectory is { } builtWorkingDirectory && !Directory.Exists(builtWorkingDirectory))
+                        return Error("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE");
                 }
 
                 if (profile.Environment is not null)
@@ -685,6 +752,7 @@ internal static class Program
                 {
                     lock (_lifetimeGate)
                     {
+                        if (preBuild.Enabled) _buildActive = false;
                         if (--_starts == 0)
                         {
                             _startsDrained?.TrySetResult(true);
@@ -2782,7 +2850,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 9 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "justMyCode" and not "env" and not "projectRoot" and not "launchProfile"))
+            if (arguments.Count > 17 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "stop_at_entry" and not "justMyCode" and not "env" and not "projectRoot" and not "launchProfile" and not "launch_profile" and not "preBuild" and not "pre_build" and not "buildProject" and not "build_project" and not "buildConfiguration" and not "build_configuration"))
             {
                 return false;
             }
@@ -2828,7 +2896,8 @@ internal static class Program
             }
 
             bool? stopAtEntry = null;
-            if (arguments.TryGetValue("stopAtEntry", out var stop) && stop.ValueKind != JsonValueKind.Null)
+            if (!TryGetAliased(arguments, "stopAtEntry", "stop_at_entry", out var stop)) return false;
+            if (stop.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
             {
                 if (stop.ValueKind is not JsonValueKind.True and not JsonValueKind.False) return false;
                 stopAtEntry = stop.GetBoolean();
@@ -2875,11 +2944,49 @@ internal static class Program
                 if (root.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(projectRoot = root.GetString())
                     || projectRoot.Contains('\0')) return false;
             }
-            if (arguments.TryGetValue("launchProfile", out var profile) && profile.ValueKind != JsonValueKind.Null)
+            if (!TryGetAliased(arguments, "launchProfile", "launch_profile", out var profile)) return false;
+            if (profile.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
             {
                 if (profile.ValueKind != JsonValueKind.String || (profileName = profile.GetString())?.Contains('\0') == true) return false;
                 if (profileName?.Length == 0) profileName = null;
             }
+            return true;
+        }
+
+        private static bool TryReadPreBuildArguments(IDictionary<string, JsonElement>? arguments, out PreBuildOptions options)
+        {
+            var enabled = false;
+            string? project = null;
+            var configuration = "Debug";
+            options = new PreBuildOptions(enabled, project, configuration);
+            if (arguments is null) return true;
+            if (!TryGetAliased(arguments, "preBuild", "pre_build", out var requested) ||
+                !TryGetAliased(arguments, "buildProject", "build_project", out var path) ||
+                !TryGetAliased(arguments, "buildConfiguration", "build_configuration", out var config)) return false;
+            if (requested.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
+            {
+                if (requested.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
+                enabled = requested.GetBoolean();
+            }
+            if (path.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
+            {
+                if (path.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(project = path.GetString()) || project.Contains('\0')) return false;
+            }
+            if (config.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
+            {
+                if (config.ValueKind != JsonValueKind.String || config.GetString() is not ("Debug" or "Release")) return false;
+                configuration = config.GetString()!;
+            }
+            options = new PreBuildOptions(enabled, project, configuration);
+            return true;
+        }
+
+        private static bool TryGetAliased(IDictionary<string, JsonElement> arguments, string name, string alias, out JsonElement value)
+        {
+            var present = arguments.TryGetValue(name, out value);
+            if (!arguments.TryGetValue(alias, out var alternate)) return true;
+            if (present) return false;
+            value = alternate;
             return true;
         }
 
@@ -3535,6 +3642,8 @@ internal static class Program
             return base64.TrimEnd('=').Replace('+', '-').Replace('/', '_');
         }
 
+        private sealed record PreBuildOptions(bool Enabled, string? Project, string Configuration);
+
         private sealed record StartDebugSuccessContent(
             string kind, string debugSessionId, LifecycleStateContent state,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<DapInitialBreakpoint>? initialBreakpoints,
@@ -3565,6 +3674,23 @@ internal static class Program
         }, isError: true);
 
         private static CallToolResult Error(string kind, string error) => Result(new { kind, error }, isError: true);
+        private static CallToolResult BuildFailure(DapBuildResult build)
+        {
+            const int maximumOutput = 4096;
+            static string Tail(string value) => value.Length <= maximumOutput ? value : value[^maximumOutput..];
+            return Result(new
+            {
+                kind = "start_debug_build_failed",
+                error = "START_DEBUG_BUILD_FAILED",
+                stage = build.Stage,
+                exitCode = build.Command.ExitCode,
+                stdout = Tail(build.Command.Stdout),
+                stderr = Tail(build.Command.Stderr),
+                stdoutTruncated = build.Command.Stdout.Length > maximumOutput,
+                stderrTruncated = build.Command.Stderr.Length > maximumOutput,
+            }, isError: true);
+        }
+
         private static CallToolResult UnknownTool(string tool) => new()
         {
             ResultType = "complete",
@@ -3665,7 +3791,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program with optional project launch profile, arguments, working directory, environment overrides, code filtering, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"justMyCode":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}},"projectRoot":{"type":["string","null"],"minLength":1},"launchProfile":{"type":["string","null"]}},"additionalProperties":false}"""),
+                Tool("start_debug", "Start debugging with optional project profile and pre-build. Pre-build requires buildProject and refuses while another native session or start is active. Unix cleanup controls a process group, not escaped descendants. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"stop_at_entry":{"type":["boolean","null"]},"justMyCode":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}},"projectRoot":{"type":["string","null"],"minLength":1},"launchProfile":{"type":["string","null"]},"launch_profile":{"type":["string","null"]},"preBuild":{"type":["boolean","null"]},"pre_build":{"type":["boolean","null"]},"buildProject":{"type":["string","null"],"minLength":1},"build_project":{"type":["string","null"],"minLength":1},"buildConfiguration":{"type":["string","null"],"enum":["Debug","Release",null]},"build_configuration":{"type":["string","null"],"enum":["Debug","Release",null]}},"allOf":[{"not":{"required":["stopAtEntry","stop_at_entry"]}},{"not":{"required":["launchProfile","launch_profile"]}},{"not":{"required":["preBuild","pre_build"]}},{"not":{"required":["buildProject","build_project"]}},{"not":{"required":["buildConfiguration","build_configuration"]}}],"additionalProperties":false}"""),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
