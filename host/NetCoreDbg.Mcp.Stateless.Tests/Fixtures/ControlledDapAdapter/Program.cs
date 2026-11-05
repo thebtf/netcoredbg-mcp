@@ -938,8 +938,22 @@ internal sealed class ControlledDapAdapter
             case "terminate":
                 if (!_options.IgnoreGracefulShutdown)
                 {
+                    var terminateMode = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TERMINATE_MODE");
+                    if (terminateMode is "terminal-before-ack" or "exited-before-ack")
+                    {
+                        var eventName = terminateMode == "exited-before-ack" ? "exited" : "terminated";
+                        await WriteEventAsync(eventName, eventName == "exited" ? new { exitCode = 0 } : null, cancellationToken);
+                        await RecordAsync(new { kind = "terminate-terminal-before-ack" }, cancellationToken);
+                        _heldPauseControls.Add(CompleteHeldTerminateAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+                        return false;
+                    }
                     await WaitForGracefulReleaseAsync(_options.BlockGracefulShutdown, cancellationToken);
-                    await WriteResponseAsync(sequence, command, body: null, cancellationToken);
+                    await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: terminateMode != "refuse");
+                    if (terminateMode == "held-terminal")
+                    {
+                        await RecordAsync(new { kind = "terminate-acknowledged" }, cancellationToken);
+                        _heldPauseControls.Add(CompleteHeldTerminateAsync(_lifecycleEventsCancellation.Token));
+                    }
                 }
 
                 return false;
@@ -1323,6 +1337,12 @@ internal sealed class ControlledDapAdapter
         if (_holdLaunchResponse)
         {
             await RecordAsync(new { kind = "launch-response-gated" }, cancellationToken);
+            await WaitForThreadsResponseReleaseAsync(cancellationToken);
+        }
+        if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_HOLD_RESTART_LAUNCH") == "1"
+            && (await File.ReadAllTextAsync(_transcriptPath, cancellationToken)).Contains("\"kind\":\"launch-released\"", StringComparison.Ordinal))
+        {
+            await RecordAsync(new { kind = "restart-launch-response-gated" }, cancellationToken);
             await WaitForThreadsResponseReleaseAsync(cancellationToken);
         }
 
@@ -1863,6 +1883,18 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
+    private async Task CompleteHeldTerminateAsync(CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteEventAsync("terminated", new { }, cancellationToken);
+    }
+    private async Task CompleteHeldTerminateAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "terminate", body: null, cancellationToken);
+    }
+
+
     private string PauseControlPath(string control) => _transcriptPath + "." + control + ".release";
 
     private static async Task WaitForControlReleaseAsync(string path, CancellationToken cancellationToken)

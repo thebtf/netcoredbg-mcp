@@ -53,12 +53,18 @@ only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
 session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+`restart_debug` retains the last successful launch configuration. Its default
+`rebuild=true` requires a saved `build_project`; `rebuild=false` preserves the
+saved `pre_build` setting. `terminate_debug` sends DAP terminate only when the
+adapter advertises support and waits for a terminal event; otherwise it uses
+disconnect. An uncertain termination is not retried automatically.
 
 The three memory inspection tools require their corresponding DAP capabilities.
 `read_memory` with a zero count returns empty data only after the capability
