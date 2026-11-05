@@ -1758,6 +1758,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapBreakpointUpdateResult> RemoveBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: true, cancellationToken);
 
+    internal Task<DapBreakpointUpdateResult> ReplaceBreakpointsAsync(string file, int line, bool remove, int[] requestedLines, CancellationToken cancellationToken) =>
+        UpdateBreakpointAsync(file, line, remove, cancellationToken, requestedLines);
+
     internal async Task<DapBreakpointUpdateResult> ConfigureExceptionsAsync(string[] filters, CancellationToken cancellationToken)
     {
         await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -1854,7 +1857,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken)
+    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken, int[]? requestedLines = null)
     {
         await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         BreakpointUpdate? update = null;
@@ -1869,7 +1872,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     if (_breakpointUpdatesClosed || _inspectionClosed || _executionAdmission == ExecutionAdmission.Closing)
                     {
-                        return DapBreakpointUpdateResult.Refused;
+                        return requestedLines is null ? DapBreakpointUpdateResult.Refused : DapBreakpointUpdateResult.Unavailable;
                     }
 
                     var previous = _requestedBreakpoints.TryGetValue(file, out var existing)
@@ -1877,7 +1880,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         : Array.Empty<DapRequestedBreakpoint>();
                     var targetIndex = -1;
                     var requested = previous;
-                    if (remove)
+                    if (requestedLines is not null)
+                    {
+                        if (_requestedBreakpointCount - previous.Length + requestedLines.Length > MaximumBreakpointCount)
+                            return DapBreakpointUpdateResult.LimitReached;
+                        requested = new DapRequestedBreakpoint[requestedLines.Length];
+                        for (var index = 0; index < requestedLines.Length; index++)
+                        {
+                            requested[index] = new DapRequestedBreakpoint(requestedLines[index]);
+                            if (!remove && requestedLines[index] == line) targetIndex = index;
+                        }
+                    }
+                    else if (remove)
                     {
                         var remainingCount = 0;
                         foreach (var breakpoint in previous)
@@ -1935,7 +1949,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         }
                     }
 
-                    update = new BreakpointUpdate(file, requested, targetIndex, requested.Length - previous.Length);
+                    update = new BreakpointUpdate(file, requested, targetIndex, requested.Length - previous.Length, remove);
                     _activeBreakpointUpdate = update;
                 }
 
@@ -2627,7 +2641,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _requestedBreakpointCount += update.CountDelta;
 
                     update.Complete(new DapBreakpointUpdateResult(
-                        update.CountDelta < 0 ? DapBreakpointUpdateOutcome.Removed : DapBreakpointUpdateOutcome.Added,
+                        update.IsRemoval ? DapBreakpointUpdateOutcome.Removed : DapBreakpointUpdateOutcome.Added,
                         selected.Verified, selected.ActualLine));
                 }
             }
@@ -5254,7 +5268,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private readonly record struct DapBreakpointObservation(bool Verified, int? ActualLine);
 
-    private sealed class BreakpointUpdate(string file, DapRequestedBreakpoint[] requested, int targetIndex, int countDelta)
+    private sealed class BreakpointUpdate(string file, DapRequestedBreakpoint[] requested, int targetIndex, int countDelta, bool isRemoval = false)
     {
         private int _writeStarted;
         private int _committedWrite;
@@ -5264,6 +5278,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public DapRequestedBreakpoint[] Requested { get; } = requested;
         public int TargetIndex { get; } = targetIndex;
         public int CountDelta { get; } = countDelta;
+        public bool IsRemoval { get; } = isRemoval;
         public string[]? ExceptionFilters { get; init; }
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
@@ -5337,6 +5352,7 @@ internal enum DapBreakpointUpdateOutcome
     Unsupported,
     Acknowledged,
     LimitReached,
+    Unavailable,
 }
 
 internal sealed record DapBreakpointUpdateResult(
@@ -5349,6 +5365,7 @@ internal sealed record DapBreakpointUpdateResult(
     internal static DapBreakpointUpdateResult Refused { get; } = new(DapBreakpointUpdateOutcome.Refused);
     internal static DapBreakpointUpdateResult NotFound { get; } = new(DapBreakpointUpdateOutcome.NotFound);
     internal static DapBreakpointUpdateResult LimitReached { get; } = new(DapBreakpointUpdateOutcome.LimitReached);
+    internal static DapBreakpointUpdateResult Unavailable { get; } = new(DapBreakpointUpdateOutcome.Unavailable);
 }
 
 internal sealed class DapBreakpointCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)

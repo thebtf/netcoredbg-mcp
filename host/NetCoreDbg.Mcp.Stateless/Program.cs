@@ -336,6 +336,11 @@ internal static class Program
         internal bool LegacyCompat { get; init; }
         private readonly SemaphoreSlim _legacyGate = new(1, 1);
         private readonly SemaphoreSlim _legacyLifecycle = new(1, 1);
+        private readonly SemaphoreSlim _legacyBreakpointGate = new(1, 1);
+        private readonly List<(string File, int Line)> _legacyBreakpoints = [];
+        private readonly StringComparer _legacyBreakpointPathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        private string? _legacyBreakpointSessionId;
+        private long _legacySessionGeneration;
         private bool _legacyStarting;
         private bool _legacyStopping;
         private bool _legacyHasOwner;
@@ -613,8 +618,39 @@ internal static class Program
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                 : new Dictionary<string, JsonElement>(context.Params.Arguments, StringComparer.Ordinal);
+            string? breakpointFile = null;
+            var breakpointSourceValid = false;
+            long breakpointGeneration = 0;
+            if (name == StartDebug)
+            {
+                await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (_legacyBreakpointSessionId is not null)
+                        return LegacyError("A breakpoint update is still settling.");
+                }
+                finally { _legacyGate.Release(); }
+            }
+            if (name is AddBreakpoint or RemoveBreakpoint)
+            {
+                await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (_legacyStarting) return LegacyError("A debug session is starting.");
+                    if (_legacyStopping) return LegacyError("A debug session is stopping.");
+                    if (_legacySessionId is null && _legacyBreakpointSessionId is not null)
+                        return LegacyError("A breakpoint update is still settling.");
+                    breakpointGeneration = _legacySessionGeneration;
+                }
+                finally { _legacyGate.Release(); }
+                if (arguments.TryGetValue("file", out var source) && source.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(source.GetString()))
+                    breakpointSourceValid = TryNormalizeLegacyBreakpointSource(source.GetString()!, out breakpointFile, requireExistingFile: name == AddBreakpoint);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
             var lifecycleHeld = false;
             var gateHeld = false;
+            var breakpointHeld = false;
             try
             {
                 if (name is StartDebug or StopDebug)
@@ -626,6 +662,11 @@ internal static class Program
                 gateHeld = true;
                 if (HasInvalidLegacyArguments(name, arguments))
                     return LegacyError("Unsupported or invalid argument.");
+                if (name is (AddBreakpoint or RemoveBreakpoint) && breakpointGeneration != _legacySessionGeneration)
+                    return LegacyError("Debug session changed before breakpoint admission.", "unknown");
+                if (_legacyBreakpointSessionId is not null
+                    && (name == StartDebug || (name is (AddBreakpoint or RemoveBreakpoint) && _legacySessionId is null)))
+                    return LegacyError("A breakpoint update is still settling.");
                 var consumesOutput = name == GetOutput && arguments.TryGetValue("clear", out var clearOption)
                     && clearOption.ValueKind == JsonValueKind.True
                     && (!arguments.TryGetValue("category", out var categoryOption) || categoryOption.ValueKind == JsonValueKind.Null
@@ -650,7 +691,8 @@ internal static class Program
                     if (configured is not null && (!double.TryParse(configured, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out timeout) || !double.IsFinite(timeout) || timeout < 0))
                         return LegacyError("Invalid NETCOREDBG_SESSION_TIMEOUT.");
-                    if (_legacyHasOwner && _legacyOwner is not null && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
+                    if (_legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
+                        && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
                     {
                         _legacyHasOwner = false;
                         _legacyOwner = null;
@@ -660,6 +702,45 @@ internal static class Program
                     _legacyHasOwner = true;
                     _legacyOwner = muxId;
                     if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                }
+                var breakpointLine = 0;
+                int[]? breakpointLines = null;
+                var breakpointRemoved = false;
+                if (name is AddBreakpoint or RemoveBreakpoint)
+                {
+                    if ((arguments.TryGetValue("condition", out var condition) && condition.ValueKind != JsonValueKind.Null)
+                        || (arguments.TryGetValue("hit_condition", out var hit) && hit.ValueKind != JsonValueKind.Null))
+                        return LegacyError("Conditional and hit-count breakpoints are not supported.");
+                    if (!arguments.TryGetValue("line", out var line) || !TryReadOutputLineCount(line, out var lineNumber)
+                        || lineNumber is < 1 or > int.MaxValue)
+                        return LegacyError("Invalid breakpoint line.");
+                    if (!breakpointSourceValid) return LegacyError("Breakpoint source unavailable.");
+                    breakpointLine = (int)lineNumber;
+                    var index = FindLegacyBreakpoint(breakpointFile!, breakpointLine);
+                    if (name == AddBreakpoint && index < 0 && _legacyBreakpoints.Count >= MaximumBreakpointCount)
+                        return LegacyError("Breakpoint limit reached.");
+                    arguments.Remove("condition");
+                    arguments.Remove("hit_condition");
+                    arguments["file"] = JsonSerializer.SerializeToElement(breakpointFile);
+                    arguments["line"] = JsonSerializer.SerializeToElement(breakpointLine);
+                    if (_legacySessionId is null)
+                    {
+                        if (name == AddBreakpoint)
+                        {
+                            if (index < 0) _legacyBreakpoints.Add((breakpointFile!, breakpointLine));
+                            return LegacyResponse(new { file = breakpointFile, line = breakpointLine, condition = (string?)null, verified = false });
+                        }
+                        if (index >= 0) _legacyBreakpoints.RemoveAt(index);
+                        return LegacyResponse(new { removed = index >= 0 });
+                    }
+                    if (!_legacyBreakpointGate.Wait(0)) return LegacyError("A breakpoint update is already in progress.");
+                    breakpointHeld = true;
+                    _legacyBreakpointSessionId = _legacySessionId;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    breakpointRemoved = ApplyLegacyBreakpoint(breakpointFile!, breakpointLine, name == RemoveBreakpoint);
+                    if (name == RemoveBreakpoint && !breakpointRemoved)
+                        return LegacyResponse(new { removed = false });
+                    breakpointLines = SnapshotLegacyBreakpointLines(breakpointFile!);
                 }
                 if (name == StartDebug)
                 {
@@ -677,9 +758,11 @@ internal static class Program
                     if (!arguments.ContainsKey("pre_build")) arguments["pre_build"] = JsonSerializer.SerializeToElement(true);
                     if (!arguments.ContainsKey("stop_at_entry")) arguments["stop_at_entry"] = JsonSerializer.SerializeToElement(false);
                     arguments["justMyCode"] = JsonSerializer.SerializeToElement(false);
+                    arguments["breakpoints"] = JsonSerializer.SerializeToElement(_legacyBreakpoints.Select(static breakpoint => new { file = breakpoint.File, line = breakpoint.Line }).ToArray());
                     _legacyHasOwner = true;
                     _legacyOwner = muxId;
                     _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                    _legacySessionGeneration++;
                     _legacyStarting = true;
                     _legacyGate.Release();
                     gateHeld = false;
@@ -806,18 +889,6 @@ internal static class Program
                 }
                 if (name == GetCallStack)
                     arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
-                if (name is AddBreakpoint or RemoveBreakpoint)
-                {
-                    if ((arguments.TryGetValue("condition", out var condition) && condition.ValueKind != JsonValueKind.Null)
-                        || (arguments.TryGetValue("hit_condition", out var hit) && hit.ValueKind != JsonValueKind.Null))
-                        return LegacyError("Conditional and hit-count breakpoints are not supported.");
-                    arguments.Remove("condition");
-                    arguments.Remove("hit_condition");
-                    if (!arguments.TryGetValue("line", out var line) || !TryReadOutputLineCount(line, out var lineNumber)
-                        || lineNumber is < 1 or > int.MaxValue)
-                        return LegacyError("Invalid breakpoint line.");
-                    arguments["line"] = JsonSerializer.SerializeToElement((int)lineNumber);
-                }
                 if (name is GetScopes or GetVariables or EvaluateExpression or SetVariable or GetStepInTargets)
                 {
                     if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null
@@ -870,6 +941,7 @@ internal static class Program
                 if (name == StopDebug)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    _legacySessionGeneration++;
                     _legacyStopping = true;
                     OutputLifetime? retiringOutput;
                     lock (_lifetimeGate) _outputs.TryGetValue(sessionId, out retiringOutput);
@@ -920,8 +992,8 @@ internal static class Program
                     GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                     GetLoadedSources => await GetLoadedSourcesAsync(request, cancellationToken).ConfigureAwait(false),
                     GetStepInTargets => await GetStepInTargetsAsync(request, cancellationToken).ConfigureAwait(false),
-                    AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
-                    RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    AddBreakpoint => await UpdateBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken, remove: false, breakpointLines).ConfigureAwait(false),
+                    RemoveBreakpoint => await UpdateBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken, remove: true, breakpointLines).ConfigureAwait(false),
                     ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     _ => throw new InvalidOperationException(),
                 };
@@ -933,6 +1005,7 @@ internal static class Program
                         : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically."
                             : name == ConfigureExceptions ? "Exception filters may have changed; do not retry automatically."
                             : targetedStep ? "Step outcome is unknown; it may have executed. Do not retry automatically."
+                            : name is (AddBreakpoint or RemoveBreakpoint) ? "Requested breakpoint intent was retained; application to the live debugger is unknown. Do not retry automatically."
                             : "Debug session changed before operation completed.", "unknown");
                 var observedState = LegacySnapshot(sessionId).State;
                 if (name is GetScopes or GetVariables or EvaluateExpression or GetStepInTargets)
@@ -945,6 +1018,14 @@ internal static class Program
                 }
                 if (result.IsError == true || result.StructuredContent is not { } content)
                 {
+                    if (name is AddBreakpoint or RemoveBreakpoint)
+                    {
+                        if (result.StructuredContent is { } breakpointFailure
+                            && breakpointFailure.TryGetProperty("error", out var breakpointCode)
+                            && breakpointCode.GetString() == "DAP_SET_BREAKPOINTS_REFUSED")
+                            return LegacyError("Requested breakpoint intent was retained; the live debugger rejected the file set. A later explicit add/remove for this file or explicit start can reapply it.", observedState);
+                        return LegacyError("Requested breakpoint intent was retained; application to the live debugger is unknown. Do not retry automatically.", "unknown");
+                    }
                     if (name == SetVariable && result.StructuredContent is { } failure
                         && failure.TryGetProperty("error", out var failureCode)
                         && failureCode.GetString() == "DAP_SET_VARIABLE_OUTCOME_UNKNOWN")
@@ -1056,9 +1137,13 @@ internal static class Program
                     return LegacyResponse(content.GetProperty("exception"), ProjectLegacyState(captured.State).State);
                 }
                 if (name == AddBreakpoint && kind == "breakpoint_added")
+                {
                     return LegacyResponse(new { file = content.GetProperty("file"), line = content.GetProperty("line"), condition = (string?)null, verified = content.GetProperty("verified") }, observedState);
+                }
                 if (name == RemoveBreakpoint && kind == "breakpoint_removed")
-                    return LegacyResponse(new { removed = content.GetProperty("removed") }, observedState);
+                {
+                    return LegacyResponse(new { removed = breakpointRemoved }, observedState);
+                }
                 if (name == GetOutput && kind == "output_success")
                     return LegacyResponse(new { output = content.GetProperty("output") }, observedState);
                 if (name == GetOutputTail && kind == "output_tail_success")
@@ -1086,9 +1171,53 @@ internal static class Program
             }
             finally
             {
+                if (breakpointHeld)
+                {
+                    if (!gateHeld)
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                    }
+                    _legacyBreakpointSessionId = null;
+                    _legacyBreakpointGate.Release();
+                }
                 if (gateHeld) _legacyGate.Release();
                 if (lifecycleHeld) _legacyLifecycle.Release();
             }
+        }
+
+        private bool ApplyLegacyBreakpoint(string file, int line, bool remove)
+        {
+            var index = FindLegacyBreakpoint(file, line);
+            if (remove)
+            {
+                if (index >= 0) _legacyBreakpoints.RemoveAt(index);
+                return index >= 0;
+            }
+            if (index < 0) _legacyBreakpoints.Add((file, line));
+            return false;
+        }
+
+        private int[] SnapshotLegacyBreakpointLines(string file)
+        {
+            var count = 0;
+            foreach (var breakpoint in _legacyBreakpoints)
+                if (_legacyBreakpointPathComparer.Equals(breakpoint.File, file)) count++;
+            var lines = new int[count];
+            var index = 0;
+            foreach (var breakpoint in _legacyBreakpoints)
+                if (_legacyBreakpointPathComparer.Equals(breakpoint.File, file)) lines[index++] = breakpoint.Line;
+            return lines;
+        }
+
+        private int FindLegacyBreakpoint(string file, int line)
+        {
+            for (var index = 0; index < _legacyBreakpoints.Count; index++)
+            {
+                var breakpoint = _legacyBreakpoints[index];
+                if (breakpoint.Line == line && _legacyBreakpointPathComparer.Equals(breakpoint.File, file)) return index;
+            }
+            return -1;
         }
 
         private static bool HasInvalidLegacyArguments(string name, Dictionary<string, JsonElement> arguments)
@@ -3176,7 +3305,8 @@ internal static class Program
             CallToolRequestParams request,
             RequestId requestId,
             CancellationToken cancellationToken,
-            bool remove)
+            bool remove,
+            int[]? replacementLines = null)
         {
             if (!TryReadBreakpointArguments(request.Arguments, out var arguments))
             {
@@ -3213,9 +3343,11 @@ internal static class Program
                     return Error("breakpoint_source_unavailable", "BREAKPOINT_SOURCE_UNAVAILABLE");
                 }
 
-                var updated = remove
-                    ? await session.RemoveBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false)
-                    : await session.AddBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false);
+                var updated = replacementLines is not null
+                    ? await session.ReplaceBreakpointsAsync(file, arguments.Line, remove, replacementLines, operation.Token).ConfigureAwait(false)
+                    : remove
+                        ? await session.RemoveBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false)
+                        : await session.AddBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false);
                 closeAfterLease = updated.RequiresDrain;
                 return updated.Outcome switch
                 {
@@ -3225,6 +3357,7 @@ internal static class Program
                         "breakpoint_removed", file, arguments.Line, updated.Outcome == DapBreakpointUpdateOutcome.Removed), isError: false),
                     DapBreakpointUpdateOutcome.Refused => Error("dap_set_breakpoints_refused", "DAP_SET_BREAKPOINTS_REFUSED"),
                     DapBreakpointUpdateOutcome.LimitReached => Error("breakpoint_limit_reached", "BREAKPOINT_LIMIT_REACHED"),
+                    DapBreakpointUpdateOutcome.Unavailable => Error("breakpoint_session_unavailable", "BREAKPOINT_SESSION_UNAVAILABLE"),
                     _ => throw new InvalidOperationException("Unknown breakpoint update outcome."),
                 };
             }
@@ -4377,6 +4510,37 @@ internal static class Program
                     return false;
                 }
 
+                normalized = path;
+                return true;
+            }
+            catch (Exception exception) when (exception is ArgumentException
+                or IOException or NotSupportedException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryNormalizeLegacyBreakpointSource(string file, out string normalized, bool requireExistingFile)
+        {
+            normalized = string.Empty;
+            if (!TryNormalizeBreakpointSource(file, out var fullPath, requireExistingFile)) return false;
+            try
+            {
+                var root = Path.GetPathRoot(fullPath)!;
+                var components = fullPath[root.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+                var path = root;
+                for (var index = 0; index < components.Length; index++)
+                {
+                    path = Path.Combine(path, components[index]);
+                    FileSystemInfo entry = index == components.Length - 1 ? new FileInfo(path) : new DirectoryInfo(path);
+                    if (entry.Exists && entry.LinkTarget is not null)
+                    {
+                        var target = entry.ResolveLinkTarget(returnFinalTarget: true);
+                        if (target is null) return false;
+                        path = target.FullName;
+                    }
+                }
+                if (requireExistingFile && !File.Exists(path)) return false;
                 normalized = path;
                 return true;
             }

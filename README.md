@@ -73,9 +73,10 @@ tagged callers cannot claim it. All untagged calls are indistinguishable; this i
 not client authentication. Conversely, untagged mutations are refused while an
 identified mux owner exists, unlike Python. An identified owner may expire
 after `NETCOREDBG_SESSION_TIMEOUT` seconds (default 60), but never during an
-in-flight start or stop. Rejected starts do not acquire ownership. `stop_debug`
-waits for an in-flight start, including pre-build, and cannot interrupt it; the
-start request's cancellation route remains available. The legacy route exposes
+in-flight start, stop, or active breakpoint update. Rejected starts do not
+acquire ownership. `stop_debug` waits for an in-flight start, including pre-build,
+and cannot interrupt it; the start request's cancellation route remains available.
+The legacy route exposes
 `debug://output` (text/plain) and `debug://threads` (application/json) with
 connection-scoped subscriptions. Subscriptions survive stop/start on the same
 connection. Updates are coalesced URI invalidations, not session snapshots;
@@ -108,6 +109,22 @@ If the stopped context changes before a stack, scope, variable or evaluation
 response is published, the legacy route returns an error instead of mixing
 epochs. A dispatched evaluation may already have executed; an unknown outcome
 must not be retried automatically.
+
+Unconditional source-line breakpoints can be added or removed while idle. The
+host keeps up to 256 requested locations for its lifetime and reapplies them on
+each start; an idle add reports `verified: false`. A validated, admitted active
+change enters the desired set before dispatch, and a concurrent breakpoint update
+is refused rather than queued. Stop remains available during an update; new starts
+and idle mutations are refused while an earlier update is settling. A refusal
+retains intent but reports that the live debugger rejected the file set, unlike
+Python's response. An uncertain write retains intent with application unknown;
+it is never retried automatically. A later explicit add/remove for that file or
+an explicit start can resend the desired set after the prior session is cleaned up.
+Sources for adds must exist. Paths are relative to the host's startup working
+directory and existing links are resolved, but lexical `..` is collapsed before
+link resolution and dangling links are not resolved, unlike Python `realpath`.
+Listing, clearing, function breakpoints and the breakpoint resource are not
+implemented by this route.
 
 `set_variable` requires mux ownership and the calling client's selected stopped
 context. After an admitted attempt, select a fresh stack before inspecting or
