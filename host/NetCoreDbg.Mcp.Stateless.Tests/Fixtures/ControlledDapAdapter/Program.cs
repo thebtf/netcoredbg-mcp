@@ -1160,6 +1160,8 @@ internal sealed class ControlledDapAdapter
             "hold-first-runtime" => "success",
             "mixed-remove" => "mixed",
             "mixed-missing-id" => "mixed",
+            "crossed-lines" => "success",
+            "same-effective-line" => "success",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
             "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
             "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
@@ -1201,6 +1203,10 @@ internal sealed class ControlledDapAdapter
                     _initiallyUnverifiedBreakpoints.Add((id, line));
                 }
             }
+            if (_options.SetBreakpointsResponseMode == "crossed-lines")
+                breakpoint["line"] = index == 0 ? 3 : 2;
+            if (_options.SetBreakpointsResponseMode == "same-effective-line")
+                breakpoint["line"] = 2;
             return breakpoint;
         }).ToList();
 
