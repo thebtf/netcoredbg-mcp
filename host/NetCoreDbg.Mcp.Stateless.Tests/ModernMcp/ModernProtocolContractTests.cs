@@ -1171,6 +1171,81 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_BreakpointInspection_UsesEffectiveLineWhenRequestedLinesCross()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", SetBreakpointsResponseMode: "crossed-lines"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "breakpoint-adjusted-owner" };
+        foreach (var line in new[] { 2, 6 })
+            _ = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = line }, owner);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForStackTraceRequestAsync(deadline.Token);
+            while (true)
+            {
+                var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                if (list["data"]?[source] is JsonArray entries)
+                {
+                    Assert.Equal(0, entries[0]?["hit_count"]?.GetValue<int>());
+                    Assert.Equal(1, entries[1]?["hit_count"]?.GetValue<int>());
+                    break;
+                }
+                await Task.Delay(25, deadline.Token);
+            }
+            var context = await LegacyConsoleCallAsync(driver, "get_stop_context", new JsonObject { ["include_variables"] = false, ["include_output_tail"] = 0 }, owner);
+            Assert.Equal(1, context["data"]?["hitCount"]?.GetValue<int>());
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_BreakpointInspection_SharedEffectiveLineReturnsUnavailableCount()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", SetBreakpointsResponseMode: "same-effective-line"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "breakpoint-ambiguous-owner" };
+        foreach (var line in new[] { 2, 6 })
+            _ = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = line }, owner);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForStackTraceRequestAsync(deadline.Token);
+            while (true)
+            {
+                var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                Assert.False(list.ContainsKey("data"), "An ambiguous hit must not be assigned to an arbitrary requested breakpoint.");
+                if (list["error"]?.GetValue<string>() == "Breakpoint hit counts are unavailable.") break;
+                await Task.Delay(25, deadline.Token);
+            }
+            var context = await LegacyConsoleCallAsync(driver, "get_stop_context", new JsonObject { ["include_variables"] = false, ["include_output_tail"] = 0 }, owner);
+            Assert.NotNull(context["error"]);
+            Assert.False(context.ContainsKey("data"));
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
     public async Task LegacyCompat_BreakpointInspection_HitThroughSymbolicLinkUsesSameSourceIdentity()
     {
         var scratch = ModernMcpScratchDirectory.Create();
