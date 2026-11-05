@@ -387,7 +387,8 @@ internal static class Program
         {
             if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram)
                 || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints)
-                || !TryReadLaunchOptions(context.Params.Arguments, out var launchOptions))
+                || !TryReadLaunchOptions(context.Params.Arguments, out var launchOptions)
+                || !TryReadLaunchProfileArguments(context.Params.Arguments, out var projectRoot, out var profileName))
             {
                 return InvalidArguments(StartDebug);
             }
@@ -430,22 +431,21 @@ internal static class Program
                 }
             }
 
-            if (launchOptions?.Environment is { } environment
-                && environment.TryGetValue("PATH", out var pathOverride) && pathOverride is null
-                && program!.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
-            {
-                var dotnetHost = DapLaunchEnvironment.FindExecutable("dotnet");
-                if (dotnetHost is null)
-                {
-                    return Error("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE");
-                }
-
-                launchOptions = launchOptions with { DotnetHostPath = dotnetHost };
-            }
 
             if (!TryNormalizeBreakpointSources(breakpoints))
             {
                 return Error("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE");
+            }
+
+            if (projectRoot is not null)
+            {
+                try { projectRoot = Path.GetFullPath(projectRoot); }
+                catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+                {
+                    return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
+                }
+                if (!Directory.Exists(projectRoot))
+                    return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
             }
 
             if (string.IsNullOrWhiteSpace(_debuggerPath))
@@ -472,6 +472,31 @@ internal static class Program
             {
                 startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _startShutdown.Token);
                 startupCancellation.Token.ThrowIfCancellationRequested();
+                DapLaunchProfileResult profile;
+                try
+                {
+                    profile = await DapLaunchProfile.ResolveAsync(projectRoot, profileName, launchOptions?.Environment, startupCancellation.Token).ConfigureAwait(false);
+                }
+                catch (DapLaunchProfileException)
+                {
+                    return Error("start_debug_launch_profile_invalid", "START_DEBUG_LAUNCH_PROFILE_INVALID");
+                }
+
+                if (profile.Environment is not null)
+                {
+                    launchOptions = launchOptions is null
+                        ? new DapLaunchOptions(null, null, null, null, profile.Environment)
+                        : launchOptions with { Environment = profile.Environment };
+                }
+                if (launchOptions?.Environment is { } environment
+                    && environment.TryGetValue("PATH", out var pathOverride) && pathOverride is null
+                    && program!.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    var dotnetHost = DapLaunchEnvironment.FindExecutable("dotnet");
+                    if (dotnetHost is null)
+                        return Error("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE");
+                    launchOptions = launchOptions with { DotnetHostPath = dotnetHost };
+                }
                 var token = CreateToken();
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                 session = await NetCoreDbgSession.StartAsync(
@@ -523,15 +548,12 @@ internal static class Program
                     OnRetirementRequested(token, session);
                 }
 
-                return breakpoints.Length == 0
-                    ? Success("start_debug_success", token, session.State)
-                    : Result(new
-                    {
-                        kind = "start_debug_success",
-                        debugSessionId = token,
-                        state = LifecycleState(session.State),
-                        initialBreakpoints = session.InitialBreakpoints,
-                    }, isError: false);
+                var metadata = profile.Metadata;
+                return Result(new StartDebugSuccessContent(
+                    "start_debug_success", token, LifecycleState(session.State),
+                    breakpoints.Length == 0 ? null : session.InitialBreakpoints,
+                    metadata is null ? null : new LaunchEnvironmentContent(metadata.Source, metadata.Profile,
+                        metadata.Path, metadata.VariableNames, metadata.AppliedCount)), isError: false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -2715,7 +2737,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 7 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "justMyCode" and not "env"))
+            if (arguments.Count > 9 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "justMyCode" and not "env" and not "projectRoot" and not "launchProfile"))
             {
                 return false;
             }
@@ -2792,8 +2814,27 @@ internal static class Program
                 }
             }
 
-            if (args is not null || cwd is not null || stopAtEntry is not null || justMyCode is not null || environment is { Count: > 0 })
+            if (args is not null || cwd is not null || stopAtEntry is not null || justMyCode is not null || environment is not null)
                 options = new DapLaunchOptions(cwd, args, stopAtEntry, justMyCode, environment);
+            return true;
+        }
+
+        private static bool TryReadLaunchProfileArguments(
+            IDictionary<string, JsonElement>? arguments, out string? projectRoot, out string? profileName)
+        {
+            projectRoot = null;
+            profileName = null;
+            if (arguments is null) return true;
+            if (arguments.TryGetValue("projectRoot", out var root) && root.ValueKind != JsonValueKind.Null)
+            {
+                if (root.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(projectRoot = root.GetString())
+                    || projectRoot.Contains('\0')) return false;
+            }
+            if (arguments.TryGetValue("launchProfile", out var profile) && profile.ValueKind != JsonValueKind.Null)
+            {
+                if (profile.ValueKind != JsonValueKind.String || (profileName = profile.GetString())?.Contains('\0') == true) return false;
+                if (profileName?.Length == 0) profileName = null;
+            }
             return true;
         }
 
@@ -3449,12 +3490,13 @@ internal static class Program
             return base64.TrimEnd('=').Replace('+', '-').Replace('/', '_');
         }
 
-        private static CallToolResult Success(string kind, string sessionId, DapSessionState state) => Result(new
-        {
-            kind,
-            debugSessionId = sessionId,
-            state = LifecycleState(state),
-        }, isError: false);
+        private sealed record StartDebugSuccessContent(
+            string kind, string debugSessionId, LifecycleStateContent state,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<DapInitialBreakpoint>? initialBreakpoints,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] LaunchEnvironmentContent? launchEnvironment);
+
+        private sealed record LaunchEnvironmentContent(
+            string source, string? profile, string? path, IReadOnlyList<string> variableNames, int appliedCount);
 
         private static CallToolResult StopSuccess(DapSessionState state) => Result(new
         {
@@ -3578,7 +3620,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program with optional arguments, working directory, environment overrides, code filtering, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"justMyCode":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}}},"additionalProperties":false}"""),
+                Tool("start_debug", "Start debugging a program with optional project launch profile, arguments, working directory, environment overrides, code filtering, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"justMyCode":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}},"projectRoot":{"type":["string","null"],"minLength":1},"launchProfile":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),

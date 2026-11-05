@@ -10,6 +10,93 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class DebuggerLaunchContractTests
 {
     [Fact]
+    public async Task StartDebug_ProjectProfile_MergesInheritedAndDirectEnvironmentWithoutLeakingValues()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
+            AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["CONTROLLED_DAP_INSPECT_ENV"] = "1",
+                ["NCD_LAUNCH_TEST_INHERITED"] = "inherited-secret",
+                ["NCD_LAUNCH_TEST_REMOVE"] = "removed-secret",
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var root = Assert.IsType<string>(Path.GetDirectoryName(driver.InertProgramPath));
+        var config = new JsonObject
+        {
+            ["defaultProfile"] = "demo",
+            ["profiles"] = new JsonObject
+            {
+                ["demo"] = new JsonObject
+                {
+                    ["inherit"] = new JsonArray("NCD_LAUNCH_TEST_INHERITED"),
+                    ["env"] = new JsonObject
+                    {
+                        ["NCD_LAUNCH_TEST_REMOVE"] = null,
+                        ["NCD_LAUNCH_TEST_VALUE"] = "profile-secret",
+                        ["NCD_LAUNCH_TEST_NEW"] = "profile-value",
+                    },
+                },
+            },
+        };
+        await File.WriteAllTextAsync(Path.Combine(root, ".netcoredbg-mcp.launch.json"), config.ToJsonString());
+        var started = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["projectRoot"] = root,
+            ["env"] = new JsonObject { ["NCD_LAUNCH_TEST_VALUE"] = "direct-secret", ["NCD_LAUNCH_TEST_NEW"] = "" },
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("profile-start")));
+        Assert.False(started["isError"]?.GetValue<bool>() ?? true);
+        var content = Assert.IsType<JsonObject>(started["structuredContent"]);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var metadata = Assert.IsType<JsonObject>(content["launchEnvironment"]);
+        Assert.Equal("project-launch-profile", metadata["source"]?.GetValue<string>());
+        Assert.Equal("demo", metadata["profile"]?.GetValue<string>());
+        Assert.Equal(4, metadata["appliedCount"]?.GetValue<int>());
+        Assert.DoesNotContain("inherited-secret", started.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("profile-secret", started.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("direct-secret", started.ToJsonString(), StringComparison.Ordinal);
+        var descendant = Assert.Single(await driver.ReadFixtureTranscriptAsync(), static entry => entry.Kind == "descendant");
+        using var environment = await ReadDescendantEnvironmentAsync(Assert.IsType<int>(descendant.ProcessId));
+        Assert.Equal("inherited-secret", environment.RootElement.GetProperty("unchanged").GetString());
+        Assert.Equal("direct-secret", environment.RootElement.GetProperty("overridden").GetString());
+        Assert.Equal("", environment.RootElement.GetProperty("added").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, environment.RootElement.GetProperty("removed").ValueKind);
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(content["debugSessionId"]?.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task StartDebug_InvalidProjectProfiles_DoNotStartTheAdapter()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var root = Assert.IsType<string>(Path.GetDirectoryName(driver.InertProgramPath));
+        var profilePath = Path.Combine(root, ".netcoredbg-mcp.launch.json");
+        async Task AssertRejectedAsync(string id, string projectRoot, string expectedError, string? profileName = null)
+        {
+            var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["projectRoot"] = projectRoot,
+                ["launchProfile"] = profileName,
+            }, ModernMcpProcessDriver.CurrentMeta(), new RequestId(id)));
+            Assert.True(result["isError"]?.GetValue<bool>() ?? false);
+            var content = Assert.IsType<JsonObject>(result["structuredContent"]);
+            Assert.Equal(expectedError, content["error"]?.GetValue<string>());
+            Assert.False(content.ContainsKey("debugSessionId"));
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+
+        await AssertRejectedAsync("profile-missing-root", root + ".missing", "START_DEBUG_PROJECT_UNAVAILABLE");
+        await AssertRejectedAsync("profile-missing-file", root, "START_DEBUG_LAUNCH_PROFILE_INVALID", "requested");
+        await File.WriteAllTextAsync(profilePath, "{ invalid json");
+        await AssertRejectedAsync("profile-malformed", root, "START_DEBUG_LAUNCH_PROFILE_INVALID");
+        await File.WriteAllTextAsync(profilePath, """{"profiles":{"default":{"inherit":["NCD_LAUNCH_TEST_ABSENT_73F2"]}}}""");
+        await AssertRejectedAsync("profile-missing-inherited", root, "START_DEBUG_LAUNCH_PROFILE_INVALID");
+        await File.WriteAllTextAsync(profilePath, """{"profiles":{"default":{"env":{"NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE":"private-value"}}}}""");
+        await AssertRejectedAsync("profile-reserved", root, "START_DEBUG_LAUNCH_PROFILE_INVALID");
+        Assert.Empty(await driver.ReadNativeActionsAsync());
+    }
+
+    [Fact]
     public async Task StartDebug_EnvironmentRemoval_IsolatedToOwnedAdapterAndSession()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
@@ -196,6 +283,10 @@ public sealed class DebuggerLaunchContractTests
             new JsonObject { ["args"] = new JsonArray((JsonNode?)null) },
             new JsonObject { ["cwd"] = 12 },
             new JsonObject { ["stopAtEntry"] = "true" },
+            new JsonObject { ["projectRoot"] = 42 },
+            new JsonObject { ["projectRoot"] = "" },
+            new JsonObject { ["launchProfile"] = true },
+            new JsonObject { ["launchProfile"] = "bad\0name" },
             new JsonObject { ["justMyCode"] = "false" },
             new JsonObject { ["env"] = "not-an-object" },
             new JsonObject { ["env"] = new JsonObject { ["BAD"] = 12 } },

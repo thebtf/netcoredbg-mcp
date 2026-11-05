@@ -181,6 +181,60 @@
               "null"
             ]
           }
+        },
+        "projectRoot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "launchProfile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "launchEnvironmentMetadata": {
+      "type": "object",
+      "required": [
+        "source",
+        "profile",
+        "path",
+        "variableNames",
+        "appliedCount"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "tool-argument",
+            "project-launch-profile"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variableNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "appliedCount": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -1918,6 +1972,9 @@
           "items": {
             "$ref": "#/$defs/initialBreakpoint"
           }
+        },
+        "launchEnvironment": {
+          "$ref": "#/$defs/launchEnvironmentMetadata"
         }
       },
       "additionalProperties": false
@@ -3232,6 +3289,38 @@
       },
       "additionalProperties": false
     },
+    "startDebugProjectUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_project_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_PROJECT_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugLaunchProfileInvalid": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_launch_profile_invalid"
+        },
+        "error": {
+          "const": "START_DEBUG_LAUNCH_PROFILE_INVALID"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugCwdUnavailable": {
       "type": "object",
       "required": [
@@ -3396,6 +3485,12 @@
       "oneOf": [
         {
           "$ref": "#/$defs/startDebugSuccess"
+        },
+        {
+          "$ref": "#/$defs/startDebugProjectUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugLaunchProfileInvalid"
         },
         {
           "$ref": "#/$defs/debugStateSuccess"
