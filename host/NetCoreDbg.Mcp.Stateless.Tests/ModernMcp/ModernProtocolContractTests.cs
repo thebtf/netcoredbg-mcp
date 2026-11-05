@@ -1633,6 +1633,7 @@ public sealed class ModernProtocolContractTests
     [Fact]
     public async Task LegacyCompat_FunctionBreakpoints_CancelledStartupRemainsCancelled()
     {
+        if (!OperatingSystem.IsWindows()) return;
         var script = new JsonObject
         {
             ["breakpointCapabilities"] = new JsonObject { ["supportsFunctionBreakpoints"] = true },
