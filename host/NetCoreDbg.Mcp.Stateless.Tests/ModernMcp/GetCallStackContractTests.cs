@@ -16,6 +16,180 @@ public sealed class GetCallStackContractTests
     private const string ExceptionInfoTool = "get_exception_info";
     private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
 
+    [Fact]
+    public async Task CompositeStopContext_ReturnsCurrentFrameAndLocalsAndRejectsAmbiguousOptions()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
+        var session = await StartStoppedSessionAsync(driver, "context-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_stop_context",
+            new JsonObject { ["debugSessionId"] = session, ["include_variables"] = true, ["include_output_tail"] = 0 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-stop")), isError: false);
+        Assert.Equal("stop_context_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(1, content["threadId"]?.GetValue<int>());
+        Assert.NotEmpty(Assert.IsType<JsonArray>(content["frames"]));
+        Assert.Equal("42", Assert.IsType<JsonArray>(content["locals"])[0]?["value"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var invalid = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_stop_context",
+            new JsonObject { ["debugSessionId"] = session, ["include_variables"] = true, ["includeVariables"] = true },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-ambiguous")), isError: true);
+        Assert.Equal("invalid_tool_arguments", invalid["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(invalid);
+    }
+
+    [Fact]
+    public async Task CompositeStopContext_InvalidationDuringLocals_RefusesWholeResult()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "hold-then-invalidated"));
+        var session = await StartStoppedSessionAsync(driver, "context-stale-start");
+        var pending = driver.CallToolRawAsync("get_stop_context", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-stale"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("inspection-response-gated", observation.Token);
+        await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-stale-barrier"));
+        driver.ReleaseStackTraceResponse();
+        var content = AssertApplicationEnvelope(await pending, isError: true);
+        Assert.Equal("debug_context_stale", content["kind"]?.GetValue<string>());
+        Assert.False(content.ContainsKey("frames"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task CompositeExceptionContext_ReturnsActualExceptionWithoutDefaultEvaluation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(
+                LifecycleMode: "all-stop", StopReason: "exception", SupportsExceptionInfoRequest: true)));
+        var session = await StartStoppedSessionAsync(driver, "context-exception-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_exception_context",
+            new JsonObject { ["debugSessionId"] = session, ["max_frames"] = 2 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-exception")), isError: false);
+        Assert.Equal("exception_context_success", content["kind"]?.GetValue<string>());
+        Assert.Equal("System.InvalidOperationException", content["exception"]?["exceptionId"]?.GetValue<string>());
+        Assert.NotEmpty(Assert.IsType<JsonArray>(content["frames"]));
+        Assert.Empty(Assert.IsType<JsonArray>(content["innerExceptions"]));
+        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before.Count), action => action.Command == "evaluate");
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        before = await driver.ReadNativeActionsAsync();
+        var withInner = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_exception_context",
+            new JsonObject { ["debugSessionId"] = session, ["max_inner_exceptions"] = 5 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-exception-inner")), isError: false);
+        Assert.Empty(Assert.IsType<JsonArray>(withInner["innerExceptions"]));
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1, "$exception.InnerException");
+        StructuredContentSchemaParityTests.AssertMatchesSchema(withInner);
+    }
+
+    [Fact]
+    public async Task CompositeExceptionContext_UnsupportedCapability_RefusesWithoutEvaluation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(
+                LifecycleMode: "all-stop", StopReason: "exception", SupportsExceptionInfoRequest: false)));
+        var session = await StartStoppedSessionAsync(driver, "context-unsupported-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_exception_context",
+            new JsonObject { ["debugSessionId"] = session, ["maxInnerExceptions"] = 1 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-unsupported")), isError: true);
+        Assert.Equal("dap_exception_info_unsupported", content["kind"]?.GetValue<string>());
+        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before.Count), action => action.Command is "evaluate" or "exceptionInfo");
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task CompositeStopContext_AfterContinuedEvent_RefusesWithoutInspection()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(lifecycleMode: "all-stop-continued-true"));
+        var session = await StartStoppedSessionAsync(driver, "context-resumed-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync("continued", observation.Token);
+        await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-resumed-barrier"));
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_stop_context",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("context-resumed")), isError: true);
+        Assert.Equal("debug_context_unavailable", content["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task CompositeContext_IntegralDecimalAndExponentOptions_MatchAdvertisedIntegerSchema()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var cases = new (string Tool, string Field, string Number)[]
+        {
+            ("get_stop_context", "includeOutputTail", "3.0"),
+            ("get_stop_context", "include_output_tail", "30e-1"),
+            ("get_exception_context", "maxFrames", "3.000"),
+            ("get_exception_context", "include_variables_for_frames", "2e0"),
+            ("get_exception_context", "maxInnerExceptions", "1.0"),
+        };
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (tool, field, number) = cases[index];
+            var arguments = new JsonObject { ["debugSessionId"] = "nonexistent", [field] = JsonNode.Parse(number) };
+            var result = AssertApplicationEnvelope(await driver.CallToolRawAsync(tool, arguments,
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"context-integral-{index}")), isError: true);
+            AssertNotFound(result);
+        }
+
+        var fractional = new JsonObject { ["debugSessionId"] = "nonexistent", ["includeOutputTail"] = JsonNode.Parse("1.0000000000000000001") };
+        var rejected = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_stop_context", fractional,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-fractional")), isError: true);
+        Assert.Equal("invalid_tool_arguments", rejected["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CompositeExceptionContext_OversizedLocals_StopBeforeExceptionEvaluation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(
+                LifecycleMode: "all-stop", StopReason: "exception", SupportsExceptionInfoRequest: true,
+                VariablesResponseMode: "large-context")), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "context-size-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_exception_context",
+            new JsonObject
+            {
+                ["debugSessionId"] = session,
+                ["maxFrames"] = 2,
+                ["includeVariablesForFrames"] = 2,
+                ["maxInnerExceptions"] = 1
+            },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("context-size")), isError: true);
+        Assert.Equal("debug_context_too_large", result["kind"]?.GetValue<string>());
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        Assert.Equal(2, actions.Count(static action => action.Command == "variables"));
+        Assert.DoesNotContain(actions, static action => action.Command is "exceptionInfo" or "evaluate");
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("context-size-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CompositeContext_EscapedLocals_AcceptExactLimitAndRejectOneByteOver()
+    {
+        async Task<JsonObject> CallAsync(int escapedBytes, bool error)
+        {
+            await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", $"context-escaped:{escapedBytes}"));
+            var session = await StartStoppedSessionAsync(driver, $"context-boundary-start-{escapedBytes}");
+            return AssertApplicationEnvelope(await driver.CallToolRawAsync("get_stop_context",
+                new JsonObject { ["debugSessionId"] = session, ["includeOutputTail"] = 0 },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"context-boundary-{escapedBytes}")), error);
+        }
+
+        var baseline = await CallAsync(0, false);
+        var available = 256 * 1024 - Encoding.UTF8.GetByteCount(baseline.ToJsonString());
+        var atLimit = await CallAsync(available, false);
+        Assert.Equal(256 * 1024, Encoding.UTF8.GetByteCount(atLimit.ToJsonString()));
+        var tooLarge = await CallAsync(available + 1, true);
+        Assert.Equal("debug_context_too_large", tooLarge["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(atLimit);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(tooLarge);
+    }
+
     public static TheoryData<string, JsonObject?> InvalidArguments => new()
     {
         { "missing_arguments", null },

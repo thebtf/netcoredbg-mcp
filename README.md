@@ -146,6 +146,23 @@ does not have to still exist. The same refusal, cancellation, and uncertain-writ
 rules apply. Conditions, hit counts, and runtime listing are not yet supported by
 this native path.
 
+The source-built stateful host offers `get_stop_context(debugSessionId)` for the
+current observed stopped thread: up to five frames, the first available scope's
+first 20 variables, and the last 10 retained output entries. `includeVariables`
+and `includeOutputTail` control those additions; output is capped at 100 entries.
+An exception stop also requires adapter `exceptionInfo` support. The result is
+refused if the stopped epoch changes, or its serialized content exceeds 256 KiB.
+The host checks the cumulative escaped JSON size while assembling the result;
+once it cannot fit, it returns the size error without further DAP requests.
+`get_exception_context` requires an exception stop and returns its adapter body,
+up to 20 frames, and first-scope locals for up to five requested frames.
+`maxFrames` defaults to 10 and `includeVariablesForFrames` to 1. Optional
+`maxInnerExceptions` defaults to 0 and is capped at 5. When enabled, evaluation
+may execute debuggee code and mutate state; failed or uncertain evaluations are
+never retried. Each option also accepts its Python snake_case spelling, but not
+both spellings in one call. These native results do not include Python hit counts
+or all scopes; Python remains the installed default.
+
 To inspect a stopped frame, call `get_call_stack` with
 `includeInspectionContext: true`, then pass its `inspectionContextId` with the
 frame ID to `get_scopes` and with each returned reference to `get_variables`.

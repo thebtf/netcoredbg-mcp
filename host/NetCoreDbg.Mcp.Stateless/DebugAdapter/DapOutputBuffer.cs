@@ -68,6 +68,22 @@ internal sealed class DapOutputBuffer
         }
     }
 
+    internal IReadOnlyList<(string Text, string Category)> RecentEntries(int count)
+    {
+        lock (_gate)
+        {
+            var result = new List<(string Text, string Category)>(Math.Min(count, _entries.Count));
+            var skip = Math.Max(0, _entries.Count - count);
+            foreach (var entry in _entries)
+            {
+                if (skip > 0) { skip--; continue; }
+                if (!string.IsNullOrWhiteSpace(entry.Text))
+                    result.Add((entry.Text, entry.Category));
+            }
+            return result;
+        }
+    }
+
     internal (long TotalLines, long ReturnedLines, string Output) Tail(long lines, string? category)
     {
         lock (_gate)
