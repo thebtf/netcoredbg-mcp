@@ -318,11 +318,16 @@ internal static class Program
         private string? _legacySessionId;
         private string? _legacyOwner;
         private long _legacyOwnerActivity;
+        private string? _legacyInspectionSessionId;
+        private string? _legacyInspectionContextId;
+        private int? _legacyCurrentFrameId;
+        private long _legacyInspectionRevision;
 
         internal async ValueTask<CallToolResult> CallLegacyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
         {
             var name = context.Params.Name;
-            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or ContinueExecution or StopDebug))
+            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or ContinueExecution or StopDebug
+                or AddBreakpoint or RemoveBreakpoint or GetScopes or GetVariables or EvaluateExpression))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -340,7 +345,7 @@ internal static class Program
                 gateHeld = true;
                 if (HasInvalidLegacyArguments(name, arguments))
                     return LegacyError("Unsupported or invalid argument.");
-                var mutation = name is StartDebug or StopDebug or StepOver or ContinueExecution;
+                var mutation = name is StartDebug or StopDebug or StepOver or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -458,6 +463,56 @@ internal static class Program
                     }, snapshot.State);
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                var stackRevision = _legacyInspectionRevision;
+                if (name is GetCallStack or StepOver or ContinueExecution or StopDebug)
+                {
+                    _legacyInspectionSessionId = null;
+                    _legacyInspectionContextId = null;
+                    _legacyCurrentFrameId = null;
+                    stackRevision = ++_legacyInspectionRevision;
+                }
+                if (name == GetCallStack)
+                    arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
+                if (name is AddBreakpoint or RemoveBreakpoint)
+                {
+                    if ((arguments.TryGetValue("condition", out var condition) && condition.ValueKind != JsonValueKind.Null)
+                        || (arguments.TryGetValue("hit_condition", out var hit) && hit.ValueKind != JsonValueKind.Null))
+                        return LegacyError("Conditional and hit-count breakpoints are not supported.");
+                    arguments.Remove("condition");
+                    arguments.Remove("hit_condition");
+                    if (!arguments.TryGetValue("line", out var line) || !TryReadOutputLineCount(line, out var lineNumber)
+                        || lineNumber is < 1 or > int.MaxValue)
+                        return LegacyError("Invalid breakpoint line.");
+                    arguments["line"] = JsonSerializer.SerializeToElement((int)lineNumber);
+                }
+                if (name is GetScopes or GetVariables or EvaluateExpression)
+                {
+                    if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null)
+                        return LegacyError("Call get_call_stack for the current stopped context first.");
+                    if (name == GetVariables)
+                    {
+                        if (arguments.TryGetValue("filter", out var filter) && filter.ValueKind != JsonValueKind.Null)
+                            return LegacyError("Variable filtering is not supported.");
+                        arguments.Remove("filter");
+                        if (!arguments.Remove("variables_reference", out var reference)
+                            || !TryReadOutputLineCount(reference, out var referenceNumber)
+                            || referenceNumber is < 1 or > int.MaxValue)
+                            return LegacyError("A valid variables_reference is required.");
+                        arguments["variablesReference"] = JsonSerializer.SerializeToElement((int)referenceNumber);
+                    }
+                    else
+                    {
+                        var selectedFrame = _legacyCurrentFrameId.Value;
+                        if (arguments.Remove("frame_id", out var frame) && frame.ValueKind != JsonValueKind.Null)
+                        {
+                            if (!TryReadOutputLineCount(frame, out var frameNumber) || frameNumber is < int.MinValue or > int.MaxValue)
+                                return LegacyError("Invalid frame_id.");
+                            if (frameNumber != 0) selectedFrame = (int)frameNumber;
+                        }
+                        arguments["frameId"] = JsonSerializer.SerializeToElement(selectedFrame);
+                    }
+                    arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(_legacyInspectionContextId);
+                }
                 var request = LegacyRequest(name, sessionId, arguments);
                 if (name == StopDebug)
                 {
@@ -486,6 +541,11 @@ internal static class Program
                     GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                     GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                     StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
+                    EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
+                    AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     _ => throw new InvalidOperationException(),
                 };
@@ -498,7 +558,32 @@ internal static class Program
                     return LegacyNativeError(result, observedState);
                 var kind = content.GetProperty("kind").GetString();
                 if (name == GetThreads && kind == "threads_success") return LegacyResponse(content.GetProperty("threads"), observedState);
-                if (name == GetCallStack && kind == "call_stack_success") return LegacyResponse(new { frames = content.GetProperty("frames") }, observedState);
+                if (name == GetCallStack && kind == "call_stack_success")
+                {
+                    if (stackRevision != _legacyInspectionRevision)
+                        return LegacyError("Stopped context changed before stack selection completed.", observedState);
+                    var frames = content.GetProperty("frames");
+                    if (content.TryGetProperty("inspectionContextId", out var inspection) && frames.GetArrayLength() > 0)
+                    {
+                        _legacyInspectionSessionId = sessionId;
+                        _legacyInspectionContextId = inspection.GetString();
+                        _legacyCurrentFrameId = frames[0].GetProperty("id").GetInt32();
+                    }
+                    return LegacyResponse(new { frames }, observedState);
+                }
+                if (name == GetScopes && kind == "scopes_success")
+                    return LegacyResponse(content.GetProperty("scopes").EnumerateArray().Select(static scope => new
+                    {
+                        name = scope.GetProperty("name").GetString(),
+                        variablesReference = scope.GetProperty("variablesReference").GetInt32(),
+                    }).ToArray(), observedState);
+                if (name == GetVariables && kind == "variables_success") return LegacyResponse(content.GetProperty("variables"), observedState);
+                if (name == EvaluateExpression && kind == "evaluate_success")
+                    return LegacyResponse(new { result = content.GetProperty("result"), type = content.GetProperty("type"), variablesReference = content.GetProperty("variablesReference") }, observedState);
+                if (name == AddBreakpoint && kind == "breakpoint_added")
+                    return LegacyResponse(new { file = content.GetProperty("file"), line = content.GetProperty("line"), condition = (string?)null, verified = content.GetProperty("verified") }, observedState);
+                if (name == RemoveBreakpoint && kind == "breakpoint_removed")
+                    return LegacyResponse(new { removed = content.GetProperty("removed") }, observedState);
                 if (name == StepOver && kind == "step_over_success")
                     return LegacyExecution("stopped", "step", content.GetProperty("threadId").GetInt32(), false, null);
                 if (name == ContinueExecution && kind == "continue_stopped")
@@ -526,6 +611,11 @@ internal static class Program
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
                     GetCallStack => key is not ("thread_id" or "levels"),
+                    AddBreakpoint => key is not ("file" or "line" or "condition" or "hit_condition"),
+                    RemoveBreakpoint => key is not ("file" or "line"),
+                    GetScopes => key != "frame_id",
+                    GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
+                    EvaluateExpression => key is not ("expression" or "frame_id"),
                     StepOver or ContinueExecution => key != "thread_id",
                     _ => true,
                 };
@@ -4554,6 +4644,11 @@ internal static class Program
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_call_stack", "Read up to 256 frames from a stopped thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]},"levels":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}"""),
+                Tool("add_breakpoint", "Set an unconditional source breakpoint. Conditions and hit counts are unsupported.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647},"condition":{"type":"null"},"hit_condition":{"type":"null"}},"required":["file","line"],"additionalProperties":false}"""),
+                Tool("remove_breakpoint", "Remove a requested source breakpoint.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}"""),
+                Tool("get_scopes", "Get scopes for the current stopped stack frame, or an explicit frame ID. Select a fresh stack after execution.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
+                Tool("get_variables", "Get variables for a reference in the current stopped context. Filtering is unsupported; paging is nonnegative.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":"null"},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["variables_reference"],"additionalProperties":false}"""),
+                Tool("evaluate_expression", "Evaluate in the current stopped context. Expressions may mutate the debuggee; mux ownership is required and uncertain writes are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
                 Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue one stopped thread and observe the next stop, terminal event, or timeout; uncertain writes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 Tool("stop_debug", "Stop the implicit session and release its owner.", """{"type":"object","properties":{},"additionalProperties":false}"""),

@@ -48,9 +48,11 @@ read-only preview retains its modern-only protocol boundary.
 The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
-`step_over`, `continue_execution`, and `stop_debug`; calls use implicit session binding and selected
-Python-style response envelopes. Without the flag the native catalog and explicit
-session contract are unchanged. This mode does not use the Python backend and
+`get_scopes`, `get_variables`, `evaluate_expression`, `add_breakpoint`,
+`remove_breakpoint`, `step_over`, `continue_execution`, and `stop_debug`. Calls
+use implicit session binding and selected Python-style response envelopes.
+Without the flag the native catalog and explicit session contract are unchanged.
+This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
 
 Mux mutation admission uses `_meta.muxSessionId`; reads remain available while
@@ -68,6 +70,15 @@ unknown, retired or pending-execution state
 is reported as `unknown` when native evidence does not establish a state. State
 fields, stack source context, application-type detection, notifications,
 terminal and timeout results, and Python's full action hints are not equivalent.
+`get_call_stack` selects the top frame and stopped inspection context for later
+scope, variable and evaluation calls. Execution invalidates that selection;
+select a fresh stack before inspecting again. Numeric frame and variable IDs are
+not tracked as previously issued: after reselection a reused numeric ID cannot
+be distinguished from an old one. Conditional and hit-count breakpoints and
+non-null variable filters are rejected; variable paging is nonnegative. Unlike
+Python, evaluation is subject to mux mutation ownership because expressions can
+change the debuggee. Uncertain evaluation and breakpoint writes are not retried.
+
 Stack pages are limited to
 256 frames. `stealth_mode=true` and unrecognized arguments are rejected. Python's
 `pre_build=true` default is retained, but native pre-build requires an explicit
