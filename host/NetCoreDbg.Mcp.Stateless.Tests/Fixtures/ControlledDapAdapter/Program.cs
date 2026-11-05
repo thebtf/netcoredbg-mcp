@@ -2509,6 +2509,9 @@ internal sealed class ControlledDapAdapter
         object body;
         switch (expression)
         {
+            case "$exception.InnerException":
+                body = new { result = "null", variablesReference = 0 };
+                break;
             case "6 * 7":
             case " \t6 * 7\r\n":
                 body = new { result = "42", type = "int", variablesReference = 0, evaluateName = privatePayload };
@@ -2670,6 +2673,20 @@ internal sealed class ControlledDapAdapter
             entries = count == 0 ? entries.Skip(start).ToArray() : entries.Skip(start).Take(count).ToArray();
         }
 
+        if (command == "variables" && mode == "large-context")
+        {
+            entries = [new { name = "largeValue", value = new string('v', 150_000), variablesReference = 0 }];
+        }
+        const string contextSizePrefix = "context-escaped:";
+        if (command == "variables" && mode.StartsWith(contextSizePrefix, StringComparison.Ordinal)
+            && int.TryParse(mode.AsSpan(contextSizePrefix.Length), out var escapedBytes) && escapedBytes is >= 0 and <= 262_145)
+        {
+            const string sample = "v\"😀\n";
+            var sampleBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(sample)) - 2;
+            entries = [new { name = "boundary", value = string.Concat(Enumerable.Repeat(sample, escapedBytes / sampleBytes)) + new string('v', escapedBytes % sampleBytes), variablesReference = 0 }];
+            mode = "success";
+        }
+
         if (mode == "refused")
         {
             await WriteResponseAsync(sequence, command, new { message = privatePayload }, cancellationToken, success: false);
@@ -2680,7 +2697,7 @@ internal sealed class ControlledDapAdapter
         {
             entries = [entries[0], new { name = privatePayload, value = privatePayload, variablesReference = "not-an-integer" }];
         }
-        else if (mode is not ("success" or "paging" or "hold" or "hold-then-invalidated"))
+        else if (mode is not ("success" or "paging" or "hold" or "hold-then-invalidated" or "large-context"))
         {
             throw new InvalidOperationException($"Unknown inspection response mode '{mode}'.");
         }

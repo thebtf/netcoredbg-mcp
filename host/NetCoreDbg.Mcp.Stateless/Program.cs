@@ -119,7 +119,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name is "pause_execution" or "get_modules" or "get_progress" or "get_loaded_sources" or "configure_exceptions" or "set_variable" or "search_output"
+                        && name is "pause_execution" or "get_modules" or "get_progress" or "get_loaded_sources" or "configure_exceptions" or "set_variable" or "search_output" or "get_stop_context" or "get_exception_context"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null
                         && (rawArguments is not JsonObject objectArguments
@@ -247,6 +247,8 @@ internal static class Program
         private const string EvaluateExpression = "evaluate_expression";
         private const string SetVariable = "set_variable";
         private const string GetExceptionInfo = "get_exception_info";
+        private const string GetStopContext = "get_stop_context";
+        private const string GetExceptionContext = "get_exception_context";
         private const string GetModules = "get_modules";
         private const string GetProgress = "get_progress";
         private const string GetLoadedSources = "get_loaded_sources";
@@ -392,6 +394,8 @@ internal static class Program
                 EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
                 SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
                 GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                GetStopContext => await GetCompositeContextAsync(request, false, cancellationToken).ConfigureAwait(false),
+                GetExceptionContext => await GetCompositeContextAsync(request, true, cancellationToken).ConfigureAwait(false),
                 GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
                 GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                 GetLoadedSources => await GetLoadedSourcesAsync(request, cancellationToken).ConfigureAwait(false),
@@ -1163,6 +1167,345 @@ internal static class Program
                     catch (Exception)
                     {
                     }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> GetCompositeContextAsync(CallToolRequestParams request, bool exceptionContext, CancellationToken cancellationToken)
+        {
+            var tool = exceptionContext ? GetExceptionContext : GetStopContext;
+            if (!TryReadCompositeArguments(request.Arguments, exceptionContext, out var args))
+                return InvalidArguments(tool);
+            if (!_sessions.TryGetValue(args.SessionId, out var session) || !_slots.TryGetValue(args.SessionId, out var slot))
+                return NotFound();
+            var lease = slot.TryAcquire();
+            if (lease is null) return NotFound();
+            var closeAfterLease = false;
+            var evaluating = false;
+            try
+            {
+                if (!_isUsable(session)) { closeAfterLease = true; return NotFound(); }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var captured = session.CaptureStoppedContext();
+                if (captured is null) return Error("debug_context_unavailable", "DEBUG_CONTEXT_UNAVAILABLE");
+                var (state, context, description, text) = captured.Value;
+                var threadId = state.CurrentThreadId!.Value;
+                CallToolResult InspectionRefusal() => session.IsStoppedContextCurrent(threadId, context)
+                    ? Error("debug_context_refused", "DEBUG_CONTEXT_REFUSED")
+                    : Error("debug_context_stale", "DEBUG_CONTEXT_STALE");
+                if (exceptionContext && state.StopReason != "exception")
+                    return Error("debug_context_not_exception", "DEBUG_CONTEXT_NOT_EXCEPTION");
+                var frameData = new List<object>();
+                var inner = new List<object>();
+                var content = new Dictionary<string, object?>
+                {
+                    ["kind"] = exceptionContext ? "exception_context_success" : "stop_context_success",
+                    ["state"] = "stopped",
+                    ["reason"] = state.StopReason,
+                    ["threadId"] = threadId,
+                    ["inspectionContextId"] = context,
+                    ["frames"] = frameData,
+                };
+                if (description is not null) content["description"] = description;
+                if (text is not null) content["text"] = text;
+                if (exceptionContext) content["innerExceptions"] = inner;
+                else
+                {
+                    if (args.VariableFrames > 0) content["locals"] = Array.Empty<DapVariable>();
+                    if (args.OutputEntries > 0) content["recentOutput"] = new List<object>();
+                }
+                if (state.StopReason == "exception") content["exception"] = new Dictionary<string, object?>();
+                using var budget = new CompositeByteCounter(content);
+                if (!exceptionContext && args.OutputEntries > 0)
+                {
+                    var output = (List<object>)content["recentOutput"]!;
+                    foreach (var entry in session.OutputBuffer.RecentEntries(args.OutputEntries))
+                    {
+                        if (entry.Text.AsSpan().TrimEnd().Length > MaximumSerializedInspectionBytes)
+                            throw new CompositeTooLargeException();
+                        var item = new Dictionary<string, object?> { ["text"] = entry.Text.TrimEnd(), ["category"] = entry.Category };
+                        budget.Append(item, output.Count == 0);
+                        output.Add(item);
+                    }
+                }
+                var stack = await session.GetCallStackAsync(threadId, 0, (uint)args.MaxFrames, true, operation.Token).ConfigureAwait(false);
+                if (stack.IsRefused) return InspectionRefusal();
+                if (stack.InspectionContextId != context) return Error("debug_context_stale", "DEBUG_CONTEXT_STALE");
+                var frames = stack.Frames.Take(args.MaxFrames).ToArray();
+                if (exceptionContext)
+                {
+                    budget.AddProperty("totalFrames", stack.TotalFrames);
+                    content["totalFrames"] = stack.TotalFrames;
+                }
+                for (var index = 0; index < frames.Length; index++)
+                {
+                    var frame = frames[index];
+                    object item = exceptionContext
+                        ? new Dictionary<string, object?>
+                        {
+                            ["index"] = index,
+                            ["id"] = frame.Id,
+                            ["name"] = frame.Name,
+                            ["source"] = frame.Source,
+                            ["line"] = frame.Line,
+                            ["column"] = frame.Column,
+                            ["locals"] = index < args.VariableFrames ? Array.Empty<DapVariable>() : null
+                        }
+                        : frame;
+                    budget.Append(item, frameData.Count == 0);
+                    frameData.Add(item);
+                }
+                for (var index = 0; index < frames.Length; index++)
+                {
+                    IReadOnlyList<DapVariable>? variables = null;
+                    if (index < args.VariableFrames)
+                    {
+                        var scopes = await session.GetScopesAsync(context, frames[index].Id, operation.Token).ConfigureAwait(false);
+                        if (scopes.IsRefused) return InspectionRefusal();
+                        var scope = scopes.Scopes.FirstOrDefault(static item => item.VariablesReference > 0);
+                        if (scope is null) variables = Array.Empty<DapVariable>();
+                        else
+                        {
+                            var result = await session.GetVariablesAsync(context, scope.VariablesReference, 0, 20, operation.Token).ConfigureAwait(false);
+                            if (result.IsRefused) return InspectionRefusal();
+                            variables = result.Variables;
+                        }
+                    }
+                    if (index < args.VariableFrames)
+                    {
+                        var observed = variables ?? Array.Empty<DapVariable>();
+                        budget.Replace(2, observed);
+                        if (!exceptionContext) content["locals"] = observed;
+                        else ((Dictionary<string, object?>)frameData[index])["locals"] = observed;
+                    }
+                }
+                if (state.StopReason == "exception")
+                {
+                    var info = await session.GetExceptionInfoAsync(threadId, operation.Token).ConfigureAwait(false);
+                    if (info.Outcome == DapExceptionInfoOutcome.Unsupported)
+                        return Error("dap_exception_info_unsupported", "DAP_EXCEPTION_INFO_UNSUPPORTED");
+                    if (info.Outcome != DapExceptionInfoOutcome.Success) return InspectionRefusal();
+                    budget.Replace(2, info.Body);
+                    content["exception"] = info.Body;
+                }
+                if (exceptionContext && args.InnerExceptions > 0 && frames.Length == 0)
+                    return Error("debug_context_unavailable", "DEBUG_CONTEXT_UNAVAILABLE");
+                if (exceptionContext && args.InnerExceptions > 0 && frames.Length > 0)
+                {
+                    var prefix = "$exception.InnerException";
+                    for (var depth = 1; depth <= args.InnerExceptions; depth++)
+                    {
+                        evaluating = true;
+                        var current = await session.EvaluateExpressionAsync(context, frames[0].Id, prefix, operation.Token).ConfigureAwait(false);
+                        if (current.Outcome != DapEvaluateOutcome.Success)
+                        {
+                            closeAfterLease = current.Outcome == DapEvaluateOutcome.OutcomeUnknown;
+                            return closeAfterLease ? Error("debug_context_evaluation_unknown", "DEBUG_CONTEXT_EVALUATION_UNKNOWN")
+                                : Error("debug_context_evaluation_failed", "DEBUG_CONTEXT_EVALUATION_FAILED");
+                        }
+                        if (string.Equals(current.Result, "null", StringComparison.Ordinal)) break;
+                        var type = await session.EvaluateExpressionAsync(context, frames[0].Id, prefix + ".GetType().FullName", operation.Token).ConfigureAwait(false);
+                        if (type.Outcome != DapEvaluateOutcome.Success)
+                        {
+                            closeAfterLease = type.Outcome == DapEvaluateOutcome.OutcomeUnknown;
+                            return closeAfterLease ? Error("debug_context_evaluation_unknown", "DEBUG_CONTEXT_EVALUATION_UNKNOWN")
+                                : Error("debug_context_evaluation_failed", "DEBUG_CONTEXT_EVALUATION_FAILED");
+                        }
+                        var innerEntry = new Dictionary<string, object?> { ["depth"] = depth, ["type"] = type.Result, ["message"] = string.Empty };
+                        budget.Append(innerEntry, inner.Count == 0);
+                        inner.Add(innerEntry);
+                        var message = await session.EvaluateExpressionAsync(context, frames[0].Id, prefix + ".Message", operation.Token).ConfigureAwait(false);
+                        if (message.Outcome != DapEvaluateOutcome.Success)
+                        {
+                            closeAfterLease = message.Outcome == DapEvaluateOutcome.OutcomeUnknown;
+                            return closeAfterLease ? Error("debug_context_evaluation_unknown", "DEBUG_CONTEXT_EVALUATION_UNKNOWN")
+                                : Error("debug_context_evaluation_failed", "DEBUG_CONTEXT_EVALUATION_FAILED");
+                        }
+                        budget.Replace(2, message.Result);
+                        innerEntry["message"] = message.Result;
+                        prefix += ".InnerException";
+                    }
+                    evaluating = false;
+                }
+                var serialized = JsonSerializer.Serialize(content);
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                    return Error("debug_context_too_large", "DEBUG_CONTEXT_TOO_LARGE");
+                if (!session.IsStoppedContextCurrent(threadId, context))
+                    return Error("debug_context_stale", "DEBUG_CONTEXT_STALE");
+                return SerializedResult(serialized, false);
+            }
+            catch (CompositeTooLargeException)
+            {
+                return Error("debug_context_too_large", "DEBUG_CONTEXT_TOO_LARGE");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return evaluating ? Error("debug_context_evaluation_unknown", "DEBUG_CONTEXT_EVALUATION_UNKNOWN")
+                    : Error("debug_context_protocol_error", "DEBUG_CONTEXT_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease) { try { await slot.CloseAndDrainAsync().ConfigureAwait(false); } catch (Exception) { } }
+            }
+        }
+
+        private sealed class CompositeTooLargeException : Exception { }
+
+        // Incrementally account for added or replaced JSON values; existing values are never revisited.
+        // Utf8JsonWriter uses the same default encoder as the final serializer, in bounded chunks.
+        private sealed class CompositeByteCounter : IDisposable
+        {
+            private readonly System.Buffers.ArrayBufferWriter<byte> _scratch = new(4096);
+            private readonly Utf8JsonWriter _writer;
+            private int _bytes;
+            private int _limit;
+            private int _total;
+
+            internal CompositeByteCounter(Dictionary<string, object?> content)
+            {
+                _writer = new Utf8JsonWriter(_scratch);
+                _limit = MaximumSerializedInspectionBytes;
+                try
+                {
+                    Value(content);
+                    _total = _bytes;
+                }
+                catch
+                {
+                    _writer.Dispose();
+                    throw;
+                }
+            }
+
+            internal void Append(object? value, bool first)
+            {
+                _bytes = 0;
+                _limit = MaximumSerializedInspectionBytes - _total;
+                if (!first) Add(1);
+                Value(value);
+                _total += _bytes;
+            }
+
+            internal void AddProperty(string name, object? value)
+            {
+                _bytes = 0;
+                _limit = MaximumSerializedInspectionBytes - _total;
+                var first = false;
+                Property(name, value, ref first);
+                _total += _bytes;
+            }
+
+            internal void Replace(int previousSize, object? value)
+            {
+                _bytes = 0;
+                _limit = MaximumSerializedInspectionBytes - _total + previousSize;
+                Value(value);
+                _total += _bytes - previousSize;
+            }
+
+            public void Dispose() => _writer.Dispose();
+
+            private void Add(int count)
+            {
+                if (count > _limit - _bytes) throw new CompositeTooLargeException();
+                _bytes += count;
+            }
+
+            private void String(string value)
+            {
+                Add(2);
+                if (value.Length > _limit - _bytes) throw new CompositeTooLargeException();
+                for (var offset = 0; offset < value.Length;)
+                {
+                    var length = Math.Min(512, value.Length - offset);
+                    if (offset + length < value.Length && char.IsHighSurrogate(value[offset + length - 1])
+                        && char.IsLowSurrogate(value[offset + length])) length--;
+                    _scratch.Clear();
+                    _writer.Reset(_scratch);
+                    _writer.WriteStringValue(value.AsSpan(offset, length));
+                    _writer.Flush();
+                    Add(_scratch.WrittenCount - 2);
+                    offset += length;
+                }
+            }
+
+            private void Property(string name, object? value, ref bool first)
+            {
+                if (!first) Add(1);
+                first = false;
+                String(name);
+                Add(1);
+                Value(value);
+            }
+
+            internal void Value(object? value)
+            {
+                switch (value)
+                {
+                    case null: Add(4); return;
+                    case string text: String(text); return;
+                    case bool flag: Add(flag ? 4 : 5); return;
+                    case int or uint or long:
+                        Add(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)!.Length); return;
+                    case DapStackFrame frame:
+                        {
+                            Add(2); var first = true;
+                            Property("id", frame.Id, ref first); Property("name", frame.Name, ref first);
+                            Property("source", frame.Source, ref first); Property("line", frame.Line, ref first);
+                            Property("column", frame.Column, ref first); return;
+                        }
+                    case DapVariable variable:
+                        {
+                            Add(2); var first = true;
+                            Property("name", variable.Name, ref first); Property("value", variable.Value, ref first);
+                            Property("type", variable.Type, ref first); Property("variablesReference", variable.VariablesReference, ref first); return;
+                        }
+                    case JsonElement element: Element(element); return;
+                    case IDictionary<string, object?> properties:
+                        {
+                            Add(2); var first = true;
+                            foreach (var pair in properties) Property(pair.Key, pair.Value, ref first);
+                            return;
+                        }
+                    case System.Collections.IEnumerable items:
+                        {
+                            Add(2); var first = true;
+                            foreach (var item in items) { if (!first) Add(1); first = false; Value(item); }
+                            return;
+                        }
+                    default: throw new InvalidOperationException("Unsupported composite context value.");
+                }
+            }
+
+            private void Element(JsonElement element)
+            {
+                switch (element.ValueKind)
+                {
+                    case JsonValueKind.Object:
+                        {
+                            Add(2); var first = true;
+                            foreach (var property in element.EnumerateObject()) Property(property.Name, property.Value, ref first);
+                            return;
+                        }
+                    case JsonValueKind.Array:
+                        {
+                            Add(2); var first = true;
+                            foreach (var item in element.EnumerateArray()) { if (!first) Add(1); first = false; Element(item); }
+                            return;
+                        }
+                    case JsonValueKind.String: String(element.GetString()!); return;
+                    case JsonValueKind.Number: Add(element.GetRawText().Length); return;
+                    case JsonValueKind.True: Add(4); return;
+                    case JsonValueKind.False: Add(5); return;
+                    case JsonValueKind.Null: Add(4); return;
+                    default: throw new InvalidOperationException("Unsupported exception body value.");
                 }
             }
         }
@@ -3564,6 +3907,53 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadCompositeArguments(IDictionary<string, JsonElement>? input, bool exception, out CompositeArguments result)
+        {
+            result = null!;
+            if (input is null || !input.TryGetValue("debugSessionId", out var id)
+                || id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString())) return false;
+            var allowed = exception
+                ? new[] { "debugSessionId", "maxFrames", "max_frames", "includeVariablesForFrames", "include_variables_for_frames", "maxInnerExceptions", "max_inner_exceptions" }
+                : new[] { "debugSessionId", "includeVariables", "include_variables", "includeOutputTail", "include_output_tail" };
+            if (input.Keys.Any(key => !allowed.Contains(key))) return false;
+            bool ReadOption(string camel, string snake, out JsonElement value)
+            {
+                var hasCamel = input.TryGetValue(camel, out value);
+                var hasSnake = input.TryGetValue(snake, out var alternate);
+                if (hasCamel && hasSnake) return false;
+                if (hasSnake) value = alternate;
+                return true;
+            }
+            bool ReadInteger(string camel, string snake, int defaultValue, int minimum, int maximum, out int value)
+            {
+                value = defaultValue;
+                if (!ReadOption(camel, snake, out var element)) return false;
+                if (element.ValueKind == JsonValueKind.Undefined) return true;
+                if (!TryReadOutputLineCount(element, out var parsed) || parsed < minimum || parsed > maximum) return false;
+                value = (int)parsed;
+                return true;
+            }
+            var frames = exception ? 10 : 5;
+            var variableFrames = 1;
+            var output = 10;
+            var inner = 0;
+            if (exception)
+            {
+                if (!ReadInteger("maxFrames", "max_frames", 10, 1, 20, out frames)
+                    || !ReadInteger("includeVariablesForFrames", "include_variables_for_frames", 1, 0, 5, out variableFrames)
+                    || !ReadInteger("maxInnerExceptions", "max_inner_exceptions", 0, 0, 5, out inner)) return false;
+            }
+            else
+            {
+                if (!ReadOption("includeVariables", "include_variables", out var variables)
+                    || variables.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.True or JsonValueKind.False)
+                    || !ReadInteger("includeOutputTail", "include_output_tail", 10, 0, 100, out output)) return false;
+                variableFrames = variables.ValueKind == JsonValueKind.False ? 0 : 1;
+            }
+            result = new CompositeArguments(id.GetString()!, frames, variableFrames, output, inner);
+            return true;
+        }
+
         private static bool TryReadCallStackArguments(
             IDictionary<string, JsonElement>? arguments,
             out CallStackArguments result)
@@ -3734,6 +4124,7 @@ internal static class Program
             bool loadedSourcesComplete);
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
+        private sealed record CompositeArguments(string SessionId, int MaxFrames, int VariableFrames, int OutputEntries, int InnerExceptions);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
         private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, int? Start, int? Count);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
@@ -3824,6 +4215,10 @@ internal static class Program
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 Tool("get_loaded_sources", "Request the current loaded-source snapshot when the adapter advertises support. Duplicate normalized source identities replace earlier entries. The result is a snapshot, not a live event cache, and content above 256 KiB fails without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("get_stop_context", "Read the current stopped thread, up to five frames, optional first-scope locals and recent retained output. Defaults: includeVariables true, includeOutputTail 10. An exception stop requires adapter exceptionInfo support. Results are limited to 256 KiB and refused if the inspection epoch changes.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"includeVariables":{"type":"boolean"},"include_variables":{"type":"boolean"},"includeOutputTail":{"type":"integer","minimum":0,"maximum":100},"include_output_tail":{"type":"integer","minimum":0,"maximum":100}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["includeVariables","include_variables"]}},{"not":{"required":["includeOutputTail","include_output_tail"]}}]}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("get_exception_context", "Read exception information and bounded frames and first-scope locals for the current exception stop. Defaults: maxFrames 10, includeVariablesForFrames 1, maxInnerExceptions 0. Optional inner-exception evaluation may execute debuggee code and mutate state; it is off by default and never retried. Results over 256 KiB or from stale epochs are refused.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"maxFrames":{"type":"integer","minimum":1,"maximum":20},"max_frames":{"type":"integer","minimum":1,"maximum":20},"includeVariablesForFrames":{"type":"integer","minimum":0,"maximum":5},"include_variables_for_frames":{"type":"integer","minimum":0,"maximum":5},"maxInnerExceptions":{"type":"integer","minimum":0,"maximum":5},"max_inner_exceptions":{"type":"integer","minimum":0,"maximum":5}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["maxFrames","max_frames"]}},{"not":{"required":["includeVariablesForFrames","include_variables_for_frames"]}},{"not":{"required":["maxInnerExceptions","max_inner_exceptions"]}}]}""",
+                    new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
                 .. NativeSceneToolDispatcher.ListTools(),
                 NativeCodeSearchCatalog.Definition("find_code_symbol"),
                 NativeCodeSearchCatalog.Definition("find_code_references"),

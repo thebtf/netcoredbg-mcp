@@ -3718,6 +3718,8 @@
             "evaluate_expression",
             "set_variable",
             "get_exception_info",
+            "get_stop_context",
+            "get_exception_context",
             "get_modules",
             "get_progress",
             "get_loaded_sources",
@@ -3740,8 +3742,120 @@
       },
       "additionalProperties": false
     },
+    "compositeContextSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "state",
+        "reason",
+        "threadId",
+        "inspectionContextId",
+        "frames"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "stop_context_success",
+            "exception_context_success"
+          ]
+        },
+        "state": {
+          "const": "stopped"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "description": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {}
+        },
+        "locals": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/variable"
+          }
+        },
+        "recentOutput": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {}
+        },
+        "exception": {},
+        "totalFrames": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "innerExceptions": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "compositeContextError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "additionalProperties": false,
+      "description": "A fixed redacted context error; no partial context is returned.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "debug_context_unavailable",
+            "debug_context_not_exception",
+            "debug_context_stale",
+            "debug_context_refused",
+            "debug_context_too_large",
+            "debug_context_protocol_error",
+            "debug_context_evaluation_failed",
+            "debug_context_evaluation_unknown"
+          ]
+        },
+        "error": {
+          "enum": [
+            "DEBUG_CONTEXT_UNAVAILABLE",
+            "DEBUG_CONTEXT_NOT_EXCEPTION",
+            "DEBUG_CONTEXT_STALE",
+            "DEBUG_CONTEXT_REFUSED",
+            "DEBUG_CONTEXT_TOO_LARGE",
+            "DEBUG_CONTEXT_PROTOCOL_ERROR",
+            "DEBUG_CONTEXT_EVALUATION_FAILED",
+            "DEBUG_CONTEXT_EVALUATION_UNKNOWN"
+          ]
+        }
+      }
+    },
     "toolStructuredContent": {
       "oneOf": [
+        {
+          "$ref": "#/$defs/compositeContextSuccess"
+        },
+        {
+          "$ref": "#/$defs/compositeContextError"
+        },
         {
           "$ref": "#/$defs/startDebugSuccess"
         },

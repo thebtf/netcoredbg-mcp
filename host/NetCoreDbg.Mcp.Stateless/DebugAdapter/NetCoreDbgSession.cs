@@ -76,6 +76,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly byte[] _headerByte = new byte[1];
 
     private DapSessionState _state = new(null, null, null);
+    private string? _stopDescription;
+    private string? _stopText;
     private Task? _cleanupTask;
     private Exception? _readerFailure;
     private int _retirementRequested;
@@ -236,6 +238,26 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     internal (long TotalLines, long ReturnedLines, string Output) GetOutputTail(long lines, string? category) => _outputBuffer.Tail(lines, category);
     internal DapOutputBuffer OutputBuffer => _outputBuffer;
+
+    internal (DapSessionState State, string Context, string? Description, string? Text)? CaptureStoppedContext()
+    {
+        lock (_stateGate)
+        {
+            if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing
+                || _state.Event != "stopped" || _state.StopReason is null || _state.CurrentThreadId is not { } threadId
+                || !HasStepOverAuthority(threadId))
+                return null;
+            return (_state, GetOrCreateInspectionContext(), _stopDescription, _stopText);
+        }
+    }
+
+    internal bool IsStoppedContextCurrent(int threadId, string context)
+    {
+        lock (_stateGate)
+            return !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing
+                && _state.Event == "stopped" && _state.CurrentThreadId == threadId
+                && HasStepOverAuthority(threadId) && StringComparer.Ordinal.Equals(_inspectionContextId, context);
+    }
 
     internal DapRuntimeInventorySnapshot GetRuntimeInventory(bool modules, int maximumSerializedBytes)
     {
@@ -3236,6 +3258,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     StopReason = reason,
                     CurrentThreadId = threadId,
                 };
+                _stopDescription = TryGetString(body, "description");
+                _stopText = TryGetString(body, "text");
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
                 if (!_inspectionClosed && allThreadsStopped)
