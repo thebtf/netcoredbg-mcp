@@ -78,6 +78,11 @@ hit conditions are passed to the adapter; it may ignore them without the
 corresponding DAP capabilities. An uncertain write is not retried automatically.
 When function and source breakpoints are both active, a generic breakpoint stop
 can make source hit counts unavailable rather than attributing it incorrectly.
+If the adapter refuses an update to an existing function breakpoint, the native
+route retains its previous entry; the Python route currently removes it. Each
+debug session retains up to 4,096 distinct observed function-breakpoint IDs to
+avoid misattributing late events. Exceeding that limit makes source breakpoint
+observations unavailable until a new debug session is started.
 
 The three memory inspection tools require their corresponding DAP capabilities.
 `read_memory` with a zero count returns empty data only after the capability

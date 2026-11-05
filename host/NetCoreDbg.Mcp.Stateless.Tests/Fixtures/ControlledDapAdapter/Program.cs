@@ -1216,6 +1216,20 @@ internal sealed class ControlledDapAdapter
             await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { message = "function breakpoints refused" }, cancellationToken, success: false);
             return;
         }
+        if (!_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionStartupFailure", out var startupFailure))
+        {
+            if (startupFailure.GetString() == "timeout")
+            {
+                await RecordAsync(new { kind = "function-startup-response-withheld", sequence }, cancellationToken);
+                return;
+            }
+            if (startupFailure.GetString() == "malformed")
+            {
+                await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { breakpoints = "invalid" }, cancellationToken);
+                return;
+            }
+        }
 
         var runtimeOnly = _outputScript.ValueKind == JsonValueKind.Object &&
             _outputScript.TryGetProperty("functionSyncEventRuntimeOnly", out var runtimeEvent) && runtimeEvent.ValueKind == JsonValueKind.True;
