@@ -1208,6 +1208,107 @@ public sealed class ModernProtocolContractTests
         finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
     }
 
+    [Theory]
+    [InlineData("malformed")]
+    [InlineData("timeout")]
+    public async Task LegacyCompat_FunctionBreakpoints_StartupProtocolFailureIsNotSessionNotFound(string failure)
+    {
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject { ["supportsFunctionBreakpoints"] = true },
+            ["functionStartupFailure"] = failure,
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "function-start-failure-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_function_breakpoint", new JsonObject { ["function_name"] = "Example.Deferred" }, owner))["data"]);
+        var result = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner, TimeSpan.FromSeconds(45));
+        Assert.Equal("DAP_BREAKPOINTS_PROTOCOL_ERROR", result["error"]?.GetValue<string>());
+        var actions = await driver.ReadNativeActionsAsync();
+        Assert.Single(actions, static action => action.Command == "setFunctionBreakpoints");
+        Assert.DoesNotContain(actions, static action => action.Command == "launch");
+        var retained = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject(), owner);
+        Assert.Equal("Example.Deferred", Assert.Single(Assert.IsType<JsonArray>(retained["data"]?["__function_breakpoints__"]))?["function"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_FunctionBreakpoints_CancelledStartupRemainsCancelled()
+    {
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject { ["supportsFunctionBreakpoints"] = true },
+            ["functionStartupFailure"] = "timeout",
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString(),
+                ["CONTROLLED_DAP_OPTIONS"] = new FixtureConfiguration(SuppressLifecycleEvents: true).AsEnvironmentValue(),
+            }));
+        var owner = new JsonObject { ["muxSessionId"] = "function-start-cancel-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_function_breakpoint", new JsonObject { ["function_name"] = "Example.Deferred" }, owner))["data"]);
+        using var cancellation = new CancellationTokenSource();
+        var startId = new RequestId("function-start-cancel");
+        var pending = driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false },
+            owner, startId, cancellation.Token, timeout: TimeSpan.FromSeconds(45));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await driver.WaitForFixtureRecordAsync("function-startup-response-withheld", deadline.Token);
+        await driver.CaptureCancelledLegacyStartupAdapterAsync(startId, deadline.Token);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => driver.ConfirmCancelledLegacyStartupCleanupAsync(startId, deadline.Token));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
+        Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "launch");
+        using (var cancelledConfirmation = new CancellationTokenSource())
+        {
+            cancelledConfirmation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => driver.ConfirmCancelledLegacyStartupCleanupAsync(startId, cancelledConfirmation.Token));
+        }
+        await driver.ConfirmCancelledLegacyStartupCleanupAsync(startId, deadline.Token);
+    }
+
+    [Fact]
+    public async Task LegacyCompat_FunctionBreakpoints_RefusedReplacementRetainsAcknowledgedEntry()
+    {
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject { ["supportsFunctionBreakpoints"] = true },
+            ["functionSyncRefuseAfterEvent"] = true,
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "function-replacement-refusal-owner" };
+        JsonObject Point(string condition, string hit) => new() { ["function_name"] = "Example.Keep", ["condition"] = condition, ["hit_condition"] = hit };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_function_breakpoint", Point("x > 1", "3"), owner))["data"]);
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var refused = await LegacyConsoleCallAsync(driver, "add_function_breakpoint", Point("x > 2", "4"), owner);
+            Assert.NotNull(refused["error"]);
+            var request = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setFunctionBreakpoints");
+            var sent = Assert.Single(Assert.IsType<JsonArray>(JsonNode.Parse(request.Detail!)?["arguments"]?["breakpoints"]));
+            Assert.Equal("x > 2", sent?["condition"]?.GetValue<string>());
+            Assert.Equal("4", sent?["hitCondition"]?.GetValue<string>());
+            var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject(), owner);
+            var retained = Assert.Single(Assert.IsType<JsonArray>(listed["data"]?["__function_breakpoints__"]));
+            Assert.Equal("Example.Keep", retained?["function"]?.GetValue<string>());
+            Assert.Equal("x > 1", retained?["condition"]?.GetValue<string>());
+            Assert.Equal("3", retained?["hit_condition"]?.GetValue<string>());
+            Assert.True(retained?["verified"]?.GetValue<bool>());
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
     [Fact]
     public async Task LegacyCompat_SourceBreakpointOptions_PersistAndRequireAdapterCapabilities()
     {

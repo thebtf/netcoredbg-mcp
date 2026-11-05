@@ -27,6 +27,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private readonly JsonObject? _initialMeta;
     private readonly string? _debuggerPath;
     private readonly bool _legacyCompat;
+    private readonly bool _knownNoDescendantFixture;
     private readonly List<ModernMcpRequestObservation> _requests = [];
     private readonly List<string> _standardErrorLines = [];
     private readonly object _gate = new();
@@ -35,13 +36,14 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private bool _disposed;
     private Task? _disposeTask;
 
-    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, string? debuggerPath, bool legacyCompat)
+    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, string? debuggerPath, bool legacyCompat, bool knownNoDescendantFixture)
     {
         _scratchDirectory = scratchDirectory;
         _fixture = fixture;
         _initialMeta = initialMeta?.DeepClone().AsObject();
         _debuggerPath = debuggerPath;
         _legacyCompat = legacyCompat;
+        _knownNoDescendantFixture = knownNoDescendantFixture;
         Client = client;
         InertProgramPath = inertProgramPath;
     }
@@ -128,7 +130,11 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 client,
                 inertProgramPath,
                 options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation), debuggerPath,
-                options.HostArguments?.Contains("--legacy-compat", StringComparer.Ordinal) == true);
+                options.HostArguments?.Contains("--legacy-compat", StringComparer.Ordinal) == true,
+                OperatingSystem.IsWindows() && debuggerPath == fixture.ExecutablePath
+                    && environment.Keys.Count(static key => string.Equals(key, "CONTROLLED_DAP_OPTIONS", StringComparison.OrdinalIgnoreCase)) == 1
+                    && environment.TryGetValue("CONTROLLED_DAP_OPTIONS", out var fixtureOptions)
+                    && fixtureOptions == new FixtureConfiguration(SuppressLifecycleEvents: true).AsEnvironmentValue());
             client = null;
             transport = null;
             fixture = null;
@@ -297,6 +303,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     NotificationMethods.CancelledNotification,
                     new CancelledNotificationParams { RequestId = id },
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    observation.CancellationNotified = true;
+                    if (method == "tools/call" && StringValue(parameters?["name"]) == "start_debug")
+                        observation.CompletedOrder = ++_lifecycleOrder;
+                }
             }
             catch (Exception)
             {
@@ -481,6 +493,67 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
 
 
+    internal async Task CaptureCancelledLegacyStartupAdapterAsync(RequestId id, CancellationToken cancellationToken)
+    {
+        if (!_legacyCompat || !_knownNoDescendantFixture || _clientClosed)
+            throw new InvalidOperationException("The controlled no-descendant Windows fixture is required.");
+        var transcript = await ReadFixtureTranscriptAsync(cancellationToken).ConfigureAwait(false);
+        var startup = transcript.Single(static entry => entry.Kind == "startup");
+        if (!transcript.Any(static entry => entry.Kind == "function-startup-response-withheld")
+            || transcript.Any(static entry => entry.Kind is "descendant" or "second-windowed-descendant-published"
+                || (entry.Kind == "request" && entry.Command == "launch")))
+            throw new InvalidOperationException("The fixture has not reached the required pre-launch barrier.");
+        var witness = Process.GetProcessById(startup.ProcessId ?? throw new InvalidOperationException("Adapter identity is missing."));
+        try
+        {
+            ValidateWitness(witness, startup);
+            lock (_gate)
+            {
+                var starts = _requests.Where(static request => request.Method == "tools/call" && StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
+                if (_disposed || _clientClosed || starts.Length != 1 || starts[0].Id != id || starts[0].CompletedOrder != 0
+                    || _requests.Any(static request => request.Method == "tools/call" && StringValue(request.Parameters?["name"]) == "stop_debug")
+                    || starts[0].CancellationNotified || starts[0].CancellationAdapterWitness is not null
+                    || starts[0].Parameters?["arguments"]?["pre_build"]?.GetValue<bool>() != false)
+                    throw new InvalidOperationException("The exact startup request is not pending before cancellation.");
+                starts[0].CancellationAdapterWitness = witness;
+                witness = null!;
+            }
+        }
+        finally { witness?.Dispose(); }
+    }
+
+    internal async Task ConfirmCancelledLegacyStartupCleanupAsync(RequestId id, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ModernMcpRequestObservation start;
+        Process witness;
+        lock (_gate)
+        {
+            var starts = _requests.Where(static request => request.Method == "tools/call" && StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
+            if (!_knownNoDescendantFixture || _disposed || starts.Length != 1 || starts[0].Id != id
+                || _requests.Any(static request => request.Method == "tools/call" && StringValue(request.Parameters?["name"]) == "stop_debug")
+                || !starts[0].CancellationNotified || starts[0].Result is not null || starts[0].CancellationAdapterWitness is not { } captured)
+                throw new InvalidOperationException("Cancelled startup ownership evidence is incomplete.");
+            start = starts[0];
+            witness = captured;
+        }
+        await witness.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        var transcript = await ReadFixtureTranscriptAsync(cancellationToken).ConfigureAwait(false);
+        if (transcript.Any(static entry => entry.Kind is "descendant" or "second-windowed-descendant-published"
+            || (entry.Kind == "request" && entry.Command == "launch")))
+            throw new InvalidOperationException("The controlled startup did not remain pre-launch.");
+        await CloseClientAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (start.CancellationAdapterWitness != witness || !start.CancellationNotified || start.Result is not null)
+                throw new InvalidOperationException("Cancelled startup evidence changed during cleanup.");
+            start.CancellationCleanupConfirmed = true;
+            start.CancellationAdapterWitness = null;
+        }
+        witness.Dispose();
+    }
+
     /// <summary>
     /// Disposes the official client and returns its public stdio completion receipt.
     /// No SDK-internal process reflection or bespoke process launch is used.
@@ -602,6 +675,14 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         {
             cleanupFailures.Add(exception);
         }
+        lock (_gate)
+        {
+            foreach (var request in _requests)
+            {
+                request.CancellationAdapterWitness?.Dispose();
+                request.CancellationAdapterWitness = null;
+            }
+        }
 
         if (cleanupConfirmed)
         {
@@ -652,6 +733,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     Result = request.Result?.DeepClone().AsObject(),
                     ControlledProcessesExited = request.ControlledProcessesExited,
                     NoLaunchConfirmed = request.NoLaunchConfirmed,
+                    CancellationCleanupConfirmed = request.CancellationCleanupConfirmed,
                     StartedOrder = request.StartedOrder,
                     CompletedOrder = request.CompletedOrder,
                 }).ToArray();
@@ -746,6 +828,11 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             {
                 if (StringValue(payload?["error"]) == "A debug session is already active; stop it before starting another.")
                     continue;
+                if (request.CancellationCleanupConfirmed && active is null && request.StartedOrder > lastTransition && request.CompletedOrder > request.StartedOrder)
+                {
+                    lastTransition = request.CompletedOrder;
+                    continue;
+                }
                 if (request.StartedOrder <= lastTransition || request.CompletedOrder == 0 || active is not null)
                     return false;
                 if (IsComplete(request.Result, false) && payload?["data"]?["success"]?.GetValue<bool>() == true
@@ -755,7 +842,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     lastTransition = request.CompletedOrder;
                 }
                 else if (IsComplete(request.Result, false) && payload?["state"]?.GetValue<string>() == "idle"
-                    && StringValue(payload["error"]) is "DAP_LAUNCH_REFUSED" or "DAP_BREAKPOINT_OPTIONS_UNSUPPORTED")
+                    && StringValue(payload["error"]) is "DAP_LAUNCH_REFUSED" or "DAP_BREAKPOINT_OPTIONS_UNSUPPORTED" or "DAP_BREAKPOINTS_PROTOCOL_ERROR")
                 {
                     // These results are emitted only after owned failed-start cleanup succeeds.
                     lastTransition = request.CompletedOrder;
@@ -1123,6 +1210,9 @@ internal sealed record ModernMcpRequestObservation(RequestId Id, string Method, 
     internal JsonObject? Result { get; set; }
     internal bool ControlledProcessesExited { get; set; }
     internal bool NoLaunchConfirmed { get; set; }
+    internal bool CancellationNotified { get; set; }
+    internal bool CancellationCleanupConfirmed { get; set; }
+    internal Process? CancellationAdapterWitness { get; set; }
     internal long StartedOrder { get; set; }
     internal long CompletedOrder { get; set; }
 }

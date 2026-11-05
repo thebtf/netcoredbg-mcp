@@ -880,7 +880,8 @@ internal static class Program
                     if (functionResult is { Outcome: DapBreakpointUpdateOutcome.Refused })
                     {
                         if (name == RemoveFunctionBreakpoint) return LegacyResponse(new { removed = true, function });
-                        if (name == AddFunctionBreakpoint) _legacyFunctionBreakpoints.RemoveAll(item => item.Name == function);
+                        if (previousFunction is null) _legacyFunctionBreakpoints.RemoveAll(item => item.Name == function);
+                        else _legacyFunctionBreakpoints[index] = previousFunction;
                         return LegacyError("The debugger refused function breakpoints.");
                     }
                     if (functionResult is { Outcome: DapBreakpointUpdateOutcome.Unsupported })
@@ -2787,7 +2788,7 @@ internal static class Program
                     ? Error("dap_launch_refused", "DAP_LAUNCH_REFUSED")
                     : exception is DapBreakpointOptionsUnsupportedException && cleanupComplete
                     ? Error("dap_breakpoint_options_unsupported", "DAP_BREAKPOINT_OPTIONS_UNSUPPORTED")
-                    : exception is DapBreakpointsException breakpointFailure
+                    : exception is DapBreakpointsException breakpointFailure && cleanupComplete
                     ? breakpointFailure.IsRefused
                         ? Error("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED")
                         : Error("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR")

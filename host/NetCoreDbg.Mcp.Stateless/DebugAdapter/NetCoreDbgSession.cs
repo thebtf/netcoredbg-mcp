@@ -1693,9 +1693,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
         if (functionBreakpoints is not null)
         {
-            var result = await ReplaceFunctionBreakpointsAsync(functionBreakpoints, cancellationToken).ConfigureAwait(false);
+            DapBreakpointUpdateResult result;
+            try
+            {
+                result = await ReplaceFunctionBreakpointsAsync(functionBreakpoints, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new DapBreakpointsException(isRefused: false);
+            }
             if (result.Outcome is not (DapBreakpointUpdateOutcome.Added or DapBreakpointUpdateOutcome.Unsupported or DapBreakpointUpdateOutcome.Refused))
-                throw new DapBreakpointsException(result.Outcome == DapBreakpointUpdateOutcome.Refused);
+                throw new DapBreakpointsException(isRefused: false);
         }
 
         var debuggeeProgram = programPath;
