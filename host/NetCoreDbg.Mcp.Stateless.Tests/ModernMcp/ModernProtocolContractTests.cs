@@ -582,7 +582,8 @@ public sealed class ModernProtocolContractTests
         _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
         var location = new JsonObject { ["file"] = source, ["line"] = 2 };
         Assert.True((await LegacyConsoleCallAsync(driver, "add_breakpoint", location, owner))["data"]?["verified"]?.GetValue<bool>());
-        var stack = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), other);
+        _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+        var stack = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject { ["thread_id"] = 2 }, other);
         var frame = Assert.IsType<JsonArray>(stack["data"]?["frames"])[0]!["id"]!.GetValue<int>();
         var before = await driver.ReadNativeActionsAsync();
         foreach (var (tool, args) in new[]
@@ -599,6 +600,18 @@ public sealed class ModernProtocolContractTests
         Assert.DoesNotContain(after.Skip(before.Count), action => action.Command is "setBreakpoints" or "evaluate");
         var scopes = await LegacyConsoleCallAsync(driver, "get_scopes", new JsonObject(), other);
         Assert.Equal("Locals", Assert.IsType<JsonArray>(scopes["data"])[0]?["name"]?.GetValue<string>());
+        var beforeOwnerInspection = await driver.ReadNativeActionsAsync();
+        var displaced = await LegacyConsoleCallAsync(driver, "evaluate_expression", new JsonObject { ["expression"] = "6 * 7" }, owner);
+        Assert.NotNull(displaced["error"]);
+        var displacedScopes = await LegacyConsoleCallAsync(driver, "get_scopes", new JsonObject(), owner);
+        var displacedVariables = await LegacyConsoleCallAsync(driver, "get_variables", new JsonObject { ["variables_reference"] = 1001 }, owner);
+        Assert.NotNull(displacedScopes["error"]);
+        Assert.NotNull(displacedVariables["error"]);
+        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(beforeOwnerInspection.Count),
+            action => action.Command is "scopes" or "variables" or "evaluate");
+        _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+        var restored = await LegacyConsoleCallAsync(driver, "evaluate_expression", new JsonObject { ["expression"] = "6 * 7" }, owner);
+        Assert.Equal("42", restored["data"]?["result"]?.GetValue<string>());
         var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
         Assert.True(stop["data"]?["success"]?.GetValue<bool>());
     }

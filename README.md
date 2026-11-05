@@ -71,7 +71,9 @@ is reported as `unknown` when native evidence does not establish a state. State
 fields, stack source context, application-type detection, notifications,
 terminal and timeout results, and Python's full action hints are not equivalent.
 `get_call_stack` selects the top frame and stopped inspection context for later
-scope, variable and evaluation calls. Execution invalidates that selection;
+scope, variable and evaluation calls. The selection belongs to that mux client;
+if another client selects a stack, select your own stack again. Untagged callers
+cannot be distinguished from each other. Execution also invalidates the selection;
 select a fresh stack before inspecting again. Numeric frame and variable IDs are
 not tracked as previously issued: after reselection a reused numeric ID cannot
 be distinguished from an old one. Conditional and hit-count breakpoints and

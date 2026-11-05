@@ -320,6 +320,7 @@ internal static class Program
         private long _legacyOwnerActivity;
         private string? _legacyInspectionSessionId;
         private string? _legacyInspectionContextId;
+        private string? _legacyInspectionMuxId;
         private int? _legacyCurrentFrameId;
         private long _legacyInspectionRevision;
 
@@ -468,6 +469,7 @@ internal static class Program
                 {
                     _legacyInspectionSessionId = null;
                     _legacyInspectionContextId = null;
+                    _legacyInspectionMuxId = null;
                     _legacyCurrentFrameId = null;
                     stackRevision = ++_legacyInspectionRevision;
                 }
@@ -487,7 +489,8 @@ internal static class Program
                 }
                 if (name is GetScopes or GetVariables or EvaluateExpression)
                 {
-                    if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null)
+                    if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null
+                        || !StringComparer.Ordinal.Equals(_legacyInspectionMuxId, muxId))
                         return LegacyError("Call get_call_stack for the current stopped context first.");
                     if (name == GetVariables)
                     {
@@ -590,6 +593,7 @@ internal static class Program
                     {
                         _legacyInspectionSessionId = sessionId;
                         _legacyInspectionContextId = stackContext;
+                        _legacyInspectionMuxId = muxId;
                         _legacyCurrentFrameId = frames[0].GetProperty("id").GetInt32();
                     }
                     return LegacyResponse(new { frames }, observedState);
