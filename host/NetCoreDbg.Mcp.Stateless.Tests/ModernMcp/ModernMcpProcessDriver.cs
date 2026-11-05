@@ -26,6 +26,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private readonly string _scratchDirectory;
     private readonly JsonObject? _initialMeta;
     private readonly string? _debuggerPath;
+    private readonly bool _legacyCompat;
     private readonly List<ModernMcpRequestObservation> _requests = [];
     private readonly List<string> _standardErrorLines = [];
     private readonly object _gate = new();
@@ -33,12 +34,13 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private bool _disposed;
     private Task? _disposeTask;
 
-    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, string? debuggerPath)
+    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, string? debuggerPath, bool legacyCompat)
     {
         _scratchDirectory = scratchDirectory;
         _fixture = fixture;
         _initialMeta = initialMeta?.DeepClone().AsObject();
         _debuggerPath = debuggerPath;
+        _legacyCompat = legacyCompat;
         Client = client;
         InertProgramPath = inertProgramPath;
     }
@@ -116,7 +118,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 scratchDirectory,
                 client,
                 inertProgramPath,
-                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation), debuggerPath);
+                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation), debuggerPath,
+                options.HostArguments?.Contains("--legacy-compat", StringComparer.Ordinal) == true);
             client = null;
             transport = null;
             fixture = null;
@@ -641,6 +644,19 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 }).ToArray();
         }
 
+        var legacyStarts = history.Where(static request => StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
+        if (_legacyCompat)
+        {
+            var successful = legacyStarts.Where(static request =>
+                LegacyPayload(request.Result)?["data"]?["success"]?.GetValue<bool>() == true).ToArray();
+            if (successful.Length == 1 && legacyStarts.All(request => ReferenceEquals(request, successful[0])
+                || StringValue(LegacyPayload(request.Result)?["error"]) == "A debug session is already active; stop it before starting another."))
+                return await StopKnownLegacySessionAsync(successful[0], history).ConfigureAwait(false);
+            if (legacyStarts.Length == 1
+                && string.IsNullOrEmpty(StringValue(legacyStarts[0].Result?["structuredContent"]?["debugSessionId"])))
+                return await StopKnownLegacySessionAsync(legacyStarts[0], history).ConfigureAwait(false);
+        }
+
         var starts = new HashSet<string>(StringComparer.Ordinal);
         var exited = new HashSet<string>(StringComparer.Ordinal);
         var stops = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -696,7 +712,9 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 {
                     ["name"] = "stop_debug",
                     ["arguments"] = new JsonObject { ["debugSessionId"] = token },
-                    ["_meta"] = _initialMeta?.DeepClone(),
+                    ["_meta"] = _legacyCompat && legacyStarts.Length == 1
+                        ? legacyStarts[0].Parameters?["_meta"]?.DeepClone()
+                        : _initialMeta?.DeepClone(),
                 }, new RequestId($"cleanup-{Guid.NewGuid():N}"), CancellationToken.None, null, disposing: true).ConfigureAwait(false);
                 if (!IsStopSuccess(response.Result as JsonObject)) unconfirmed = true;
             }
@@ -711,6 +729,44 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             throw new AggregateException("Could not stop all known debug sessions.", failures);
         }
         return !unconfirmed;
+    }
+
+    private async Task<bool> StopKnownLegacySessionAsync(ModernMcpRequestObservation start, ModernMcpRequestObservation[] history)
+    {
+        var startPayload = LegacyPayload(start.Result);
+        var knownStarted = startPayload?["data"]?["success"]?.GetValue<bool>() == true
+            && startPayload["error"] is null;
+        var owner = start.Parameters?["_meta"]?.DeepClone();
+        var stopped = history.Any(request => StringValue(request.Parameters?["name"]) == "stop_debug"
+            && JsonNode.DeepEquals(owner, request.Parameters?["_meta"])
+            && LegacyStopped(request.Result));
+        if (knownStarted && !stopped && !_clientClosed)
+        {
+            var parameters = new JsonObject { ["name"] = "stop_debug", ["arguments"] = new JsonObject() };
+            if (owner is not null) parameters["_meta"] = owner.DeepClone();
+            var response = await SendObservedRequestAsync("tools/call", parameters,
+                new RequestId($"legacy-cleanup-{Guid.NewGuid():N}"), CancellationToken.None,
+                TimeSpan.FromSeconds(10), disposing: true).ConfigureAwait(false);
+            stopped = LegacyStopped(response.Result as JsonObject);
+        }
+        return knownStarted && stopped;
+    }
+
+    private static bool LegacyStopped(JsonObject? result)
+    {
+        var content = LegacyPayload(result);
+        return content?["state"]?.GetValue<string>() == "idle"
+            && content["data"]?["success"]?.GetValue<bool>() == true && content["error"] is null;
+    }
+
+    internal static JsonObject? LegacyPayload(JsonObject? result)
+    {
+        if (result?["isError"]?.GetValue<bool>() == true) return null;
+        if (result?["structuredContent"] is JsonObject structured) return structured;
+        if (result?["content"] is not JsonArray { Count: 1 } content
+            || StringValue(content[0]?["text"]) is not { } text) return null;
+        try { return JsonNode.Parse(text) as JsonObject; }
+        catch (JsonException) { return null; }
     }
 
     private static bool IsComplete(JsonObject? result, bool isError)

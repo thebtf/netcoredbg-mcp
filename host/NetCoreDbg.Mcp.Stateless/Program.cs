@@ -69,6 +69,7 @@ internal static class Program
             Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"))
         {
             ProjectRootResolver = ProjectRootResolver.FromHostArguments(arguments, Environment.CurrentDirectory),
+            LegacyCompat = arguments.Contains("--legacy-compat", StringComparer.Ordinal),
         };
         var host = BuildHost(sessions);
         await host.RunAsync().ConfigureAwait(false);
@@ -88,13 +89,21 @@ internal static class Program
                 // Negotiate initialize-era clients and per-request modern clients independently.
                 options.ProtocolVersion = null;
                 options.ServerInfo = new Implementation { Name = "netcoredbg-mcp-stateless", Version = "1.0.0" };
-                options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability { ListChanged = false } };
+                options.Capabilities = new ServerCapabilities
+                {
+                    Tools = new ToolsCapability { ListChanged = false },
+                    Experimental = sessions.LegacyCompat
+                        ? new Dictionary<string, object> { ["x-mux"] = JsonSerializer.SerializeToElement(new { sharing = "isolated" }) }
+                        : null,
+                };
             })
             .WithStdioServerTransport()
             .WithListToolsHandler((context, cancellationToken) =>
-                ValueTask.FromResult(ToolCatalog.List()))
+                ValueTask.FromResult(sessions.LegacyCompat ? ToolCatalog.LegacyList() : ToolCatalog.List()))
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
+                if (sessions.LegacyCompat)
+                    return await sessions.CallLegacyAsync(context, cancellationToken).ConfigureAwait(false);
                 if (!NativeCodeSearch.IsNativeTool(context.Params.Name))
                     return await sessions.CallAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -300,6 +309,296 @@ internal static class Program
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
         private readonly Action? _failedStartCleanupCompleted;
+        internal bool LegacyCompat { get; init; }
+        private readonly SemaphoreSlim _legacyGate = new(1, 1);
+        private readonly SemaphoreSlim _legacyLifecycle = new(1, 1);
+        private bool _legacyStarting;
+        private bool _legacyStopping;
+        private bool _legacyHasOwner;
+        private string? _legacySessionId;
+        private string? _legacyOwner;
+        private long _legacyOwnerActivity;
+
+        internal async ValueTask<CallToolResult> CallLegacyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
+        {
+            var name = context.Params.Name;
+            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or ContinueExecution or StopDebug))
+                return UnknownTool(name);
+            var arguments = context.Params.Arguments is null
+                ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                : new Dictionary<string, JsonElement>(context.Params.Arguments, StringComparer.Ordinal);
+            var lifecycleHeld = false;
+            var gateHeld = false;
+            try
+            {
+                if (name is StartDebug or StopDebug)
+                {
+                    await _legacyLifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    lifecycleHeld = true;
+                }
+                await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                gateHeld = true;
+                if (HasInvalidLegacyArguments(name, arguments))
+                    return LegacyError("Unsupported or invalid argument.");
+                var mutation = name is StartDebug or StopDebug or StepOver or ContinueExecution;
+                var raw = context.JsonRpcRequest.Params as JsonObject;
+                var mux = raw?["_meta"]?["muxSessionId"];
+                if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
+                    return LegacyError("Invalid muxSessionId.");
+                var muxId = mux?.GetValue<string>();
+                if (name == StartDebug && _legacySessionId is not null)
+                    return LegacyError("A debug session is already active; stop it before starting another.");
+                if (mutation && _legacyStarting)
+                    return LegacyError("A debug session is starting.");
+                if (mutation && _legacyStopping)
+                    return LegacyError("A debug session is stopping.");
+                if (mutation && name != StartDebug && _legacySessionId is not null)
+                {
+                    var timeout = 60.0;
+                    var configured = Environment.GetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT");
+                    if (configured is not null && (!double.TryParse(configured, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out timeout) || !double.IsFinite(timeout) || timeout < 0))
+                        return LegacyError("Invalid NETCOREDBG_SESSION_TIMEOUT.");
+                    if (_legacyHasOwner && _legacyOwner is not null && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
+                    {
+                        _legacyHasOwner = false;
+                        _legacyOwner = null;
+                    }
+                    if (_legacyHasOwner && _legacyOwner != muxId)
+                        return LegacyError("Debug session is owned by another agent.");
+                    _legacyHasOwner = true;
+                    _legacyOwner = muxId;
+                    if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                }
+                if (name == StartDebug)
+                {
+                    if (!arguments.TryGetValue("program", out var program) || program.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(program.GetString()))
+                        return LegacyError("A program is required.");
+                    if (arguments.TryGetValue("stealth_mode", out var stealth))
+                    {
+                        if (stealth.ValueKind != JsonValueKind.False) return LegacyError("stealth_mode is not supported.");
+                        arguments.Remove("stealth_mode");
+                    }
+                    if (arguments.TryGetValue("pre_build", out var preBuild) && preBuild.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        return LegacyError("Invalid pre_build.");
+                    if (arguments.TryGetValue("stop_at_entry", out var stopAtEntry) && stopAtEntry.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        return LegacyError("Invalid stop_at_entry.");
+                    if (!arguments.ContainsKey("pre_build")) arguments["pre_build"] = JsonSerializer.SerializeToElement(true);
+                    if (!arguments.ContainsKey("stop_at_entry")) arguments["stop_at_entry"] = JsonSerializer.SerializeToElement(false);
+                    arguments["justMyCode"] = JsonSerializer.SerializeToElement(false);
+                    _legacyHasOwner = true;
+                    _legacyOwner = muxId;
+                    _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                    _legacyStarting = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    CallToolResult started;
+                    var startCompleted = false;
+                    try
+                    {
+                        started = await StartAsync(context, cancellationToken, arguments).ConfigureAwait(false);
+                        startCompleted = true;
+                    }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStarting = false;
+                        if (!startCompleted) { _legacyHasOwner = false; _legacyOwner = null; }
+                    }
+                    if (started.IsError == true || started.StructuredContent is not { } startContent
+                        || !startContent.TryGetProperty("debugSessionId", out var tokenElement)
+                        || tokenElement.GetString() is not { } token)
+                    {
+                        _legacyHasOwner = false;
+                        _legacyOwner = null;
+                        return LegacyNativeError(started);
+                    }
+                    _legacySessionId = token;
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        _legacyStopping = true;
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        CallToolResult cleanup;
+                        try { cleanup = await StopAsync(LegacyRequest(StopDebug, token, null), CancellationToken.None).ConfigureAwait(false); }
+                        finally
+                        {
+                            await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                            gateHeld = true;
+                            _legacyStopping = false;
+                        }
+                        if (cleanup.IsError != true)
+                        {
+                            _legacySessionId = null;
+                            _legacyHasOwner = false;
+                            _legacyOwner = null;
+                        }
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
+                    return LegacyResponse(new { success = true, program = program.GetString() });
+                }
+                if (name == GetDebugState)
+                {
+                    var snapshot = LegacySnapshot();
+                    return LegacyResponse(new
+                    {
+                        state = snapshot.State,
+                        execState = snapshot.State == "stopped" ? snapshot.Reason switch
+                        {
+                            "breakpoint" or "function breakpoint" or "data breakpoint" or "entry" => "stopped-at-breakpoint",
+                            "exception" => "stopped-at-exception",
+                            "step" => "stepping",
+                            "pause" => "stopped-at-pause",
+                            _ => "stopped-other",
+                        } : snapshot.State,
+                        currentThreadId = snapshot.ThreadId,
+                        stopReason = snapshot.Reason,
+                        exitCode = snapshot.ExitCode
+                    }, snapshot.State);
+                }
+                if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                var request = LegacyRequest(name, sessionId, arguments);
+                if (name == StopDebug)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _legacyStopping = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    CallToolResult stopped;
+                    try { stopped = await StopAsync(request, CancellationToken.None).ConfigureAwait(false); }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStopping = false;
+                    }
+                    if (stopped.IsError == true) return LegacyNativeError(stopped);
+                    _legacySessionId = null;
+                    _legacyHasOwner = false;
+                    _legacyOwner = null;
+                    return LegacyResponse(new { success = true });
+                }
+                _legacyGate.Release();
+                gateHeld = false;
+                var result = name switch
+                {
+                    GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
+                    StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    _ => throw new InvalidOperationException(),
+                };
+                await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                gateHeld = true;
+                if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
+                    return LegacyError("Debug session changed before operation completed.", "unknown");
+                var observedState = LegacySnapshot(sessionId).State;
+                if (result.IsError == true || result.StructuredContent is not { } content)
+                    return LegacyNativeError(result, observedState);
+                var kind = content.GetProperty("kind").GetString();
+                if (name == GetThreads && kind == "threads_success") return LegacyResponse(content.GetProperty("threads"), observedState);
+                if (name == GetCallStack && kind == "call_stack_success") return LegacyResponse(new { frames = content.GetProperty("frames") }, observedState);
+                if (name == StepOver && kind == "step_over_success")
+                    return LegacyExecution("stopped", "step", content.GetProperty("threadId").GetInt32(), false, null);
+                if (name == ContinueExecution && kind == "continue_stopped")
+                    return LegacyExecution("stopped", content.GetProperty("reason").GetString(),
+                        content.TryGetProperty("threadId", out var thread) ? thread.GetInt32() : null, false, null);
+                if (name == ContinueExecution && kind == "continue_terminal")
+                    return LegacyExecution("terminated", null, null, false,
+                        content.TryGetProperty("exitCode", out var exit) ? exit.GetInt32() : null);
+                if (name == ContinueExecution && kind == "continue_timed_out")
+                    return LegacyExecution("unknown", null, content.GetProperty("threadId").GetInt32(), true, null);
+                return LegacyError($"Native operation outcome: {kind ?? "unknown"}.", observedState);
+            }
+            finally
+            {
+                if (gateHeld) _legacyGate.Release();
+                if (lifecycleHeld) _legacyLifecycle.Release();
+            }
+        }
+
+        private static bool HasInvalidLegacyArguments(string name, Dictionary<string, JsonElement> arguments)
+        {
+            foreach (var key in arguments.Keys)
+            {
+                var invalid = name switch
+                {
+                    StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
+                    GetCallStack => key is not ("thread_id" or "levels"),
+                    StepOver or ContinueExecution => key != "thread_id",
+                    _ => true,
+                };
+                if (invalid) return true;
+            }
+            return false;
+        }
+
+        private static CallToolRequestParams LegacyRequest(string name, string sessionId, Dictionary<string, JsonElement>? arguments)
+        {
+            arguments ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            arguments["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId);
+            return new CallToolRequestParams { Name = name, Arguments = arguments };
+        }
+
+        private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot()
+        {
+            if (_legacySessionId is null) return (_legacyStarting ? "initializing" : "idle", null, null, null);
+            return LegacySnapshot(_legacySessionId);
+        }
+
+        private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot(string sessionId)
+        {
+            if (!_sessions.TryGetValue(sessionId, out var session)) return ("unknown", null, null, null);
+            var state = session.State;
+            if (state.Event == "stopped" && state.CurrentThreadId is null)
+                return ("unknown", null, null, state.ExitCode);
+            return (state.Event switch
+            {
+                "stopped" when state.CurrentThreadId is not null => "stopped",
+                "continued" => "running",
+                "terminated" or "exited" => "terminated",
+                _ => "unknown"
+            }, state.CurrentThreadId, state.StopReason, state.ExitCode);
+        }
+
+        private static string[] LegacyActions(string state) => state switch
+        {
+            "idle" => ["start_debug"],
+            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "continue_execution", "stop_debug"],
+            _ => ["get_debug_state", "stop_debug"],
+        };
+
+        private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
+
+        private static CallToolResult LegacyResponse(object data, string state) =>
+            Result(new { state, next_actions = LegacyActions(state), message = state == "idle" ? "No active debug session." : "Debug session state observed.", data }, false);
+
+        private CallToolResult LegacyError(string error) => LegacyError(error, LegacySnapshot().State);
+
+        private static CallToolResult LegacyError(string error, string state) =>
+            Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}" }, false);
+
+        private CallToolResult LegacyNativeError(CallToolResult result) => LegacyNativeError(result, LegacySnapshot().State);
+
+        private static CallToolResult LegacyNativeError(CallToolResult result, string state)
+        {
+            var error = result.StructuredContent is { } content && content.TryGetProperty("error", out var value)
+                ? value.GetString() : "Native operation did not complete successfully.";
+            return LegacyError(error ?? "Native operation did not complete successfully.", state);
+        }
+
+        private static CallToolResult LegacyExecution(string state, string? reason, int? threadId, bool timedOut, int? exitCode) =>
+            Result(new
+            {
+                state,
+                reason,
+                thread_id = threadId,
+                timed_out = timedOut,
+                exit_code = exitCode,
+                message = timedOut ? "The execution wait timed out; current state is unknown." : "Execution event observed.",
+                next_actions = LegacyActions(state)
+            }, false);
         private ProjectRootResolver? _projectRootResolver;
         internal ProjectRootResolver ProjectRootResolver
         {
@@ -426,13 +725,14 @@ internal static class Program
 
         private async ValueTask<CallToolResult> StartAsync(
             RequestContext<CallToolRequestParams> context,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null)
         {
-            if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram)
-                || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints)
-                || !TryReadLaunchOptions(context.Params.Arguments, out var launchOptions)
-                || !TryReadLaunchProfileArguments(context.Params.Arguments, out var projectRoot, out var profileName)
-                || !TryReadPreBuildArguments(context.Params.Arguments, out var preBuild))
+            var arguments = argumentsOverride ?? context.Params.Arguments;
+            if (!TryReadProgram(arguments, out var program, out var hasProgram)
+                || !TryReadBreakpoints(arguments, out var breakpoints)
+                || !TryReadLaunchOptions(arguments, out var launchOptions)
+                || !TryReadLaunchProfileArguments(arguments, out var projectRoot, out var profileName)
+                || !TryReadPreBuildArguments(arguments, out var preBuild))
             {
                 return InvalidArguments(StartDebug);
             }
@@ -4246,6 +4546,20 @@ internal static class Program
     {
         private const string OptionalStoppedThreadSchema = """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}""";
         private const string OptionalStoppedThreadStrictSessionSchema = """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}""";
+        internal static ListToolsResult LegacyList() => new()
+        {
+            Tools =
+            [
+                Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
+                Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_call_stack", "Read up to 256 frames from a stopped thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]},"levels":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}"""),
+                Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
+                Tool("continue_execution", "Continue one stopped thread and observe the next stop, terminal event, or timeout; uncertain writes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
+                Tool("stop_debug", "Stop the implicit session and release its owner.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+            ],
+        };
+
 
         internal static ListToolsResult List() => new()
         {
