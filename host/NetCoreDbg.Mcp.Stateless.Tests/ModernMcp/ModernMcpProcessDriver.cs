@@ -99,7 +99,9 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 StandardErrorLines = line => driver?.AddStandardErrorLine(line),
             });
 
-            client = await McpClient.CreateAsync(transport, cancellationToken: operation.Token).ConfigureAwait(false);
+            client = await McpClient.CreateAsync(transport,
+                options.ClientProtocolVersion is null ? null : new McpClientOptions { ProtocolVersion = options.ClientProtocolVersion },
+                cancellationToken: operation.Token).ConfigureAwait(false);
             driver = new ModernMcpProcessDriver(
                 fixture,
                 scratchDirectory,
@@ -982,7 +984,8 @@ internal sealed record ModernMcpStartOptions(
     string? PriorProcessToken = null,
     FixtureConfiguration? FixtureConfiguration = null,
     IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null,
-    bool InheritEnvironmentVariables = true);
+    bool InheritEnvironmentVariables = true,
+    string? ClientProtocolVersion = null);
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);

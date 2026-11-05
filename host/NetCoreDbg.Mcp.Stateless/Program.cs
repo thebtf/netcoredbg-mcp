@@ -19,7 +19,6 @@ namespace NetCoreDbg.Mcp.Stateless;
 
 internal static class Program
 {
-    private const string ProtocolVersion = "2026-07-28";
     private const string UnixProcessGroupProxy = "--unix-process-group-proxy";
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
 
@@ -65,7 +64,8 @@ internal static class Program
 
         builder.Services.AddMcpServer(options =>
             {
-                options.ProtocolVersion = ProtocolVersion;
+                // Negotiate initialize-era clients and per-request modern clients independently.
+                options.ProtocolVersion = null;
                 options.ServerInfo = new Implementation { Name = "netcoredbg-mcp-stateless", Version = "1.0.0" };
                 options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability { ListChanged = false } };
             })
