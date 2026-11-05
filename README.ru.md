@@ -49,9 +49,10 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 В собранном из исходников stateful host доступен экспериментальный режим
 `--legacy-compat` для **одной console-сессии в процессе**. Он предоставляет
 только `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
-`get_scopes`, `get_variables`, `evaluate_expression`, `add_breakpoint`,
-`remove_breakpoint`, `step_over`, `step_into`, `step_out`, `pause_execution`,
-`continue_execution`, `get_output`, `get_output_tail` и `stop_debug`. Они
+`get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
+`add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
+`step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
+`get_output`, `get_output_tail` и `stop_debug`. Они
 используют неявную привязку сессии и отдельные форматы ответов в стиле Python.
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
@@ -86,6 +87,16 @@ variables и evaluation. Выбор принадлежит этому mux-кли
 evaluation, legacy-маршрут возвращает ошибку, не смешивая эпохи. Отправленное
 выражение могло уже выполниться; при неизвестном результате автоматически
 повторять его нельзя.
+
+`set_variable` требует mux-владения и выбранного этим клиентом контекста
+остановки. После принятой попытки снова запроси стек перед чтением или записью
+переменных. Запрос с неизвестным результатом мог выполниться; автоматически
+повторять его нельзя. `configure_exceptions` проверяет владельца; пропущенные
+или `null` filters означают пустой список. Успех подтверждает ответ отладчика,
+но не будущую остановку на исключении. `get_exception_info` привязан к текущему
+контексту остановки. В отличие от Python, возвращающего null при отказе или
+отсутствии потока, native сообщает ошибку при неподдерживаемой возможности,
+отказе или отсутствии контекста остановки. Сохраняются native-лимиты размера.
 
 Legacy `step_into` и `step_out` без ID используют текущий наблюдаемый
 остановленный поток; любое значение `target_id`, кроме `null`, отклоняется. Успешный pause лишь

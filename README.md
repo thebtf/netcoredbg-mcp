@@ -48,9 +48,10 @@ read-only preview retains its modern-only protocol boundary.
 The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
-`get_scopes`, `get_variables`, `evaluate_expression`, `add_breakpoint`,
-`remove_breakpoint`, `step_over`, `step_into`, `step_out`, `pause_execution`,
-`continue_execution`, `get_output`, `get_output_tail`, and `stop_debug`. Calls
+`get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
+`add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
+`step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
+`get_output`, `get_output_tail`, and `stop_debug`. Calls
 use implicit session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
@@ -85,6 +86,17 @@ If the stopped context changes before a stack, scope, variable or evaluation
 response is published, the legacy route returns an error instead of mixing
 epochs. A dispatched evaluation may already have executed; an unknown outcome
 must not be retried automatically.
+
+`set_variable` requires mux ownership and the calling client's selected stopped
+context. After an admitted attempt, select a fresh stack before inspecting or
+mutating variables again. An uncertain sent mutation may have executed and must
+not be retried automatically. `configure_exceptions` is owner-guarded; omitted
+or null filters mean an empty list. It reports configuration only after native
+acknowledgement, not proof of a later exception stop. `get_exception_info` is a
+read fenced to the current stopped context. Unlike Python's null result on a
+negative response or missing thread, native capability absence, refusal and a
+missing stopped context are reported as errors. Native inspection and filter
+size bounds still apply.
 
 Legacy `step_into` and `step_out` use the current observed stopped thread when
 omitted; non-null `target_id` is rejected. A successful pause acknowledges the
