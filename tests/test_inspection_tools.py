@@ -330,6 +330,351 @@ async def test_trace_delta_tool_returns_bounded_entries_and_continuation_cursor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("user_owned", [False, True])
+async def test_list_breakpoints_reports_group_or_user_condition(user_owned):
+    from netcoredbg_mcp.tools.breakpoints import register_breakpoint_tools
+
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    if user_owned:
+        await manager.add_breakpoint(source, 10, condition="user_value > 0")
+    created = (await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10, "condition": "group_value > 0"}]
+    )).to_dict()
+    assert created["status"] == "PASS"
+    registry = ToolRegistry()
+    register_breakpoint_tools(registry, manager, lambda ctx: None, AsyncMock(), AsyncMock())
+
+    result = await registry.tools["list_breakpoints"](None)
+
+    listed = result["data"][manager.breakpoints._normalize_path(source)]
+    assert len(listed) == 1
+    assert listed[0]["line"] == 10
+    assert listed[0]["condition"] == (
+        "user_value > 0" if user_owned else "group_value > 0"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_condition", "expected_condition", "ambiguous"),
+    [("value > 0", "value > 0", False), ("value < 0", None, True), (None, None, True)],
+)
+async def test_list_breakpoints_reports_shared_group_condition_ambiguity(
+    second_condition, expected_condition, ambiguous
+):
+    from netcoredbg_mcp.tools.breakpoints import register_breakpoint_tools
+
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    for name, condition in (("first", "value > 0"), ("second", second_condition)):
+        created = (await manager.instrumentation.create_group(
+            name, breakpoints=[{"file": source, "line": 10, "condition": condition}]
+        )).to_dict()
+        assert created["status"] == "PASS"
+    registry = ToolRegistry()
+    register_breakpoint_tools(registry, manager, lambda ctx: None, AsyncMock(), AsyncMock())
+
+    result = await registry.tools["list_breakpoints"](None)
+
+    listed = result["data"][manager.breakpoints._normalize_path(source)]
+    assert len(listed) == 1
+    assert listed[0]["condition"] == expected_condition
+    assert listed[0].get("condition_ambiguous", False) is ambiguous
+
+
+@pytest.mark.asyncio
+async def test_group_conditions_reconcile_conservatively_and_restore_user_intent():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0", hit_condition="3")
+    await manager.instrumentation.create_group(
+        "first", breakpoints=[{"file": source, "line": 10,
+                                "condition": "value < 10", "hit_condition": "5"}]
+    )
+    await manager.instrumentation.create_group(
+        "second", breakpoints=[{"file": source, "line": 10, "condition": "value == 0"}]
+    )
+    bp = manager.breakpoints.get_for_file(source)[0]
+    assert bp.condition == "value > 0"
+    assert bp.hit_condition == "3"
+    assert set(bp.group_owners.values()) == {("value < 10", "5"), ("value == 0", None)}
+    assert bp.to_dap() == {"line": 10}
+    snapshot = manager.breakpoints.snapshot_for_file(source)
+    assert (await manager.instrumentation.clear_group("first")).to_dict()["status"] == "PASS"
+    assert len(snapshot[0].group_owners) == 2
+    assert (await manager.instrumentation.clear_group("second")).to_dict()["status"] == "PASS"
+    assert bp.to_dap() == {"line": 10, "condition": "value > 0", "hitCondition": "3"}
+
+
+@pytest.mark.asyncio
+async def test_group_dap_replacement_restores_user_condition_after_clear():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0", hit_condition="3")
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(return_value=make_response())
+
+    created = await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10, "condition": "value < 10"}]
+    )
+    assert created.to_dict()["status"] == "PASS"
+    manager.client.set_breakpoints.assert_awaited_with(source, [{"line": 10}])
+    cleared = await manager.instrumentation.clear_group("flow")
+
+    assert cleared.to_dict()["status"] == "PASS"
+    manager.client.set_breakpoints.assert_awaited_with(
+        source, [{"line": 10, "condition": "value > 0", "hitCondition": "3"}]
+    )
+    assert manager.client.set_breakpoints.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_group_clear_preserves_user_on_removed_event_during_dap_replacement():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0", hit_condition="3")
+    created = (await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+    assert created["status"] == "PASS"
+    bp = manager.breakpoints.get_for_file(source)[0]
+    bp.id = 42
+    bp.verified = True
+    manager._state.state = DebugState.RUNNING
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def replace_breakpoints(file, breakpoints):
+        assert file == source
+        assert breakpoints == [{"line": 10, "condition": "value > 0", "hitCondition": "3"}]
+        entered.set()
+        await release.wait()
+        return make_response(body={"breakpoints": [{"id": 43, "verified": True, "line": 10}]})
+
+    manager.client.set_breakpoints = AsyncMock(side_effect=replace_breakpoints)
+    pending = asyncio.create_task(manager.instrumentation.clear_group("flow"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        manager._on_breakpoint(DAPEvent(
+            seq=1, event="breakpoint", body={"reason": "removed", "breakpoint": {"id": 42}}
+        ))
+    finally:
+        release.set()
+    cleared = (await asyncio.wait_for(pending, timeout=2)).to_dict()
+
+    assert cleared["status"] == "PASS"
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    remaining = manager.breakpoints.get_for_file(source)
+    assert len(remaining) == 1
+    assert remaining[0].user_owned
+    assert remaining[0].condition == "value > 0"
+    assert remaining[0].hit_condition == "3"
+    assert not remaining[0].group_owners
+    manager.client.set_breakpoints.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_group_clear_retains_owners_after_late_removed_event():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )
+    bp = manager.breakpoints.get_for_file(source)[0]
+    bp.id = 42
+    bp.verified = True
+    manager._state.state = DebugState.RUNNING
+    entered = asyncio.Event()
+
+    async def pending_replacement(file, breakpoints):
+        entered.set()
+        await asyncio.Event().wait()
+
+    manager.client.set_breakpoints = AsyncMock(side_effect=pending_replacement)
+    pending = asyncio.create_task(manager.instrumentation.clear_group("flow"))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    manager._on_breakpoint(DAPEvent(
+        seq=1, event="breakpoint", body={"reason": "removed", "breakpoint": {"id": 42}}
+    ))
+
+    remaining = manager.breakpoints.get_for_file(source)
+    assert len(remaining) == 1
+    assert remaining[0].user_owned and remaining[0].condition == "value > 0"
+    assert remaining[0].group_owners
+    assert not remaining[0].verified and remaining[0].id is None
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.instrumentation.clear_group("flow")
+    manager.client.set_breakpoints.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["removed", "changed"])
+async def test_group_inspection_does_not_report_stale_verified_breakpoint(reason):
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(return_value=make_response(
+        body={"breakpoints": [{"id": 42, "verified": True, "line": 11}]}
+    ))
+    created = (await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+    assert created["status"] == "PASS"
+    assert created["breakpoints"][0]["verified"] is True
+    assert created["breakpoints"][0]["id"] == 42
+    manager._on_breakpoint(DAPEvent(
+        seq=1, event="breakpoint",
+        body={"reason": reason, "breakpoint": {"id": 42, "verified": False, "line": 12}},
+    ))
+
+    inspected = (await manager.instrumentation.inspect_group("flow")).to_dict()
+
+    if inspected["status"] == "PASS":
+        observed = inspected["breakpoints"][0]
+        assert observed["verified"] is False
+        assert observed["id"] == (None if reason == "removed" else 42)
+        assert observed["dap_line"] == (None if reason == "removed" else 12)
+    else:
+        assert inspected["status"] == "FAIL"
+    assert manager.breakpoints.get_for_file(source)[0].group_owners
+
+
+@pytest.mark.asyncio
+async def test_group_inspection_rejects_missing_owner_at_shared_location():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    first = (await manager.instrumentation.create_group(
+        "first", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+    owner = next(iter(manager.breakpoints.get_for_file(source)[0].group_owners))
+    second = (await manager.instrumentation.create_group(
+        "second", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+    assert first["status"] == second["status"] == "PASS"
+    assert await manager.remove_breakpoint(source, 10, group_id=owner)
+
+    assert (await manager.instrumentation.inspect_group("first")).to_dict()["status"] == "FAIL"
+    assert (await manager.instrumentation.inspect_group("second")).to_dict()["status"] == "PASS"
+    bp = manager.breakpoints.get_for_file(source)[0]
+    assert bp.user_owned and bp.condition == "value > 0" and len(bp.group_owners) == 1
+
+
+@pytest.mark.asyncio
+async def test_group_inspection_rejects_tracepoint_removed_by_public_tool():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    created = (await manager.instrumentation.create_group(
+        "flow", tracepoints=[{"file": source, "line": 10, "expression": "value"}]
+    )).to_dict()
+    assert created["status"] == "PASS"
+    tracepoint_id = created["tracepoints"][0]["id"]
+
+    removed = await tools["remove_tracepoint"](None, tracepoint_id)
+
+    assert removed["data"]["removed"] == tracepoint_id
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    assert manager.breakpoints.get_for_file(source) == []
+
+
+@pytest.mark.asyncio
+async def test_group_create_uncertain_sync_retains_owner_and_record_without_retry():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(side_effect=TimeoutError("uncertain"))
+
+    with pytest.raises(TimeoutError):
+        await manager.instrumentation.create_group(
+            "flow", breakpoints=[{"file": source, "line": 10, "condition": "value < 10"}]
+        )
+
+    bp = manager.breakpoints.get_for_file(source)[0]
+    assert bp.user_owned and bp.condition == "value > 0"
+    assert list(bp.group_owners.values()) == [("value < 10", None)]
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.instrumentation.clear_group("flow")
+    manager.client.set_breakpoints.assert_awaited_once()
+    assert "flow" in manager.runtime_smoke.instrumentation_groups
+
+
+@pytest.mark.asyncio
+async def test_group_tracepoint_uncertain_creation_retains_cleanup_owner():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(side_effect=TimeoutError("uncertain"))
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await manager.instrumentation.create_group(
+            "flow", tracepoints=[{"file": source, "line": 10, "expression": "value"}]
+        )
+
+    assert "flow" in manager.runtime_smoke.instrumentation_groups
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    tracepoints = manager._tracepoint_manager
+    assert tracepoints is not None
+    tracepoint_id = next(iter(tracepoints.tracepoints))
+    assert tracepoint_id in manager.breakpoints.get_for_file(source)[0].tracepoint_owners
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.instrumentation.clear_group("flow")
+    manager.client.set_breakpoints.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_clear_uncertain_sync_restores_owner_and_does_not_retry():
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10, "condition": "value < 10"}]
+    )
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(side_effect=TimeoutError("uncertain"))
+
+    with pytest.raises(TimeoutError):
+        await manager.instrumentation.clear_group("flow")
+
+    bp = manager.breakpoints.get_for_file(source)[0]
+    assert bp.user_owned and bp.condition == "value > 0"
+    assert list(bp.group_owners.values()) == [("value < 10", None)]
+    assert "flow" in manager.runtime_smoke.instrumentation_groups
+    assert (await manager.instrumentation.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.instrumentation.clear_group("flow")
+    manager.client.set_breakpoints.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_coincident_tracepoint_does_not_resume_group_breakpoint():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.instrumentation.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10, "condition": "value > 0"}]
+    )
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(return_value=make_response(body={"result": "1"}))
+    manager.client.continue_execution = AsyncMock()
+
+    await manager._check_tracepoint_inner(1)
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.state == DebugState.STOPPED
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("user_first", [True, False])
 @pytest.mark.parametrize("adjusted", [True, False])
 async def test_coincident_tracepoint_does_not_resume_user_breakpoint(

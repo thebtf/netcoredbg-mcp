@@ -120,6 +120,9 @@ def register_breakpoint_tools(
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """
         List breakpoints (line + function). Per-file filter scopes only line bps.
+        A user-owned condition takes precedence. For group-only locations,
+        differing group conditions return null with condition_ambiguous=true.
+        This field describes owner intent, not necessarily the physical DAP condition.
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
@@ -128,13 +131,22 @@ def register_breakpoint_tools(
             def _bp_dict(file_path: str, bp) -> dict:
                 norm = session.breakpoints._normalize_path(file_path)
                 hit_count = session.state.hit_counts.get((norm, bp.line), 0)
-                return {
+                condition = bp.condition
+                ambiguous = False
+                if not bp.user_owned and bp.group_owners:
+                    conditions = {intent[0] for intent in bp.group_owners.values()}
+                    ambiguous = len(conditions) > 1
+                    condition = next(iter(conditions)) if not ambiguous else None
+                result = {
                     "line": bp.line,
                     "dap_line": bp.dap_line,
-                    "condition": bp.condition,
+                    "condition": condition,
                     "verified": bp.verified,
                     "hit_count": hit_count,
                 }
+                if ambiguous:
+                    result["condition_ambiguous"] = True
+                return result
 
             def _fbp_dict(fbp) -> dict:
                 return {

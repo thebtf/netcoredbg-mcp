@@ -512,8 +512,11 @@ def test_runtime_smoke_session_reset_clears_owned_state() -> None:
 
     failures = smoke.reset()
 
-    assert failures == ()
-    assert smoke.instrumentation_groups == {}
+    assert failures == ({
+        "name": "instrumentation_groups",
+        "error": "instrumentation groups require asynchronous cleanup",
+    },)
+    assert smoke.instrumentation_groups == {"group": {"breakpoints": [1]}}
     assert smoke.output_checkpoints == {}
     assert smoke.evidence_refs == []
 
@@ -541,9 +544,13 @@ def test_runtime_smoke_session_records_cleanup_failure_without_leaking_state() -
 
     failures = smoke.reset()
 
-    assert failures == ({"name": "release-modifier", "error": "release failed"},)
+    assert failures == (
+        {"name": "release-modifier", "error": "release failed"},
+        {"name": "instrumentation_groups",
+         "error": "instrumentation groups require asynchronous cleanup"},
+    )
     assert smoke.last_reset_failures == failures
-    assert smoke.instrumentation_groups == {}
+    assert smoke.instrumentation_groups == {"group": {"breakpoints": [1]}}
     assert smoke.output_checkpoints == {}
 
 
@@ -574,7 +581,11 @@ async def test_session_manager_stop_resets_runtime_smoke_state(mock_netcoredbg_p
     from netcoredbg_mcp.session import SessionManager
 
     manager = SessionManager()
-    manager.runtime_smoke.instrumentation_groups["group"] = {"breakpoints": [1]}
+    await manager.add_breakpoint("test.cs", 10, condition="value > 0")
+    await manager.instrumentation.create_group(
+        "group", breakpoints=[{"file": "test.cs", "line": 10}],
+        tracepoints=[{"file": "test.cs", "line": 20, "expression": "value"}],
+    )
     manager.runtime_smoke.output_checkpoints["start"] = 10
     manager._state.state = DebugState.STOPPED
 
@@ -583,6 +594,12 @@ async def test_session_manager_stop_resets_runtime_smoke_state(mock_netcoredbg_p
     assert result == {"success": True}
     assert manager.state.state == DebugState.IDLE
     assert manager.runtime_smoke.instrumentation_groups == {}
+    breakpoints = manager.breakpoints.get_for_file("test.cs")
+    assert len(breakpoints) == 1
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+    assert manager._tracepoint_manager is not None
+    assert manager._tracepoint_manager.tracepoints == {}
     assert manager.runtime_smoke.output_checkpoints == {}
 
 

@@ -359,7 +359,11 @@ async def test_runner_cleanup_failure_changes_success_to_fail_with_residue_evide
         if item["operation"] == "runtime_smoke_residue"
     )
     assert residue_failure["remaining_runtime_smoke_state"]["instrumentation_groups"] == ["leak"]
-    assert result["cleanup"]["remaining_runtime_smoke_state"]["instrumentation_groups"] == []
+    assert result["cleanup"]["remaining_runtime_smoke_state"]["instrumentation_groups"] == ["leak"]
+    assert result["cleanup"]["reset_failures"] == [{
+        "name": "instrumentation_groups",
+        "error": "instrumentation groups require asynchronous cleanup",
+    }]
 
 
 @pytest.mark.asyncio

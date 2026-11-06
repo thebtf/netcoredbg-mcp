@@ -123,16 +123,23 @@ class Breakpoint:
     )
     user_owned: bool = True
     tracepoint_owners: set[str] = field(default_factory=set)
+    group_owners: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
     def to_dap(self) -> dict[str, Any]:
         """Convert to DAP breakpoint format."""
         bp: dict[str, Any] = {"line": self.line}
-        if self.condition and not self.tracepoint_owners:
-            bp["condition"] = self.condition
-        if self.hit_condition and not self.tracepoint_owners:
-            bp["hitCondition"] = self.hit_condition
-        if self.log_message and not self.tracepoint_owners:
-            bp["logMessage"] = self.log_message
+        if not self.tracepoint_owners:
+            intents = list(self.group_owners.values())
+            if self.user_owned:
+                intents.append((self.condition, self.hit_condition))
+            if intents and all(intent == intents[0] for intent in intents):
+                condition, hit_condition = intents[0]
+                if condition:
+                    bp["condition"] = condition
+                if hit_condition:
+                    bp["hitCondition"] = hit_condition
+            if self.log_message and self.user_owned and not self.group_owners:
+                bp["logMessage"] = self.log_message
         return bp
 
 
@@ -162,7 +169,10 @@ class BreakpointRegistry:
         self._breakpoints: dict[str, list[Breakpoint]] = {}  # file -> breakpoints
         self._function_breakpoints: list[FunctionBreakpoint] = []
 
-    def add(self, breakpoint: Breakpoint, *, tracepoint_id: str | None = None) -> Breakpoint:
+    def add(
+        self, breakpoint: Breakpoint, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
+    ) -> Breakpoint:
         """Add one owner and return its shared physical breakpoint."""
         file_path = self._normalize_path(breakpoint.file)
         breakpoints = self._breakpoints.setdefault(file_path, [])
@@ -170,6 +180,10 @@ class BreakpointRegistry:
             if existing.line == breakpoint.line:
                 if tracepoint_id is not None:
                     existing.tracepoint_owners.add(tracepoint_id)
+                elif group_id is not None:
+                    existing.group_owners[group_id] = (
+                        breakpoint.condition, breakpoint.hit_condition
+                    )
                 else:
                     existing.user_owned = True
                     existing.condition = breakpoint.condition
@@ -177,13 +191,20 @@ class BreakpointRegistry:
                     existing.log_message = breakpoint.log_message
                 return existing
 
-        breakpoint.user_owned = tracepoint_id is None
+        breakpoint.user_owned = tracepoint_id is None and group_id is None
         if tracepoint_id is not None:
             breakpoint.tracepoint_owners.add(tracepoint_id)
+        elif group_id is not None:
+            breakpoint.group_owners[group_id] = (breakpoint.condition, breakpoint.hit_condition)
+            breakpoint.condition = None
+            breakpoint.hit_condition = None
         breakpoints.append(breakpoint)
         return breakpoint
 
-    def remove(self, file: str, line: int, *, tracepoint_id: str | None = None) -> bool:
+    def remove(
+        self, file: str, line: int, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
+    ) -> bool:
         """Remove one owner without removing any other owner at the location."""
         file_path = self._normalize_path(file)
         breakpoints = self._breakpoints.get(file_path, [])
@@ -194,6 +215,10 @@ class BreakpointRegistry:
                 if tracepoint_id not in bp.tracepoint_owners:
                     return False
                 bp.tracepoint_owners.remove(tracepoint_id)
+            elif group_id is not None:
+                if group_id not in bp.group_owners:
+                    return False
+                del bp.group_owners[group_id]
             else:
                 if not bp.user_owned:
                     return False
@@ -201,7 +226,7 @@ class BreakpointRegistry:
                 bp.condition = None
                 bp.hit_condition = None
                 bp.log_message = None
-            if not bp.user_owned and not bp.tracepoint_owners:
+            if not bp.user_owned and not bp.tracepoint_owners and not bp.group_owners:
                 breakpoints.remove(bp)
                 if not breakpoints:
                     del self._breakpoints[file_path]
@@ -221,7 +246,8 @@ class BreakpointRegistry:
     def snapshot_for_file(self, file: str) -> list[Breakpoint]:
         """Capture intent and adapter observations for rollback after an unconfirmed sync."""
         return [
-            replace(bp, tracepoint_owners=set(bp.tracepoint_owners))
+            replace(bp, tracepoint_owners=set(bp.tracepoint_owners),
+                    group_owners=dict(bp.group_owners))
             for bp in self.get_for_file(file)
         ]
 
