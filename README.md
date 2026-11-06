@@ -47,7 +47,7 @@ read-only preview retains its modern-only protocol boundary.
 
 The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
-only `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
+only `start_debug`, `attach_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `quick_evaluate`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
@@ -63,6 +63,13 @@ and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+The source-built legacy `attach_debug` route is Windows-only. It retains a
+handle to the requested process and, after a possible attach write, sends at
+most one non-terminating disconnect. An adapter acknowledgement does not prove
+CLR detach or target survival, so stop reports an unconfirmed outcome. Cleanup
+and host shutdown can remain pending until protocol work settles and the target
+exits. Safety after an unexpected host or adapter exit is not established.
 
 `debuggee_activity` observes reader-received DAP events and legacy trace entries
 over 1–30,000 ms (default 1,000) from an initially running session. It does not

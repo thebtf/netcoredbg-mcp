@@ -44,6 +44,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly Stream _output;
     private readonly Stream _error;
     private readonly IProcessTreeOwnership? _processTreeOwnership;
+    private SafeProcessHandle? _attachTarget;
+    private int _attachProcessId;
+    private bool _attachMayHaveDispatched;
+    private bool _attachClosing;
+    private volatile bool _attachStreamUncertain;
+    private volatile bool _attachFrameWritten;
+    private Task? _attachHandshake;
+    private Task<bool>? _attachDisconnect;
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _stopTimeout;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
@@ -639,6 +647,171 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             throw;
         }
     }
+    internal static async Task<NetCoreDbgSession> PrepareAttachAsync(
+        string debuggerPath, int processId, TimeSpan initializeTimeout, TimeSpan requestTimeout,
+        TimeSpan stopTimeout, CancellationToken cancellationToken, Action<string>? resourceEventObserver = null)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Attach is supported only on Windows.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
+        if (processId <= 0) throw new ArgumentOutOfRangeException(nameof(processId));
+        RequirePositiveTimeout(initializeTimeout, nameof(initializeTimeout));
+        RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
+        RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
+        SafeProcessHandle? target = WindowsNativeSceneProcess.Open(processId);
+        WindowsProcessTreeLaunch? launch = null;
+        NetCoreDbgSession? session = null;
+        try
+        {
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process is unavailable or access is denied.");
+            using var environment = WindowsChildEnvironmentBlock.Create(null, null);
+            launch = WindowsProcessTreeOwnership.Start(debuggerPath, environment);
+            session = new NetCoreDbgSession(launch.Process, launch.Input, launch.Output, launch.Error,
+                requestTimeout, stopTimeout, launch.Ownership, resourceEventObserver: resourceEventObserver);
+            launch = null;
+            await session.InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process exited before attach preparation completed.");
+            ((WindowsProcessTreeOwnership)session._processTreeOwnership!).MakeAttachPassive();
+            session._attachProcessId = processId;
+            session._attachTarget = target;
+            target = null;
+            return session;
+        }
+        catch (Exception startupFailure)
+        {
+            try
+            {
+                if (session is not null)
+                {
+                    session._forceCleanup.Cancel();
+                    await session.EnsureCleanupAsync().ConfigureAwait(false);
+                }
+                else launch?.Dispose();
+            }
+            catch (Exception cleanupFailure) { throw new DapStartupCleanupException(startupFailure, cleanupFailure); }
+            throw;
+        }
+        finally { target?.Dispose(); }
+    }
+
+    internal bool AttachMayHaveDispatched { get { lock (_cleanupGate) return _attachMayHaveDispatched; } }
+    internal bool AttachTargetExited => _attachTarget is { } target && WindowsNativeSceneProcess.IsExited(target);
+    internal bool AttachFrameWritten => _attachFrameWritten;
+    internal bool AttachStreamUncertain => _attachStreamUncertain;
+    internal Task? AttachOperation { get { lock (_cleanupGate) return _attachHandshake; } }
+    internal Task<bool>? AttachDisconnectOperation { get { lock (_cleanupGate) return _attachDisconnect; } }
+
+    internal async Task WaitForAttachTargetExitAsync()
+    {
+        var target = _attachTarget ?? throw new InvalidOperationException("The attach target is unavailable.");
+        if (WindowsNativeSceneProcess.IsExited(target)) return;
+        try
+        {
+            // The retained target handle prevents this PID from being reused while opening the wait handle.
+            using var process = Process.GetProcessById(_attachProcessId);
+            await process.WaitForExitAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            if (!WindowsNativeSceneProcess.IsExited(target)) throw;
+        }
+        if (!WindowsNativeSceneProcess.IsExited(target))
+            throw new InvalidOperationException("Attached target exit is unconfirmed.");
+    }
+
+    internal Task AttachPreparedAsync(IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        LegacyFunctionBreakpoint[]? functionBreakpoints, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Task operation;
+        lock (_cleanupGate)
+        {
+            if (_attachTarget is null || _attachClosing) throw new InvalidOperationException("The provisional attach owner is unavailable.");
+            if (_attachHandshake is not null) throw new InvalidOperationException("Attach was already admitted and cannot be replayed.");
+            operation = _attachHandshake = AttachPreparedCoreAsync(breakpoints, functionBreakpoints, cancellationToken);
+        }
+        return operation.WaitAsync(cancellationToken);
+    }
+
+    private async Task AttachPreparedCoreAsync(IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        LegacyFunctionBreakpoint[]? functionBreakpoints, CancellationToken cancellationToken)
+    {
+        using var cancellation = cancellationToken.Register(static state =>
+        {
+            var session = (NetCoreDbgSession)state!;
+            lock (session._cleanupGate)
+                if (!session._attachMayHaveDispatched) session._attachClosing = true;
+        }, this);
+        await ConfigureBreakpointsAsync(breakpoints, CancellationToken.None).ConfigureAwait(false);
+        if (functionBreakpoints is { Length: > 0 })
+        {
+            var result = await ReplaceFunctionBreakpointsAsync(functionBreakpoints, CancellationToken.None).ConfigureAwait(false);
+            if (result.Outcome != DapBreakpointUpdateOutcome.Added) throw new DapBreakpointsException(isRefused: true);
+        }
+        _ = await SendRequestAsync("setExceptionBreakpoints", new { filters = Array.Empty<string>() }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        if (_attachTarget is not { } target || !WindowsNativeSceneProcess.IsAlive(target))
+            throw new InvalidOperationException("The requested process is unavailable before attach.");
+        lock (_cleanupGate)
+        {
+            if (_attachClosing || cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException("Attach admission was cancelled before dispatch.", cancellationToken);
+            _attachMayHaveDispatched = true;
+        }
+        _attachStreamUncertain = true;
+        var attach = await BeginRequestAsync("attach", new { processId = _attachProcessId, justMyCode = false }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        _attachFrameWritten = true;
+        _attachStreamUncertain = false;
+        try
+        {
+            _attachStreamUncertain = true;
+            var configuration = await BeginRequestAsync("configurationDone", null, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+            _attachStreamUncertain = false;
+            DapResponse configurationResponse;
+            try { configurationResponse = await configuration.Completion.Task.ConfigureAwait(false); }
+            catch { _attachStreamUncertain = true; throw; }
+            finally { RemovePending(configuration); }
+            if (!configurationResponse.Success) throw new InvalidDataException("The debugger refused configurationDone.");
+            DapResponse attachResponse;
+            try { attachResponse = await attach.Completion.Task.ConfigureAwait(false); }
+            catch { _attachStreamUncertain = true; throw; }
+            if (!attachResponse.Success) throw new DapLaunchRefusedException();
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process exited during attach.");
+            lock (_stateGate)
+            {
+                _legacyProcessId = _attachProcessId;
+                if (_state.Event is null && !_inspectionClosed) _legacyLaunchRunning = true;
+            }
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
+        }
+        finally { RemovePending(attach); }
+    }
+
+    internal Task<bool> DisconnectAttachOnceAsync(CancellationToken cancellationToken)
+    {
+        Task<bool> operation;
+        lock (_cleanupGate)
+        {
+            if (_attachTarget is null) throw new InvalidOperationException("The provisional attach owner is unavailable.");
+            if (_cleanupTask is not null) throw new InvalidOperationException("The provisional attach owner is already being disposed.");
+            _attachClosing = true;
+            operation = _attachDisconnect ??= DisconnectAttachCoreAsync();
+        }
+        return operation.WaitAsync(cancellationToken);
+    }
+
+    private async Task<bool> DisconnectAttachCoreAsync()
+    {
+        Task? handshake;
+        lock (_cleanupGate) handshake = _attachHandshake;
+        if (handshake is not null) { try { await handshake.ConfigureAwait(false); } catch (Exception) { } }
+        if (!_attachFrameWritten || _attachStreamUncertain)
+            throw new InvalidOperationException("The attach stream outcome is unconfirmed; disconnect was not sent.");
+        _attachStreamUncertain = true;
+        var request = await BeginRequestAsync("disconnect", new { restart = false, terminateDebuggee = false }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        _attachStreamUncertain = false;
+        try { return (await request.Completion.Task.ConfigureAwait(false)).Success; }
+        finally { RemovePending(request); }
+    }
+
 
     internal async Task StopAsync(CancellationToken cancellationToken)
     {
@@ -1898,6 +2071,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken) =>
         StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, launchOptions: null, cancellationToken);
 
+    private async Task InitializeProtocolAsync(TimeSpan initializeTimeout, CancellationToken cancellationToken)
+    {
+        _ = await SendRequestAsync("initialize", new
+        {
+            clientID = "netcoredbg-mcp-stateless",
+            clientName = "netcoredbg-mcp-stateless",
+            adapterID = "coreclr",
+            pathFormat = "path",
+            linesStartAt1 = true,
+            columnsStartAt1 = true,
+            supportsRunInTerminalRequest = false,
+            supportsVariableType = true,
+            supportsVariablePaging = true,
+            supportsInvalidatedEvent = true,
+            supportsProgressReporting = true,
+        }, initializeTimeout, cancellationToken).ConfigureAwait(false);
+        await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task StartProtocolAsync(
         string programPath,
         TimeSpan initializeTimeout,
@@ -1906,26 +2098,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         DapLaunchOptions? launchOptions,
         CancellationToken cancellationToken, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
     {
-        _ = await SendRequestAsync(
-            "initialize",
-            new
-            {
-                clientID = "netcoredbg-mcp-stateless",
-                clientName = "netcoredbg-mcp-stateless",
-                adapterID = "coreclr",
-                pathFormat = "path",
-                linesStartAt1 = true,
-                columnsStartAt1 = true,
-                supportsRunInTerminalRequest = false,
-                supportsVariableType = true,
-                supportsVariablePaging = true,
-                supportsInvalidatedEvent = true,
-                supportsProgressReporting = true,
-            },
-            initializeTimeout,
-            cancellationToken).ConfigureAwait(false);
-
-        await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+        await InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
         if (functionBreakpoints is not null)
         {
@@ -4088,6 +4261,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public static bool IsAlive(SafeProcessHandle process) =>
             !process.IsInvalid && WaitForSingleObject(process, 0) == WaitTimeout;
 
+        public static bool IsExited(SafeProcessHandle process) =>
+            !process.IsInvalid && !process.IsClosed && WaitForSingleObject(process, 0) == 0;
+
         public static bool TryReadIdentity(SafeProcessHandle process, out string executablePath, out long creationUtcTicks)
         {
             executablePath = string.Empty;
@@ -4580,6 +4756,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_cleanupGate)
         {
+            if (_cleanupTask is not null) return _cleanupTask;
+            if (_attachTarget is { } target)
+            {
+                _attachClosing = true;
+                if (_attachHandshake is { IsCompleted: false } || _attachDisconnect is { IsCompleted: false })
+                    return Task.FromException(new InvalidOperationException("Attach protocol work is still pending; cleanup ownership must be retained."));
+                if (_attachMayHaveDispatched && !WindowsNativeSceneProcess.IsExited(target))
+                    return Task.FromException(new InvalidOperationException("Attached target is live or its exit is unconfirmed; cleanup ownership must be retained."));
+            }
             return _cleanupTask ??= CleanupAsync();
         }
     }
@@ -4603,7 +4788,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            if (!HasExited() && !_forceCleanup.IsCancellationRequested)
+            if ((!_attachMayHaveDispatched || _attachTarget is null) && !HasExited() && !_forceCleanup.IsCancellationRequested)
             {
                 if (_supportsTerminate && !_legacyTerminateDispatched)
                 {
@@ -4685,7 +4870,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                             }
                             finally
                             {
-                                _processTreeOwnership?.Dispose();
+                                try { _processTreeOwnership?.Dispose(); }
+                                finally { _attachTarget?.Dispose(); }
                             }
                         }
                     }
@@ -5355,6 +5541,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         internal uint ActiveProcessCount() => ActiveProcessCount(_job);
 
+        internal void MakeAttachPassive()
+        {
+            if (!QueryExtendedInformationJobObject(_job, JobObjectExtendedLimitInformationClass,
+                    out var limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>(), IntPtr.Zero))
+                throw LastWin32Error("Could not query debugger job limits.");
+            limits.BasicLimitInformation.LimitFlags &= ~JobObjectLimitKillOnJobClose;
+            if (!SetInformationJobObject(_job.DangerousGetHandle(), JobObjectExtendedLimitInformationClass,
+                    ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+                throw LastWin32Error("Could not make debugger job passive for attach.");
+        }
+
         private static uint ActiveProcessCount(SafeKernelHandle job)
         {
             if (!QueryInformationJobObject(job, 1, out var accounting,
@@ -5694,6 +5891,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private static extern bool QueryInformationJobObject(
             SafeKernelHandle job, uint informationClass,
             out JobObjectBasicAccountingInformation information, uint informationLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryExtendedInformationJobObject(
+            SafeKernelHandle job, uint informationClass,
+            out JobObjectExtendedLimitInformation information, uint informationLength, IntPtr returnLength);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

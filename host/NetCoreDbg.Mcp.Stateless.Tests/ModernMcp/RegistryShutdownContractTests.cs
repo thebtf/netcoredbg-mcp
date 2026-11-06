@@ -19,6 +19,176 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class RegistryShutdownContractTests
 {
     private static readonly TimeSpan ObservationTimeout = TimeSpan.FromSeconds(5);
+    [Fact]
+    public async Task LegacyAttach_ConcurrentStopAndShutdownJoinOneDetach()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true, BlockGracefulShutdown: true));
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var shutdownCancellation = new CancellationTokenSource();
+        Task? shutdown = null;
+        try
+        {
+            var attached = Content(await harness.CallLegacyAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "attach-shared-start"));
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            using var adapter = Process.GetProcessById(await harness.Fixture.GetProcessIdAsync(observation.Token));
+            var startup = Assert.Single(await harness.Fixture.ReadTranscriptAsync(), static entry => entry.Kind == "startup");
+            Assert.Equal(startup.ProcessStartTimeUtcTicks, adapter.StartTime.ToUniversalTime().Ticks);
+            var stop = harness.CallLegacyAsync("stop_debug", new JsonObject(), "attach-shared-stop");
+            while (!(await harness.Fixture.ReadTranscriptAsync()).Any(static entry => entry.Kind == "request" && entry.Command == "disconnect"))
+                await Task.Delay(10, observation.Token);
+            shutdown = harness.StopAsync(shutdownCancellation.Token);
+            shutdownCancellation.Cancel();
+            Assert.False(adapter.HasExited);
+            var pending = await harness.Fixture.ReadTranscriptAsync();
+            var detach = JsonNode.Parse(Assert.Single(pending, static entry => entry.Kind == "request" && entry.Command == "disconnect").RawPayload!)!;
+            Assert.False(detach["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            Assert.DoesNotContain(pending, static entry => entry.Kind == "request" && entry.Command == "terminate");
+            harness.Fixture.ReleaseGracefulShutdown();
+            var stopped = Content(await stop.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Contains("unconfirmed", stopped["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.False(target.HasExited);
+            Assert.False(shutdown.IsCompleted);
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            try { await shutdown.WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (OperationCanceledException) when (shutdownCancellation.IsCancellationRequested) { }
+            await adapter.WaitForExitAsync(observation.Token);
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+            Assert.DoesNotContain(transcript, static entry => entry.Kind == "request" && entry.Command == "terminate");
+        }
+        finally
+        {
+            harness.Fixture.ReleaseGracefulShutdown();
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            if (shutdown is not null) await Record.ExceptionAsync(async () => await shutdown.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyAttach_TargetExitDuringPendingHandshakeDoesNotForceAdapter()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var script = new JsonObject
+        {
+            ["disconnect"] = new JsonObject
+            {
+                ["entries"] = new JsonArray(),
+                ["waitForRelease"] = true,
+                ["releaseGate"] = "stackTrace",
+            },
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true),
+            holdLaunchResponse: true, outputScript: script);
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var shutdownCancellation = new CancellationTokenSource();
+        var attach = harness.CallLegacyAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "attach-pending-start");
+        Task? shutdown = null;
+        Process? adapter = null;
+        try
+        {
+            await harness.Fixture.WaitForTranscriptKindAsync("attach-gated", observation.Token);
+            await harness.Fixture.WaitForTranscriptKindAsync("launch-response-gated", observation.Token);
+            var startup = Assert.Single(await harness.Fixture.ReadTranscriptAsync(), static entry => entry.Kind == "startup");
+            adapter = Process.GetProcessById(Assert.IsType<int>(startup.ProcessId));
+            Assert.Equal(startup.ProcessStartTimeUtcTicks, adapter.StartTime.ToUniversalTime().Ticks);
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            shutdown = harness.StopAsync(shutdownCancellation.Token);
+            shutdownCancellation.Cancel();
+            Assert.False(adapter.HasExited);
+            harness.Fixture.ReleaseThreadsResponse();
+            await harness.Fixture.WaitForTranscriptKindAsync("output-disconnect-gated", observation.Token);
+            Assert.False(adapter.HasExited);
+            var pending = await harness.Fixture.ReadTranscriptAsync();
+            var detach = JsonNode.Parse(Assert.Single(pending, static entry => entry.Kind == "request" && entry.Command == "disconnect").RawPayload!)!;
+            Assert.False(detach["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            Assert.DoesNotContain(pending, static entry => entry.Kind == "request" && entry.Command == "terminate");
+            harness.Fixture.ReleaseStackTraceResponse();
+            await harness.Fixture.WaitForTranscriptKindAsync("disconnect-response", observation.Token);
+            await adapter.WaitForExitAsync(observation.Token);
+            var completed = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(completed, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+        }
+        finally
+        {
+            harness.Fixture.ReleaseThreadsResponse();
+            harness.Fixture.ReleaseStackTraceResponse();
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await attach.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (shutdown is not null) await Record.ExceptionAsync(async () => await shutdown.WaitAsync(TimeSpan.FromSeconds(10)));
+            adapter?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyAttach_CancelledBeforeAdmissionNeverWritesAttachLater()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true, SetExceptionBreakpointsResponseMode: "hold-first"));
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var caller = new CancellationTokenSource();
+        var attach = harness.CallLegacyAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "attach-cancel-before-write", caller.Token);
+        try
+        {
+            await harness.Fixture.WaitForTranscriptKindAsync("exception-filters-response-gated", observation.Token);
+            caller.Cancel();
+            var cancellation = await Record.ExceptionAsync(async () =>
+            {
+                var result = Content(await attach.WaitAsync(TimeSpan.FromSeconds(10)));
+                Assert.NotNull(result["error"]);
+            });
+            Assert.True(cancellation is null or OperationCanceledException);
+            harness.Fixture.ReleaseNextResponse();
+            await harness.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(target.HasExited);
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.DoesNotContain(transcript, static entry => entry.Kind == "request" && entry.Command == "attach");
+        }
+        finally
+        {
+            harness.Fixture.ReleaseNextResponse();
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await attach.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyAttach_ConfigurationRefused_RetainsUnconfirmedOwner()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true),
+            outputScript: new JsonObject { ["configurationDoneRefused"] = true });
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        try
+        {
+            var result = Content(await harness.CallLegacyAsync("attach_debug",
+                new JsonObject { ["process_id"] = target.Id }, "attach-config-refused"));
+            Assert.False(string.IsNullOrWhiteSpace(result["error"]?.GetValue<string>()));
+            Assert.Null(result["data"]);
+            Assert.False(target.HasExited);
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "attach");
+            var detach = JsonNode.Parse(Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "disconnect").RawPayload!)!;
+            Assert.False(detach["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            Assert.DoesNotContain(transcript, static entry => entry.Kind == "request" && entry.Command == "terminate");
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "attach-config-cleanup"));
+        }
+    }
 
     [Fact]
     public async Task LegacyResources_BlockedDeliveryCarriesClearAndDoesNotHoldLifecycle()
@@ -1014,7 +1184,7 @@ public sealed class RegistryShutdownContractTests
                 Params = JsonSerializer.SerializeToNode(parameters),
             };
             var context = new RequestContext<CallToolRequestParams>(server, request, parameters);
-            if (tool == "start_debug")
+            if (tool is "start_debug" or "attach_debug")
             {
                 Fixture.MarkAdapterStartAttempted();
             }

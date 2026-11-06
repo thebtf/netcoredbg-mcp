@@ -2067,6 +2067,19 @@ internal sealed class FixtureProcess : IAsyncDisposable
 
     public string ExecutablePath => _executablePath;
 
+    public Process StartOwnedTarget()
+    {
+        var start = new ProcessStartInfo(_executablePath) { UseShellExecute = false, CreateNoWindow = true };
+        start.ArgumentList.Add("--controlled-dap-descendant");
+        return Process.Start(start) ?? throw new InvalidOperationException("Could not start the controlled target.");
+    }
+
+    public static async Task StopOwnedTargetAsync(Process target)
+    {
+        if (!target.HasExited) target.Kill();
+        await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     public static FixtureProcess Create(FixtureConfiguration configuration)
     {
         var adapter = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
