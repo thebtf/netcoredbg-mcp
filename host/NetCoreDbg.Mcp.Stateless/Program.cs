@@ -310,6 +310,7 @@ internal static class Program
         private const string RemoveFunctionBreakpoint = "remove_function_breakpoint";
         private const string ListBreakpoints = "list_breakpoints";
         private const string ClearBreakpoints = "clear_breakpoints";
+        private const string HygienePreflight = "debug_hygiene_preflight";
         private const string AddTracepoint = "add_tracepoint";
         private const string RemoveTracepoint = "remove_tracepoint";
         private const string GroupCreate = "instrumentation_group_create";
@@ -809,7 +810,7 @@ internal static class Program
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
-                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
+                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
@@ -829,7 +830,7 @@ internal static class Program
                 }
                 finally { _legacyGate.Release(); }
             }
-            if (name is AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint)
+            if (name is AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint)
             {
                 await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
@@ -844,9 +845,34 @@ internal static class Program
                 if (arguments.TryGetValue("file", out var source) && source.ValueKind == JsonValueKind.String
                     && !string.IsNullOrWhiteSpace(source.GetString()))
                     breakpointSourceValid = NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(source.GetString()!, out breakpointFile, requireExistingFile: name is AddBreakpoint or AddTracepoint);
-                else if (name is (ListBreakpoints or ClearBreakpoints) && (!arguments.ContainsKey("file") || source.ValueKind == JsonValueKind.Null || (source.ValueKind == JsonValueKind.String && source.GetString() == string.Empty)))
+                else if (name is (ListBreakpoints or ClearBreakpoints or HygienePreflight) && (!arguments.ContainsKey("file") || source.ValueKind == JsonValueKind.Null || (source.ValueKind == JsonValueKind.String && source.GetString() == string.Empty)))
                     breakpointSourceValid = true;
                 cancellationToken.ThrowIfCancellationRequested();
+            }
+            string? hygieneValidationError = null;
+            if (name == HygienePreflight && arguments.TryGetValue("file", out var hygieneFile)
+                && hygieneFile.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(hygieneFile.GetString()))
+            {
+                var root = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken,
+                    requestProtocolVersion: context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
+                if (root is null || !NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(root, out var normalizedRoot, requireExistingFile: false))
+                    hygieneValidationError = "Project root unavailable.";
+                else
+                {
+                    string candidate;
+                    try { candidate = Path.GetFullPath(hygieneFile.GetString()!, normalizedRoot); }
+                    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+                    { candidate = string.Empty; }
+                    if (candidate.Length == 0 || !NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(candidate, out var normalizedFile, requireExistingFile: false))
+                        hygieneValidationError = "Invalid file scope.";
+                    else
+                    {
+                        var prefix = Path.EndsInDirectorySeparator(normalizedRoot) ? normalizedRoot : normalizedRoot + Path.DirectorySeparatorChar;
+                        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                        if (!normalizedFile.StartsWith(prefix, comparison)) hygieneValidationError = "Path outside project root.";
+                        else { breakpointFile = normalizedFile; breakpointSourceValid = true; }
+                    }
+                }
             }
             var lifecycleHeld = false;
             var gateHeld = false;
@@ -865,10 +891,10 @@ internal static class Program
                 gateHeld = true;
                 if (HasInvalidLegacyArguments(name, arguments))
                     return LegacyError("Unsupported or invalid argument.");
-                if (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint) && breakpointGeneration != _legacySessionGeneration)
+                if (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && breakpointGeneration != _legacySessionGeneration)
                     return LegacyError("Debug session changed before breakpoint admission.", "unknown");
                 if (_legacyBreakpointSessionId is not null
-                    && (name is StartDebug or RestartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint) && _legacySessionId is null)))
+                    && (name is StartDebug or RestartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && _legacySessionId is null)))
                     return LegacyError("A breakpoint update is still settling.");
                 var consumesOutput = name == GetOutput && arguments.TryGetValue("clear", out var clearOption)
                     && clearOption.ValueKind == JsonValueKind.True
@@ -878,7 +904,7 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ConfigureExceptions or GetStepInTargets
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
@@ -909,6 +935,176 @@ internal static class Program
                     _legacyHasOwner = true;
                     _legacyOwner = muxId;
                     if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                }
+                if (name == HygienePreflight)
+                {
+                    foreach (var flag in new[] { "clear_breakpoints", "clear_trace_log", "clear_exception_filters" })
+                        if (arguments.TryGetValue(flag, out var value) && value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                            return LegacyError("Unsupported or invalid argument.");
+                    var clearPoints = !arguments.TryGetValue("clear_breakpoints", out var clearPointsValue) || clearPointsValue.ValueKind == JsonValueKind.True;
+                    var clearLog = !arguments.TryGetValue("clear_trace_log", out var clearLogValue) || clearLogValue.ValueKind == JsonValueKind.True;
+                    var clearFilters = arguments.TryGetValue("clear_exception_filters", out var clearFiltersValue) && clearFiltersValue.ValueKind == JsonValueKind.True;
+                    var errors = new List<object>();
+                    var remaining = new List<object>();
+                    var clearedPoints = 0;
+                    var clearedLog = 0;
+                    var clearedFilters = 0;
+                    var clearedTraces = 0;
+                    CallToolResult HygieneResult(string status, string reason, string? validationError = null)
+                    {
+                        var data = new Dictionary<string, object?>
+                        {
+                            ["status"] = status,
+                            ["reason"] = reason,
+                            ["cleared"] = new { breakpoints = clearedPoints, trace_log_entries = clearedLog, exception_filters = clearedFilters },
+                            ["remaining_breakpoints"] = remaining,
+                            ["cleanup_errors"] = errors,
+                        };
+                        if (validationError is not null) data["validation_error"] = validationError;
+                        if (clearedTraces != 0) data["tracepoints_removed"] = clearedTraces;
+                        var state = LegacySnapshot().State;
+                        return Result(new
+                        {
+                            state,
+                            next_actions = LegacyActions(state).Append(HygienePreflight).Distinct(StringComparer.Ordinal).ToArray(),
+                            message = status == "PASS" ? "Hygiene preflight passed." : "Hygiene preflight failed.",
+                            data
+                        }, false);
+                    }
+                    if (!breakpointSourceValid || hygieneValidationError is not null)
+                        return HygieneResult("FAIL", "invalid file scope", hygieneValidationError ?? "Invalid file scope.");
+                    if (clearLog)
+                    {
+                        clearedLog = _legacyTraceLog.Count;
+                        _legacyTraceDropCount += clearedLog;
+                        _legacyTraceLog.Clear();
+                    }
+                    bool InScope(string file) => breakpointFile is null || _legacyBreakpointPathComparer.Equals(file, breakpointFile);
+                    var stoppedOnFailure = false;
+                    if (clearPoints)
+                    {
+                        if (_legacySessionId is not null)
+                        {
+                            if (!_legacyBreakpointGate.Wait(0))
+                                errors.Add(new { operation = "clear_breakpoints", error = "A breakpoint update is already in progress." });
+                            else { breakpointHeld = true; _legacyBreakpointSessionId = _legacySessionId; }
+                            stoppedOnFailure = !breakpointHeld;
+                        }
+                        var session = _legacySessionId;
+                        async Task<bool> ApplyFileAsync(string file, string operation)
+                        {
+                            if (session is null) return true;
+                            var lines = SnapshotLegacyBreakpointLines(file);
+                            MarkLegacyBreakpointUnconfirmed(file);
+                            var replacementRequest = LegacyRequest(RemoveBreakpoint, session, new Dictionary<string, JsonElement>
+                            {
+                                ["file"] = JsonSerializer.SerializeToElement(file),
+                                ["line"] = JsonSerializer.SerializeToElement(1),
+                            });
+                            _legacyGate.Release();
+                            gateHeld = false;
+                            var update = await UpdateBreakpointAsync(replacementRequest, context.JsonRpcRequest.Id, cancellationToken, remove: true, lines).ConfigureAwait(false);
+                            await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                            gateHeld = true;
+                            if (_legacySessionId != session || update.IsError == true)
+                            {
+                                errors.Add(new { operation, error = "Breakpoint application was refused or is unconfirmed; do not retry automatically." });
+                                return false;
+                            }
+                            _legacyUnconfirmedBreakpointFiles.Remove(file);
+                            return true;
+                        }
+                        var directTraces = _legacyTracepoints.Where(point => InScope(point.File)
+                            && !_legacyGroups.Values.Any(group => group.Tracepoints.Contains(point))).ToArray();
+                        foreach (var point in directTraces)
+                        {
+                            if (stoppedOnFailure) break;
+                            if (!IsLegacyTraceSourceConfirmed(point.File))
+                            {
+                                errors.Add(new { operation = "clear_tracepoints", error = "Breakpoint application is unconfirmed; do not retry automatically." });
+                                stoppedOnFailure = true;
+                                break;
+                            }
+                            _legacyTraceRevision++;
+                            _legacyTracepoints.Remove(point);
+                            _legacyResources.SignalBreakpoints();
+                            if (!await ApplyFileAsync(point.File, "clear_tracepoints").ConfigureAwait(false)) { stoppedOnFailure = true; break; }
+                            clearedTraces++;
+                        }
+                        var files = _legacyBreakpoints.Where(point => InScope(point.File)).Select(static point => point.File).Distinct(_legacyBreakpointPathComparer).ToArray();
+                        foreach (var file in files)
+                        {
+                            if (stoppedOnFailure) break;
+                            if (!IsLegacyTraceSourceConfirmed(file))
+                            {
+                                errors.Add(new { operation = "clear_breakpoints", error = "Breakpoint application is unconfirmed; do not retry automatically." });
+                                stoppedOnFailure = true;
+                                break;
+                            }
+                            var removed = WithLegacyBreakpointState(() =>
+                            {
+                                var matches = _legacyBreakpoints.Where(point => _legacyBreakpointPathComparer.Equals(point.File, file)).ToArray();
+                                foreach (var point in matches) { _legacyBreakpointObservations.Remove(point.Incarnation); _legacyBreakpoints.Remove(point); }
+                                if (matches.Length != 0) { _legacyTraceRevision++; _legacyResources.SignalBreakpoints(); }
+                                return matches.Length;
+                            });
+                            if (!await ApplyFileAsync(file, "clear_breakpoints").ConfigureAwait(false)) { stoppedOnFailure = true; break; }
+                            clearedPoints += removed;
+                        }
+                        if (!stoppedOnFailure && breakpointFile is null && _legacyFunctionBreakpoints.Count != 0)
+                        {
+                            ReconcileLegacyFunctionBreakpoints();
+                            var functions = _legacyFunctionBreakpoints.ToArray();
+                            _legacyFunctionBreakpoints.Clear();
+                            if (session is not null && _legacyBreakpointObserverSession is { SupportsFunctionBreakpoints: true })
+                            {
+                                _legacyGate.Release(); gateHeld = false;
+                                var update = await UpdateFunctionBreakpointsAsync(session, [], context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false);
+                                await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false); gateHeld = true;
+                                if (_legacySessionId != session || update is not { Outcome: DapBreakpointUpdateOutcome.Added or DapBreakpointUpdateOutcome.Unsupported })
+                                {
+                                    _legacyFunctionBreakpoints.AddRange(functions);
+                                    errors.Add(new { operation = "clear_breakpoints", error = "Function breakpoint application was refused or is unconfirmed; do not retry automatically." });
+                                    stoppedOnFailure = true;
+                                }
+                            }
+                            if (!stoppedOnFailure) clearedPoints += functions.Length;
+                        }
+                    }
+                    if (clearFilters && _legacySessionId is { } filterSession)
+                    {
+                        var filterRequest = LegacyRequest(ConfigureExceptions, filterSession, new Dictionary<string, JsonElement> { ["filters"] = JsonSerializer.SerializeToElement(Array.Empty<string>()) });
+                        _legacyGate.Release(); gateHeld = false;
+                        var update = await ConfigureExceptionsAsync(filterRequest, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false);
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false); gateHeld = true;
+                        if (_legacySessionId != filterSession || update.IsError == true)
+                            errors.Add(new { operation = "clear_exception_filters", error = "Exception filter clear failed or is unconfirmed; do not retry automatically." });
+                        else clearedFilters = 1;
+                    }
+                    if (_legacyUnconfirmedBreakpointOverflow || _legacyUnconfirmedBreakpointFiles.Any(InScope) || _legacyGroupUnconfirmedFiles.Any(InScope))
+                        errors.Add(new { operation = "clear_breakpoints", error = "Breakpoint application is unconfirmed; do not retry automatically." });
+                    WithLegacyBreakpointState(() =>
+                    {
+                        foreach (var point in _legacyBreakpoints.Where(point => InScope(point.File)))
+                        {
+                            _legacyBreakpointObservations.TryGetValue(point.Incarnation, out var observed);
+                            remaining.Add(new { file = point.File, line = point.Line, dap_line = observed?.DapLine, condition = point.Condition, verified = observed?.Verified ?? false });
+                        }
+                        foreach (var point in _legacyGroups.Values.SelectMany(static group => group.Breakpoints).Where(point => InScope(point.File)))
+                            remaining.Add(new { file = point.File, line = point.Line, dap_line = point.DapLine, condition = point.Condition, verified = point.Verified });
+                        foreach (var point in _legacyTracepoints.Where(point => InScope(point.File)))
+                            remaining.Add(new { file = point.File, line = point.Line, dap_line = point.DapLine, condition = (string?)null, verified = point.Verified });
+                        if (breakpointFile is null)
+                        {
+                            ReconcileLegacyFunctionBreakpoints();
+                            foreach (var point in _legacyFunctionBreakpoints)
+                                remaining.Add(new { function = point.Name, condition = point.Condition, hit_condition = point.HitCondition, verified = point.Verified });
+                        }
+                        return true;
+                    });
+                    if (remaining.Count != 0) return HygieneResult("FAIL", "targeted breakpoints remain after hygiene preflight");
+                    if (errors.Count != 0) return HygieneResult("FAIL", "hygiene cleanup failed");
+                    return HygieneResult("PASS", "no targeted breakpoints remain after hygiene preflight");
                 }
                 if (name is MarkTraceCursor or GetTraceDelta)
                     return LegacyTraceCursorOperation(name, arguments);
@@ -3255,6 +3451,7 @@ internal static class Program
                     MarkTraceCursor => key != "tracepoint_id",
                     GetTraceDelta => key is not ("cursor" or "limit" or "tracepoint_id"),
                     ListBreakpoints or ClearBreakpoints => key != "file",
+                    HygienePreflight => key is not ("file" or "clear_breakpoints" or "clear_trace_log" or "clear_exception_filters"),
                     GetScopes => key != "frame_id",
                     GetStepInTargets => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
@@ -7908,6 +8105,7 @@ internal static class Program
                 Tool("get_trace_delta", "Read entries after a trace cursor or monotonic timestamp; stale marks report lost retention.", """{"type":"object","properties":{"cursor":{"type":["object","number","null"]},"limit":{"type":["integer","null"]},"tracepoint_id":{"type":["string","null"]}},"required":["cursor"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("clear_trace_log", "Clear retained trace entries with owner permission.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("clear_breakpoints", "Clear source breakpoints for one file, or all source and function breakpoints. Uncertain writes are not retried.", """{"type":"object","properties":{"file":{"type":["string","null"]}},"additionalProperties":false}"""),
+                Tool("debug_hygiene_preflight", "Clear scoped direct instrumentation and report remaining points; group owners are preserved and unconfirmed writes are not retried.", """{"type":"object","properties":{"file":{"type":["string","null"]},"clear_breakpoints":{"type":"boolean","default":true},"clear_trace_log":{"type":"boolean","default":true},"clear_exception_filters":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("get_scopes", "Get scopes for the current stopped stack frame, or an explicit frame ID. Select a fresh stack after execution.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_variables", "Get variables for a reference in the current stopped context. Filtering is unsupported; paging is nonnegative.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":"null"},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["variables_reference"],"additionalProperties":false}"""),
                 Tool("evaluate_expression", "Evaluate in the current stopped context. Expressions may mutate the debuggee; mux ownership is required and uncertain writes are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
