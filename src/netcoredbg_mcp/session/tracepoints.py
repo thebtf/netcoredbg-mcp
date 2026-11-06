@@ -409,6 +409,12 @@ class TracepointManager:
                     cursor_drop_generation = int(cursor.get("drop_generation") or 0)
                     return self._trace_drop_generation > cursor_drop_generation
                 return True
+            if (
+                oldest_retained == after_timestamp
+                and isinstance(cursor, dict)
+                and self._trace_drop_generation > int(cursor.get("drop_generation") or 0)
+            ):
+                return True
             retained_boundary_count = sum(
                 1 for entry in retained_entries if entry.timestamp == after_timestamp
             )
