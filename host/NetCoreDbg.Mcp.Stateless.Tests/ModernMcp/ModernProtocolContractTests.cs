@@ -5886,7 +5886,7 @@ public sealed class ModernProtocolContractTests
             var request = new JsonObject
             {
                 ["name"] = "verify_debug_freshness",
-                ["arguments"] = new JsonObject { ["expected_workspace"] = root, ["expected_artifacts"] = new JsonArray(artifact) },
+                ["arguments"] = new JsonObject { ["expected_workspace"] = root + Path.DirectorySeparatorChar, ["expected_artifacts"] = new JsonArray(artifact) },
                 ["_meta"] = meta,
             };
             var initial = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync(
@@ -5903,9 +5903,34 @@ public sealed class ModernProtocolContractTests
             Assert.Equal("complete", completed["resultType"]?.GetValue<string>());
             Assert.Equal("PASS", completed["structuredContent"]?["data"]?["status"]?.GetValue<string>());
             Assert.True(completed["structuredContent"]?["data"]?["workspace"]?["matched"]?.GetValue<bool>());
+            Assert.Equal(root, completed["structuredContent"]?["data"]?["workspace"]?["expected"]?.GetValue<string>());
             Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(completed["structuredContent"]?["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
         }
         finally { await ModernMcpScratchDirectory.DeleteAsync(root); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Freshness_DoesNotClaimAnonymousSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_SESSION_TIMEOUT"] = "5" }));
+        var direct = new JsonObject();
+        var reader = new JsonObject { ["muxSessionId"] = "freshness-reader" };
+        var idle = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject(), reader);
+        Assert.Equal("PASS", idle["data"]?["status"]?.GetValue<string>());
+        Assert.Null(idle["data"]?["process"]?["process_id"]);
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, direct))["data"]?["success"]?.GetValue<bool>());
+        var read = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject(), reader);
+        var stopped = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), direct);
+        if (stopped["error"]?.GetValue<string>() == "Debug session is owned by another agent.")
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(5100));
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), direct))["data"]?["success"]?.GetValue<bool>());
+        }
+        Assert.Equal("PASS", read["data"]?["status"]?.GetValue<string>());
+        Assert.True(stopped["data"]?["success"]?.GetValue<bool>());
     }
 
     [Fact]

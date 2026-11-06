@@ -85,9 +85,11 @@ root, reader-observed source and module inventories, and artifact existence.
 `require_active_process` checks only whether a PID was recorded: neither it nor
 `PASS` proves that a process is alive or is the original process instance. The
 observations and filesystem checks are not an atomic snapshot. Incomplete native
-inventories or oversized results are refused; absent observations produce
-warnings. An identified foreign mux owner is refused, while an untagged direct
-read remains allowed. Native name matching uses .NET case-insensitive comparison
+inventories or oversized results are refused. Missing requested observations
+produce warnings; without expectations and `require_active_process`, `PASS` can
+occur even without a session or observations. An identified foreign mux owner is
+refused, an untagged direct read remains allowed, and this read does not claim
+ownership. Native name matching uses .NET case-insensitive comparison
 and invariant lowercasing, not Python's full Unicode `casefold`; path display and
 normalization also follow .NET rules. Full parity remains open (#552, #550). The
 standalone tool does not populate Python runtime-smoke evidence storage.

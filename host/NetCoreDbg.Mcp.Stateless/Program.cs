@@ -941,9 +941,12 @@ internal static class Program
                     }
                     if (_legacyHasOwner && _legacyOwner != muxId && !(name is (DebuggeeActivity or VerifyDebugFreshness) && _legacyOwner is null))
                         return LegacyError("Debug session is owned by another agent.");
-                    _legacyHasOwner = true;
-                    _legacyOwner = muxId;
-                    if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                    if (name != VerifyDebugFreshness)
+                    {
+                        _legacyHasOwner = true;
+                        _legacyOwner = muxId;
+                    }
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner == muxId) _legacyOwnerActivity = Stopwatch.GetTimestamp();
                 }
                 if (_legacyAttachClosing && mutation && name != StopDebug)
                     return LegacyError("Attach cleanup is unconfirmed; only owner stop can re-enter it.", "unknown");

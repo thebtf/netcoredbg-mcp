@@ -74,15 +74,16 @@ internal static class LegacyDebugFreshness
     private static string DisplayPath(string path)
     {
         if (path.Length == 0) return ".";
-        var full = Path.GetFullPath(path);
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         return Path.IsPathRooted(path) ? full : Path.GetRelativePath(Environment.CurrentDirectory, full);
     }
 
-    private static bool SamePath(string left, string right) => PathComparer.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
+    private static bool SamePath(string left, string right) => PathComparer.Equals(
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)));
     private static bool Within(string path, string root)
     {
         var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-        var fullPath = Path.GetFullPath(path);
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         var prefix = Path.EndsInDirectorySeparator(fullRoot) ? fullRoot : fullRoot + Path.DirectorySeparatorChar;
         return PathComparer.Equals(fullRoot, fullPath) || fullPath.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     }
