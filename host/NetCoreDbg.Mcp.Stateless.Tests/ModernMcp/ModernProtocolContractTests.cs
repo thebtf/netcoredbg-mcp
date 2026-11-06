@@ -2765,6 +2765,233 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_Hygiene_ScopedCleanupRemovesDirectPointsOnlyInTargetFile()
+    {
+        var source = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless/Program.cs"));
+        var other = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs"));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-scope-owner" };
+        foreach (var file in new[] { source, other })
+        {
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = file, ["line"] = 2 }, owner))["data"]);
+        }
+        var targetTrace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject { ["file"] = source, ["line"] = 6, ["expression"] = "6 * 7" }, owner);
+        var otherTrace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject { ["file"] = other, ["line"] = 6, ["expression"] = "6 * 7" }, owner);
+        var targetId = Assert.IsType<string>(targetTrace["data"]?["id"]?.GetValue<string>());
+        var otherId = Assert.IsType<string>(otherTrace["data"]?["id"]?.GetValue<string>());
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal("PASS", result["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(1, result["data"]?["cleared"]?["breakpoints"]?.GetValue<int>());
+            Assert.Equal(1, result["data"]?["tracepoints_removed"]?.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(result["data"]?["remaining_breakpoints"]));
+            Assert.Empty(Assert.IsType<JsonArray>(result["data"]?["cleanup_errors"]));
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.NotEmpty(writes);
+            AssertBreakpointRequest(writes[^1], source, []);
+            Assert.DoesNotContain(writes, action => JsonNode.Parse(action.Detail!)?["arguments"]?["source"]?["path"]?.GetValue<string>() == other);
+            var remaining = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = other }, owner);
+            Assert.Contains(Assert.IsType<JsonArray>(remaining["data"]?[other]), item => item?["line"]?.GetValue<int>() == 2);
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = targetId }, owner))["error"]);
+            Assert.Equal(otherId, (await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = otherId }, owner))["data"]?["removed"]?.GetValue<string>());
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_DisabledBreakpointCleanupReportsRemainingWithoutEffects()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-disabled-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject { ["file"] = source, ["line"] = 6, ["expression"] = "6 * 7" }, owner);
+        var traceId = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source, ["clear_breakpoints"] = false, ["clear_trace_log"] = false }, owner);
+            Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(0, result["data"]?["cleared"]?["breakpoints"]?.GetValue<int>());
+            Assert.Contains(Assert.IsType<JsonArray>(result["data"]?["remaining_breakpoints"]), item => item?["line"]?.GetValue<int>() == 2);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Contains(Assert.IsType<JsonArray>(listed["data"]?[source]), item => item?["line"]?.GetValue<int>() == 2);
+            Assert.Equal(traceId, (await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = traceId }, owner))["data"]?["removed"]?.GetValue<string>());
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_RemainingFunctionBreakpointFailsWhenDisabledOrRefused()
+    {
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject { ["supportsFunctionBreakpoints"] = true },
+            ["functionBreakpointRefusal"] = "empty",
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-function-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_function_breakpoint", new JsonObject { ["function_name"] = "Example.Keep" }, owner))["data"]);
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var disabled = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["clear_breakpoints"] = false }, owner);
+            Assert.Equal("FAIL", disabled["data"]?["status"]?.GetValue<string>());
+            var retained = Assert.Single(Assert.IsType<JsonArray>(disabled["data"]?["remaining_breakpoints"]));
+            Assert.Equal("Example.Keep", retained?["function"]?.GetValue<string>());
+            Assert.True(retained?["verified"]?.GetValue<bool>());
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setFunctionBreakpoints");
+            var scoped = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = BreakpointSourcePath, ["clear_breakpoints"] = false }, owner);
+            Assert.Equal("PASS", scoped["data"]?["status"]?.GetValue<string>());
+            var refused = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject(), owner);
+            Assert.Equal("FAIL", refused["data"]?["status"]?.GetValue<string>());
+            Assert.NotEmpty(Assert.IsType<JsonArray>(refused["data"]?["cleanup_errors"]));
+            Assert.Equal("Example.Keep", Assert.Single(Assert.IsType<JsonArray>(refused["data"]?["remaining_breakpoints"]))?["function"]?.GetValue<string>());
+            var write = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setFunctionBreakpoints");
+            Assert.Empty(Assert.IsType<JsonArray>(JsonNode.Parse(write.Detail!)?["arguments"]?["breakpoints"]));
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_ForeignOwnerIsRejectedBeforeCleanup()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-owner" };
+        var foreign = new JsonObject { ["muxSessionId"] = "hygiene-foreign" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var rejected = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source }, foreign);
+            Assert.Contains("owned by another agent", rejected["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(listed["data"]?[source]))?["line"]?.GetValue<int>());
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_RefusedActiveReplacementFailsWithoutRetry()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, SetBreakpointsResponseMode: "refuse-first-runtime")));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-refusal-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source, ["clear_trace_log"] = false }, owner);
+            Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+            Assert.NotEmpty(Assert.IsType<JsonArray>(result["data"]?["cleanup_errors"]));
+            var request = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(request, source, []);
+            var repeated = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source, ["clear_trace_log"] = false }, owner);
+            Assert.Equal("FAIL", repeated["data"]?["status"]?.GetValue<string>());
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_InvalidScopeDoesNotClearPoints()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var outside = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "..", "outside-hygiene.cs"));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-validation-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var result = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = outside }, owner);
+        Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+        Assert.Equal("invalid file scope", result["data"]?["reason"]?.GetValue<string>());
+        Assert.NotNull(result["data"]?["validation_error"]);
+        var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+        Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(listed["data"]?[source]))?["line"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_ExceptionFiltersAreClearedOnlyWhenRequested()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, ExceptionBreakpointFilters: "supported")));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-filters-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "configure_exceptions", new JsonObject { ["filters"] = new JsonArray("all") }, owner))["data"]?["configured"]?.GetValue<bool>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var unchanged = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject(), owner);
+            Assert.Equal("PASS", unchanged["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(0, unchanged["data"]?["cleared"]?["exception_filters"]?.GetValue<int>());
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setExceptionBreakpoints");
+            var cleared = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["clear_exception_filters"] = true }, owner);
+            Assert.Equal("PASS", cleared["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(1, cleared["data"]?["cleared"]?["exception_filters"]?.GetValue<int>());
+            var write = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setExceptionBreakpoints");
+            Assert.Empty(Assert.IsType<JsonArray>(JsonNode.Parse(write.Detail!)?["arguments"]?["filters"]));
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Hygiene_GroupOwnedPointsRemainAndPreventPass()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "hygiene-group-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var group = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "preserve",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 8 }),
+            ["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 8, ["expression"] = "6 * 7" }),
+        }, owner);
+        Assert.Equal("PASS", group["data"]?["status"]?.GetValue<string>());
+        var groupTraceId = Assert.IsType<string>(group["data"]?["tracepoints"]?[0]?["id"]?.GetValue<string>());
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "debug_hygiene_preflight", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+            Assert.Contains(Assert.IsType<JsonArray>(result["data"]?["remaining_breakpoints"]), item => item?["line"]?.GetValue<int>() == 8);
+            var inspected = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "preserve" }, owner);
+            Assert.Equal("PASS", inspected["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(8, Assert.Single(Assert.IsType<JsonArray>(inspected["data"]?["breakpoints"]))?["line"]?.GetValue<int>());
+            Assert.Equal(groupTraceId, Assert.Single(Assert.IsType<JsonArray>(inspected["data"]?["tracepoints"]))?["id"]?.GetValue<string>());
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.NotEmpty(writes);
+            AssertBreakpointRequest(writes[^1], source, [8]);
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_BreakpointClear_RejectsForeignOwnerAndRetainsIntentOnRefusal()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(

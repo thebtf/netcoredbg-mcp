@@ -58,7 +58,7 @@ only `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_
 `find_code_references`, `get_source_context`, `search_source`, `add_tracepoint`,
 `remove_tracepoint`, `get_trace_log`, `clear_trace_log`, `mark_trace_cursor`,
 `get_trace_delta`, `instrumentation_group_create`, `instrumentation_group_inspect`,
-and `instrumentation_group_clear`. Debug operations use implicit session binding
+`instrumentation_group_clear`, and `debug_hygiene_preflight`. Debug operations use implicit session binding
 and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
@@ -271,6 +271,12 @@ replacement is refused or unconfirmed, the group is retained and source
 mutations for that normalized file are refused until confirmed stop. Trace
 observation remains conservative when filenames are ambiguous. Inspection
 reports failure when application or required hit counts are unconfirmed.
+
+By default, `debug_hygiene_preflight` clears direct breakpoint and tracepoint
+requests and the trace log. It can target one project file; exception filters
+are cleared only when requested. Group-owned points are retained and cause
+`FAIL` while in scope. Global results include remaining function breakpoints.
+An unconfirmed update reports `FAIL` and is not retried automatically.
 
 `set_variable` requires mux ownership and the calling client's selected stopped
 context. After an admitted attempt, select a fresh stack before inspecting or
