@@ -53,12 +53,32 @@ only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
 session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+Legacy `search_output` is a shared, non-consuming read using case-insensitive,
+culture-invariant .NET regex, category filtering before line splitting, a total
+match count and at most 50 returned matches. Checkpoint creation and assertion
+require the active mux owner; an idle checkpoint survives the first successful
+start, natural termination retains it and successful stop clears it, including
+when the host is already idle and cleanup is confirmed. Output
+removed by whole-buffer clear, entry truncation or retention trimming after a
+checkpoint makes the assertion fail. Filtered reads do not clear output.
+If adapter startup was attempted but the start is refused, cancelled, or otherwise
+not published, existing checkpoints conservatively fail even when no output was
+observed: unpublished output may have been lost. Pre-adapter validation failures
+do not invalidate them. Unconfirmed cleanup rejects idle checkpoint operations.
+Assertions support literal and case-sensitive .NET regex matching. Unlike the
+Python implementation, forbidden matches still fail when `max_matches` is zero
+or negative. Evidence limits do not change assertion truth. Native assertions
+limit checkpoints to 1024, patterns to 256 of up to 4096 UTF-16 code units,
+captured text to 2 Mi UTF-16 code units, evidence per list to 256 matches and
+serialized responses to 256 KiB; time and size limits return errors. Regex and
+Unicode behavior are not full Python parity (#549).
 
 `restart_debug` retains the last successful launch configuration. Its default
 `rebuild=true` requires a saved `build_project`; `rebuild=false` preserves the

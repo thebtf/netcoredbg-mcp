@@ -349,6 +349,7 @@ internal static class Program
         private readonly Action? _failedStartCleanupCompleted;
         internal bool LegacyCompat { get; init; }
         private readonly SemaphoreSlim _legacyGate = new(1, 1);
+        private readonly LegacyOutputEvidence _legacyOutputEvidence = new();
         private readonly SemaphoreSlim _legacyLifecycle = new(1, 1);
         private readonly SemaphoreSlim _legacyBreakpointGate = new(1, 1);
         // Identity survives option changes; incarnation fences observations from earlier revisions.
@@ -743,7 +744,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail
+                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or SearchOutput or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -812,7 +813,7 @@ internal static class Program
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
                     or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
-                    or "create_snapshot" or "analyze_collection" or "summarize_object" || consumesOutput || compositeMayEvaluate;
+                    or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -1092,6 +1093,7 @@ internal static class Program
                             _legacyStopping = false;
                         }
                         if (stopped.IsError == true) { _legacyResources.Restore(retired); return LegacyNativeError(stopped); }
+                        _legacyOutputEvidence.Clear();
                         if (breakpointSession is not null)
                             breakpointSession.WithLegacyBreakpointLock(() =>
                             {
@@ -1142,6 +1144,7 @@ internal static class Program
                     gateHeld = false;
                     CallToolResult started;
                     var startCompleted = false;
+                    var adapterStartAttempted = false;
                     LegacyResourceOwner.Generation? generation = null;
                     LegacyResolvedLaunch? resolvedLaunch = null;
                     try
@@ -1149,7 +1152,8 @@ internal static class Program
                         cancellationToken.ThrowIfCancellationRequested();
                         generation = _legacyResources.Begin();
                         started = await StartAsync(context, cancellationToken, arguments, generation.Observe, breakpointOptions,
-                            _legacyFunctionBreakpoints.ToArray(), restarting ? _legacyResolvedLaunch : null, value => resolvedLaunch = value).ConfigureAwait(false);
+                            _legacyFunctionBreakpoints.ToArray(), restarting ? _legacyResolvedLaunch : null, value => resolvedLaunch = value,
+                            () => adapterStartAttempted = true).ConfigureAwait(false);
                         startCompleted = true;
                     }
                     finally
@@ -1157,6 +1161,7 @@ internal static class Program
                         await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                         gateHeld = true;
                         _legacyStarting = false;
+                        if (!startCompleted && adapterStartAttempted) _legacyOutputEvidence.InvalidateForUnpublishedStart();
                         if (!startCompleted && generation is not null) _legacyResources.Discard(generation);
                         if (!startCompleted) { _legacyHasOwner = false; _legacyOwner = null; }
                     }
@@ -1164,6 +1169,7 @@ internal static class Program
                         || !startContent.TryGetProperty("debugSessionId", out var tokenElement)
                         || tokenElement.GetString() is not { } token)
                     {
+                        if (adapterStartAttempted) _legacyOutputEvidence.InvalidateForUnpublishedStart();
                         _legacyResources.Discard(generation!);
                         _legacyHasOwner = false;
                         _legacyOwner = null;
@@ -1175,6 +1181,7 @@ internal static class Program
                     ReconcileLegacyFunctionBreakpoints();
                     if (cancellationToken.IsCancellationRequested)
                     {
+                        _legacyOutputEvidence.InvalidateForUnpublishedStart();
                         _legacyResources.Discard(generation!);
                         _legacyStopping = true;
                         _legacyGate.Release();
@@ -1220,6 +1227,29 @@ internal static class Program
                         stopReason = snapshot.Reason,
                         exitCode = snapshot.ExitCode
                     }, snapshot.State);
+                }
+                if (name is SearchOutput or "output_checkpoint" or "output_assert_since")
+                {
+                    if (_legacyStarting || _legacyStopping) return LegacyError("A debug session transition is in progress.");
+                    DapOutputBuffer? buffer = null;
+                    if (_legacySessionId is { } outputSession)
+                    {
+                        lock (_lifetimeGate)
+                        {
+                            if (!_outputs.TryGetValue(outputSession, out var lifetime)) return LegacyError("Output is unavailable.");
+                            buffer = lifetime.Buffer;
+                        }
+                    }
+                    else if (name is "output_checkpoint" or "output_assert_since")
+                    {
+                        lock (_lifetimeGate)
+                        {
+                            if (_startCleanupFailure is not null || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
+                                return LegacyError("Debug session cleanup is unconfirmed.");
+                        }
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return LegacyOutputOperation(name, arguments, buffer, cancellationToken);
                 }
                 if (_legacySessionId is null && name is (GetOutput or GetOutputTail))
                 {
@@ -1276,6 +1306,20 @@ internal static class Program
                         }
                         return response;
                     });
+                }
+                if (name == StopDebug && _legacySessionId is null)
+                {
+                    if (_legacyBreakpointSessionId is not null)
+                        return LegacyError("A breakpoint update is still settling.");
+                    lock (_lifetimeGate)
+                    {
+                        if (_shutdownRequested || _startCleanupFailure is not null || _buildCleanupUnconfirmed || _buildActive
+                            || _starts != 0 || _ownedSlots.Count != 0 || _outputs.Count != 0 || !_sessions.IsEmpty || !_slots.IsEmpty)
+                            return LegacyError("Debug session cleanup is unconfirmed.");
+                        cancellationToken.ThrowIfCancellationRequested();
+                        _legacyOutputEvidence.Clear();
+                    }
+                    return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
                 var terminateFallback = false;
@@ -1436,6 +1480,7 @@ internal static class Program
                         _legacyStopping = false;
                     }
                     if (stopped.IsError == true) { _legacyResources.Restore(retired); return LegacyNativeError(stopped); }
+                    _legacyOutputEvidence.Clear();
                     if (breakpointSession is not null)
                         breakpointSession.WithLegacyBreakpointLock(() =>
                         {
@@ -1896,6 +1941,73 @@ internal static class Program
             return -1;
         }
 
+        private CallToolResult LegacyOutputOperation(string name, Dictionary<string, JsonElement> arguments, DapOutputBuffer? buffer, CancellationToken cancellationToken)
+        {
+            static bool ReadPatterns(Dictionary<string, JsonElement> args, string key, out string[] patterns)
+            {
+                patterns = [];
+                if (!args.TryGetValue(key, out var value) || value.ValueKind == JsonValueKind.Null) return true;
+                if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > 256) return false;
+                var items = new List<string>();
+                foreach (var item in value.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.String) return false;
+                    items.Add(item.GetString()!);
+                }
+                patterns = items.ToArray();
+                return true;
+            }
+
+            if (name == SearchOutput)
+            {
+                if (!arguments.TryGetValue("pattern", out var pattern) || pattern.ValueKind != JsonValueKind.String)
+                    return LegacyError("Unsupported or invalid argument.");
+                long contextLines = 2;
+                if (arguments.TryGetValue("context_lines", out var context) && !TryReadOutputLineCount(context, out contextLines))
+                    return LegacyError("Unsupported or invalid argument.");
+                string? category = null;
+                if (arguments.TryGetValue("category", out var categoryValue))
+                {
+                    if (categoryValue.ValueKind is not (JsonValueKind.Null or JsonValueKind.String)) return LegacyError("Unsupported or invalid argument.");
+                    category = categoryValue.GetString();
+                }
+                var result = DapOutputSearch.Search(buffer?.Snapshot(false, category) ?? string.Empty, pattern.GetString()!, contextLines, cancellationToken);
+                if (result.Status == DapOutputSearchStatus.InvalidPattern) return Result(new { success = false, error = "Invalid regex" }, false);
+                if (result.Status != DapOutputSearchStatus.Success) return LegacyError(result.Status == DapOutputSearchStatus.Timeout ? "OUTPUT_SEARCH_TIMEOUT" : "OUTPUT_SEARCH_TOO_LARGE");
+                using var document = JsonDocument.Parse(result.SerializedContent!);
+                var root = document.RootElement;
+                var matches = root.GetProperty("matches").EnumerateArray().Select(static item => new
+                {
+                    line_number = item.GetProperty("lineNumber").GetInt32(),
+                    match = item.GetProperty("match").GetString(),
+                    context = item.GetProperty("context").EnumerateArray().Select(static line => line.GetString()).ToArray()
+                }).ToArray();
+                return LegacyBoundedUtilityResponse(new { pattern = pattern.GetString(), match_count = root.GetProperty("matchCount").GetInt32(), matches }, LegacySnapshot().State);
+            }
+            var key = name == "output_checkpoint" ? "name" : "checkpoint";
+            if (!arguments.TryGetValue(key, out var checkpoint) || checkpoint.ValueKind != JsonValueKind.String)
+                return LegacyError("Unsupported or invalid argument.");
+            if (name == "output_checkpoint") return LegacyEvidenceResponse(_legacyOutputEvidence.Checkpoint(checkpoint.GetString()!, buffer), checkpoint: true);
+            if (!ReadPatterns(arguments, "required", out var required) || !ReadPatterns(arguments, "forbidden", out var forbidden))
+                return LegacyError("Unsupported or invalid argument.");
+            var regex = true;
+            if (arguments.TryGetValue("regex", out var regexValue))
+            {
+                if (regexValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return LegacyError("Unsupported or invalid argument.");
+                regex = regexValue.GetBoolean();
+            }
+            long maxMatches = 20;
+            if (arguments.TryGetValue("max_matches", out var maxValue) && !TryReadOutputLineCount(maxValue, out maxMatches))
+                return LegacyError("Unsupported or invalid argument.");
+            if (maxMatches > 256 || maxMatches < int.MinValue) return LegacyError("OUTPUT_ASSERT_TOO_LARGE");
+            try
+            {
+                var data = _legacyOutputEvidence.Assert(checkpoint.GetString()!, required, forbidden, regex, (int)maxMatches, buffer, cancellationToken);
+                return LegacyEvidenceResponse(data, checkpoint: false);
+            }
+            catch (InvalidOperationException ex) { return LegacyError(ex.Message); }
+        }
+
         private static bool HasInvalidLegacyArguments(string name, Dictionary<string, JsonElement> arguments)
         {
             foreach (var key in arguments.Keys)
@@ -1931,6 +2043,9 @@ internal static class Program
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
                     GetOutputTail => key is not ("lines" or "category"),
+                    SearchOutput => key is not ("pattern" or "context_lines" or "category"),
+                    "output_checkpoint" => key != "name",
+                    "output_assert_since" => key is not ("checkpoint" or "required" or "forbidden" or "regex" or "max_matches"),
                     _ => true,
                 };
                 if (invalid) return true;
@@ -2414,6 +2529,23 @@ internal static class Program
                 ? result : LegacyError("DEBUG_CONTEXT_TOO_LARGE", "stopped");
         }
 
+        private CallToolResult LegacyEvidenceResponse(object data, bool checkpoint)
+        {
+            var state = LegacySnapshot().State;
+            var invalidName = checkpoint && JsonSerializer.SerializeToElement(data).GetProperty("reason").GetString() == "invalid output checkpoint name";
+            var extra = checkpoint ? new[] { invalidName ? "output_checkpoint" : "output_assert_since" }
+                : new[] { "output_checkpoint", "instrumentation_group_inspect" };
+            var result = Result(new
+            {
+                state,
+                next_actions = LegacyActions(state).Concat(extra).Distinct(StringComparer.Ordinal).ToArray(),
+                message = state == "idle" ? "No active debug session." : "Debug session state observed.",
+                data
+            }, false);
+            return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
+                ? result : LegacyError("Output evidence result exceeds 256 KiB.", state);
+        }
+
         private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
 
         private static CallToolResult LegacyResponse(object data, string state) =>
@@ -2579,7 +2711,8 @@ internal static class Program
         private async ValueTask<CallToolResult> StartAsync(
             RequestContext<CallToolRequestParams> context,
             CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null, Action<string>? resourceObserver = null, LegacyRequestedLine[]? breakpointOptions = null,
-            LegacyFunctionBreakpoint[]? functionBreakpoints = null, LegacyResolvedLaunch? resolvedLaunch = null, Action<LegacyResolvedLaunch>? captureResolvedLaunch = null)
+            LegacyFunctionBreakpoint[]? functionBreakpoints = null, LegacyResolvedLaunch? resolvedLaunch = null, Action<LegacyResolvedLaunch>? captureResolvedLaunch = null,
+            Action? adapterStartAttempted = null)
         {
             var arguments = argumentsOverride ?? context.Params.Arguments;
             if (!TryReadProgram(arguments, out var program, out var hasProgram)
@@ -2786,6 +2919,7 @@ internal static class Program
                 }
                 var token = CreateToken();
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
+                adapterStartAttempted?.Invoke();
                 session = await NetCoreDbgSession.StartAsync(
                     _debuggerPath,
                     program!,
@@ -6539,6 +6673,9 @@ internal static class Program
                 Tool("pause_execution", "Request pause; acknowledgement does not itself prove a stopped event.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_output", "Read captured output. Clearing the whole buffer requires mux ownership; filtered reads do not clear it.", """{"type":"object","properties":{"clear":{"type":"boolean"},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("get_output_tail", "Read the tail of captured output.", """{"type":"object","properties":{"lines":{"type":"integer","minimum":-9223372036854775808,"maximum":9223372036854775807},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
+                Tool("search_output", "Search shared retained output with case-insensitive culture-invariant .NET regex; not Python regex parity. Counts all lines and returns at most 50 matches; bounded failures return errors.", """{"type":"object","properties":{"pattern":{"type":"string"},"context_lines":{"type":"integer","default":2},"category":{"type":["string","null"]}},"required":["pattern"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true }),
+                Tool("output_checkpoint", "Create an owner-guarded output checkpoint, including before start; successful stop clears it.", """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}""", new ToolAnnotations { IdempotentHint = true }),
+                Tool("output_assert_since", "Assert required and forbidden patterns since an owner-guarded checkpoint. Regex uses case-sensitive .NET semantics. Discarded output fails; bounded work returns errors.", """{"type":"object","properties":{"checkpoint":{"type":"string"},"required":{"type":["array","null"],"items":{"type":"string"}},"forbidden":{"type":["array","null"],"items":{"type":"string"}},"regex":{"type":"boolean","default":true},"max_matches":{"type":"integer","default":20}},"required":["checkpoint"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true }),
                 Tool("continue_execution", "Continue one stopped thread and observe the next stop, terminal event, or timeout; uncertain writes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 NativeCodeSearchCatalog.Definition("find_code_symbol"),
                 NativeCodeSearchCatalog.Definition("find_code_references"),
