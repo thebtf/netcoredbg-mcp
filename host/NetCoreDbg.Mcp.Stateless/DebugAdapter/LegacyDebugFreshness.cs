@@ -130,7 +130,8 @@ internal static class LegacyDebugFreshness
         {
             var path = module.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? DisplayPath(p.GetString()!) : null;
             var name = module.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
-            var record = new Dictionary<string, object?> { ["name"] = name ?? (path is null ? null : Path.GetFileName(path)), ["path"] = path };
+            if (string.IsNullOrEmpty(name)) name = path is null ? null : Path.GetFileName(path);
+            var record = new Dictionary<string, object?> { ["name"] = name, ["path"] = path };
             foreach (var key in new[] { "id", "version", "isOptimized", "symbolStatus" })
                 if (module.TryGetProperty(key, out var value) && value.ValueKind != JsonValueKind.Null) record[key] = value.Clone();
             records.Add(record);

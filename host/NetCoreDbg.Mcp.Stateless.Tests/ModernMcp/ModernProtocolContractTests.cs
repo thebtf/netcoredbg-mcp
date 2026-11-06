@@ -5954,7 +5954,7 @@ public sealed class ModernProtocolContractTests
             ["launch"] = new JsonArray(
                 new JsonObject { ["event"] = "process", ["body"] = new JsonObject { ["systemProcessId"] = Environment.ProcessId, ["name"] = "FixtureApp", ["isLocalProcess"] = false } },
                 new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "new", ["source"] = new JsonObject { ["name"] = "Program.cs", ["path"] = source } } },
-                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "App.dll", ["path"] = artifact, ["symbolStatus"] = "Symbols loaded." } } }),
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "", ["path"] = artifact, ["symbolStatus"] = "Symbols loaded." } } }),
             ["threads"] = new JsonArray(new JsonObject
             {
                 ["entries"] = new JsonArray(
@@ -5979,7 +5979,7 @@ public sealed class ModernProtocolContractTests
                     ["expected_process_name"] = "fixtureapp",
                     ["expected_workspace"] = workspace,
                     ["expected_sources"] = new JsonArray(source),
-                    ["expected_modules"] = new JsonArray(artifact),
+                    ["expected_modules"] = new JsonArray(Path.Combine(other, "App.dll")),
                     ["expected_artifacts"] = new JsonArray(artifact),
                     ["require_active_process"] = true
                 };
@@ -5990,6 +5990,7 @@ public sealed class ModernProtocolContractTests
                 Assert.Equal("FixtureApp", pass["data"]?["process"]?["process_name"]?.GetValue<string>());
                 Assert.True(pass["data"]?["workspace"]?["matched"]?.GetValue<bool>());
                 Assert.Equal(source, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["loaded_sources"]?["paths"]))?.GetValue<string>());
+                Assert.Equal("App.dll", Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]))?["name"]?.GetValue<string>());
                 Assert.Equal("Symbols loaded.", Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]))?["symbolStatus"]?.GetValue<string>());
                 Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
                 Assert.Empty(Assert.IsType<JsonArray>(pass["data"]?["warnings"]));
