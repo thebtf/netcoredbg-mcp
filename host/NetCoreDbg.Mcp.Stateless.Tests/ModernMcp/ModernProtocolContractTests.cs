@@ -5871,6 +5871,211 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_Freshness_ModernRootsResponseCompletesRequest()
+    {
+        var root = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var artifact = Path.Combine(root, "App.dll");
+            await File.WriteAllTextAsync(artifact, "fixture artifact");
+            await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync(options: new ModernMcpStartOptions(
+                HostArguments: ["--legacy-compat"],
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = null, ["MCP_PROJECT_ROOT"] = null }));
+            var meta = ModernMcpProcessDriver.CurrentMeta();
+            Assert.IsType<JsonObject>(meta[MetaKeys.ClientCapabilities])["roots"] = new JsonObject();
+            var request = new JsonObject
+            {
+                ["name"] = "verify_debug_freshness",
+                ["arguments"] = new JsonObject { ["expected_workspace"] = root, ["expected_artifacts"] = new JsonArray(artifact) },
+                ["_meta"] = meta,
+            };
+            var initial = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync(
+                "tools/call", request, new RequestId("freshness-roots-request"))));
+            Assert.Equal("input_required", initial["resultType"]?.GetValue<string>());
+            var input = Assert.Single(Assert.IsType<JsonObject>(initial["inputRequests"]));
+            Assert.Equal("roots/list", input.Value?["method"]?.GetValue<string>());
+            request["inputResponses"] = new JsonObject
+            {
+                [input.Key] = new JsonObject { ["roots"] = new JsonArray(new JsonObject { ["uri"] = new Uri(root + Path.DirectorySeparatorChar).AbsoluteUri }) },
+            };
+            var completed = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await driver.SendFirstRequestAsync(
+                "tools/call", request, new RequestId("freshness-roots-response"))));
+            Assert.Equal("complete", completed["resultType"]?.GetValue<string>());
+            Assert.Equal("PASS", completed["structuredContent"]?["data"]?["status"]?.GetValue<string>());
+            Assert.True(completed["structuredContent"]?["data"]?["workspace"]?["matched"]?.GetValue<bool>());
+            Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(completed["structuredContent"]?["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(root); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Freshness_CatalogExposesOptionalInputsAndReadOnlyAnnotation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(new JsonObject(), new RequestId("freshness-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == "verify_debug_freshness");
+        Assert.True(tool["annotations"]?["readOnlyHint"]?.GetValue<bool>());
+        Assert.False(tool["annotations"]?["openWorldHint"]?.GetValue<bool>() ?? true);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.Empty(schema["required"] as JsonArray ?? new JsonArray());
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(new[] { "expected_artifacts", "expected_modules", "expected_process_id", "expected_process_name", "expected_sources", "expected_workspace", "require_active_process" },
+            properties.Select(static item => item.Key).OrderBy(static key => key, StringComparer.Ordinal));
+        Assert.Contains("integer", properties["expected_process_id"]?["type"]?.ToJsonString());
+        foreach (var name in new[] { "expected_process_name", "expected_workspace" })
+            Assert.Contains("string", properties[name]?["type"]?.ToJsonString());
+        foreach (var name in new[] { "expected_sources", "expected_modules", "expected_artifacts" })
+        {
+            Assert.Contains("array", properties[name]?["type"]?.ToJsonString());
+            Assert.Equal("string", properties[name]?["items"]?["type"]?.GetValue<string>());
+        }
+        Assert.Equal("boolean", properties["require_active_process"]?["type"]?.GetValue<string>());
+        Assert.False(properties["require_active_process"]?["default"]?.GetValue<bool>() ?? true);
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Freshness_ReportsObservedMatchesMismatchesAndLaterSnapshot()
+    {
+        var root = ModernMcpScratchDirectory.Create();
+        var workspace = Path.Combine(root, "workspace");
+        var other = Path.Combine(root, "other");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(other);
+        var source = Path.Combine(workspace, "Program.cs");
+        var artifact = Path.Combine(workspace, "App.dll");
+        var missing = Path.Combine(other, "Missing.dll");
+        await File.WriteAllTextAsync(source, "fixture source");
+        await File.WriteAllTextAsync(artifact, "fixture artifact");
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["event"] = "process", ["body"] = new JsonObject { ["systemProcessId"] = Environment.ProcessId, ["name"] = "FixtureApp", ["isLocalProcess"] = false } },
+                new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "new", ["source"] = new JsonObject { ["name"] = "Program.cs", ["path"] = source } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "App.dll", ["path"] = artifact, ["symbolStatus"] = "Symbols loaded." } } }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(
+                new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "removed", ["source"] = new JsonObject { ["name"] = "Program.cs", ["path"] = source } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "App.dll", ["path"] = artifact } } })
+            })
+        };
+        try
+        {
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = workspace, ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+            var owner = new JsonObject { ["muxSessionId"] = "freshness-owner" };
+            var foreign = new JsonObject { ["muxSessionId"] = "freshness-foreign" };
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            try
+            {
+                JsonObject Expected() => new()
+                {
+                    ["expected_process_id"] = Environment.ProcessId,
+                    ["expected_process_name"] = "fixtureapp",
+                    ["expected_workspace"] = workspace,
+                    ["expected_sources"] = new JsonArray(source),
+                    ["expected_modules"] = new JsonArray(artifact),
+                    ["expected_artifacts"] = new JsonArray(artifact),
+                    ["require_active_process"] = true
+                };
+                var before = (await driver.ReadNativeActionsAsync()).Count;
+                var pass = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), owner);
+                Assert.Equal("PASS", pass["data"]?["status"]?.GetValue<string>());
+                Assert.Equal(Environment.ProcessId, pass["data"]?["process"]?["process_id"]?.GetValue<int>());
+                Assert.Equal("FixtureApp", pass["data"]?["process"]?["process_name"]?.GetValue<string>());
+                Assert.True(pass["data"]?["workspace"]?["matched"]?.GetValue<bool>());
+                Assert.Equal(source, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["loaded_sources"]?["paths"]))?.GetValue<string>());
+                Assert.Equal("Symbols loaded.", Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]))?["symbolStatus"]?.GetValue<string>());
+                Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
+                Assert.Empty(Assert.IsType<JsonArray>(pass["data"]?["warnings"]));
+                Assert.Empty(Assert.IsType<JsonArray>(pass["data"]?["mismatches"]));
+                Assert.NotNull((await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), foreign))["error"]);
+                Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), new JsonObject()))["data"]?["status"]?.GetValue<string>());
+                var failed = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject
+                {
+                    ["expected_process_id"] = 0,
+                    ["expected_process_name"] = "DifferentApp",
+                    ["expected_workspace"] = other,
+                    ["expected_sources"] = new JsonArray(Path.Combine(other, "Missing.cs")),
+                    ["expected_modules"] = new JsonArray(missing),
+                    ["expected_artifacts"] = new JsonArray(missing)
+                }, owner);
+                Assert.Equal("FAIL", failed["data"]?["status"]?.GetValue<string>());
+                var kinds = Assert.IsType<JsonArray>(failed["data"]?["mismatches"]).Select(static item => item?["kind"]?.GetValue<string>()).ToArray();
+                foreach (var kind in new[] { "process_id_mismatch", "process_name_mismatch", "workspace_mismatch", "source_workspace_mismatch", "expected_source_missing", "expected_module_missing", "artifact_missing" }) Assert.Contains(kind, kinds);
+                Assert.Equal(missing, Assert.Single(Assert.IsType<JsonArray>(failed["data"]?["artifacts"]?["missing"]))?.GetValue<string>());
+                Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+                File.Delete(artifact);
+                var later = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), owner);
+                Assert.Equal("FAIL", later["data"]?["status"]?.GetValue<string>());
+                var laterWarnings = Assert.IsType<JsonArray>(later["data"]?["warnings"]).Select(static item => item?["kind"]?.GetValue<string>()).ToArray();
+                Assert.Contains("loaded_sources_unavailable", laterWarnings);
+                Assert.Contains("modules_unavailable", laterWarnings);
+                Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(later["data"]?["artifacts"]?["missing"]))?.GetValue<string>());
+                Assert.Equal("PASS", pass["data"]?["status"]?.GetValue<string>());
+                Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
+            }
+            finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(root); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Freshness_UnavailableObservationsWarnAndInvalidInputsHaveNoEffects()
+    {
+        var root = ModernMcpScratchDirectory.Create();
+        var artifact = Path.Combine(root, "App.dll");
+        await File.WriteAllTextAsync(artifact, "unchanged");
+        try
+        {
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = Path.Combine(root, "absent-root"), ["MCP_PROJECT_ROOT"] = Path.Combine(root, "absent-root") }));
+            var owner = new JsonObject { ["muxSessionId"] = "freshness-unavailable-owner" };
+            var arguments = new JsonObject
+            {
+                ["expected_process_id"] = Environment.ProcessId,
+                ["expected_process_name"] = "FixtureApp",
+                ["expected_workspace"] = root,
+                ["expected_sources"] = new JsonArray(Path.Combine(root, "Program.cs")),
+                ["expected_modules"] = new JsonArray(artifact),
+                ["expected_artifacts"] = new JsonArray(artifact),
+                ["require_active_process"] = true
+            };
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", arguments, owner);
+            Assert.Equal("WARN", result["data"]?["status"]?.GetValue<string>());
+            Assert.Null(result["data"]?["process"]?["process_id"]);
+            Assert.Null(result["data"]?["process"]?["process_name"]);
+            Assert.Null(result["data"]?["workspace"]?["matched"]);
+            Assert.Empty(Assert.IsType<JsonArray>(result["data"]?["mismatches"]));
+            var kinds = Assert.IsType<JsonArray>(result["data"]?["warnings"]).Select(static item => item?["kind"]?.GetValue<string>()).ToArray();
+            foreach (var kind in new[] { "process_id_unavailable", "process_name_unavailable", "workspace_unavailable", "loaded_sources_unavailable", "modules_unavailable" }) Assert.Contains(kind, kinds);
+            Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(result["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
+            foreach (var invalid in new[] {
+                new JsonObject { ["expected_process_id"] = "not-an-integer" },
+                new JsonObject { ["expected_process_name"] = new JsonArray("bad") },
+                new JsonObject { ["expected_workspace"] = true },
+                new JsonObject { ["expected_sources"] = new JsonArray(42) },
+                new JsonObject { ["expected_modules"] = "not-an-array" },
+                new JsonObject { ["expected_artifacts"] = new JsonArray(false) },
+                new JsonObject { ["require_active_process"] = "true" },
+                new JsonObject { ["unexpected"] = true } })
+                Assert.NotNull((await LegacyConsoleCallAsync(driver, "verify_debug_freshness", invalid, owner))["error"]);
+            Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+            Assert.Equal("unchanged", await File.ReadAllTextAsync(artifact));
+            Assert.Equal("WARN", (await LegacyConsoleCallAsync(driver, "verify_debug_freshness", arguments, owner))["data"]?["status"]?.GetValue<string>());
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(root); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_Inventories_ObserveEventTransitionsAndRefreshSources()
     {
         var script = new JsonObject

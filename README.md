@@ -53,7 +53,7 @@ only `start_debug`, `attach_debug`, `get_debug_state`, `debuggee_activity`, `get
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `write_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`,
+`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`,
 `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references`, `get_source_context`, `search_source`, `add_tracepoint`,
 `remove_tracepoint`, `get_trace_log`, `clear_trace_log`, `mark_trace_cursor`,
@@ -79,6 +79,18 @@ over 1–30,000 ms (default 1,000) from an initially running session. It does no
 measure executed instructions. A successful launch is projected as running until
 the first lifecycle event, as in Python; this is not an observed DAP `continued` event.
 Unprojectable states, including stops without a thread ID, are refused.
+
+`verify_debug_freshness` compares recorded process metadata, the selected project
+root, reader-observed source and module inventories, and artifact existence.
+`require_active_process` checks only whether a PID was recorded: neither it nor
+`PASS` proves that a process is alive or is the original process instance. The
+observations and filesystem checks are not an atomic snapshot. Incomplete native
+inventories or oversized results are refused; absent observations produce
+warnings. An identified foreign mux owner is refused, while an untagged direct
+read remains allowed. Native name matching uses .NET case-insensitive comparison
+and invariant lowercasing, not Python's full Unicode `casefold`; path display and
+normalization also follow .NET rules. Full parity remains open (#552, #550). The
+standalone tool does not populate Python runtime-smoke evidence storage.
 
 `get_build_diagnostics(include_warnings=true)` reads the latest accepted legacy
 pre-build result, retained across stop. A new pre-build clears the prior result;

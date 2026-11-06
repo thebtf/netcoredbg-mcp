@@ -54,7 +54,7 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `write_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`,
+`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`,
 `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
 привязку сессии и отдельные форматы ответов в стиле Python.
@@ -80,6 +80,18 @@ tracepoint-инструменты, поэтому `traceEntries` равен ну
 считается состоянием running до первого события жизненного цикла, как в Python;
 это не наблюдённое событие DAP `continued`. Неподтверждённые состояния, в том
 числе остановка без ID потока, приводят к ошибке.
+
+`verify_debug_freshness` сравнивает записанные данные процесса, корень проекта,
+наблюдаемые через DAP списки исходников и модулей и наличие артефактов.
+`require_active_process` проверяет только наличие записанного PID: ни этот
+параметр, ни `PASS` не доказывают, что процесс жив или что это тот же экземпляр.
+Наблюдения и проверка файлов не образуют атомарный снимок. При неполных списках
+или слишком большом ответе инструмент возвращает ошибку; при отсутствии данных —
+предупреждения. Запрос с чужим mux ID отклоняется, прямое чтение без ID разрешено.
+Сравнение имён использует правила .NET, а не полный Unicode `casefold` Python;
+отображение и нормализация путей тоже следуют правилам .NET. Полная совместимость
+не заявлена (#552, #550). Отдельный инструмент не записывает evidence в хранилище
+Python runtime-smoke.
 
 `get_build_diagnostics(include_warnings=true)` возвращает результат последней
 принятой legacy pre-build и сохраняет его после stop. Новая pre-build очищает
