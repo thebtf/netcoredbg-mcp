@@ -82,7 +82,7 @@ internal sealed class LegacyOutputEvidence
         var matches = new List<object>();
         var forbiddenMatches = new List<object>();
         var missing = new List<string>();
-        var foundForbidden = false;
+        var forbiddenCount = 0;
         try
         {
             for (var i = 0; i < compiled.Count; i++)
@@ -95,7 +95,7 @@ internal sealed class LegacyOutputEvidence
                     CheckBudget(timer, cancellationToken);
                     if (!compiled[i].IsMatch(lines[line])) continue;
                     found = true;
-                    if (!isRequired) foundForbidden = true;
+                    if (!isRequired) forbiddenCount++;
                     var evidence = isRequired ? matches : forbiddenMatches;
                     if (evidence.Count < maxMatches)
                     {
@@ -109,13 +109,13 @@ internal sealed class LegacyOutputEvidence
         }
         catch (RegexMatchTimeoutException) { throw new InvalidOperationException("OUTPUT_ASSERT_TIMEOUT"); }
         CheckBudget(timer, cancellationToken);
-        var pass = missing.Count == 0 && !foundForbidden;
+        var pass = missing.Count == 0 && forbiddenCount == 0;
         return new
         {
             status = pass ? "PASS" : "FAIL",
             reason = pass ? "output assertions passed" : "output assertions failed",
             checkpoint,
-            summary = new { checkpoint, matched_line_count = matches.Count, missing_count = missing.Count, forbidden_count = forbiddenMatches.Count },
+            summary = new { checkpoint, matched_line_count = matches.Count, missing_count = missing.Count, forbidden_count = forbiddenCount },
             searched_range = new
             {
                 start_entry = position.EntryCount,
@@ -129,7 +129,7 @@ internal sealed class LegacyOutputEvidence
             matches,
             missing_required = missing,
             forbidden_matches = forbiddenMatches,
-            evidence_refs = new[] { new { kind = "output_assertion", @ref = $"output:{checkpoint}", summary = $"matched={matches.Count} missing={missing.Count} forbidden={forbiddenMatches.Count}" } }
+            evidence_refs = new[] { new { kind = "output_assertion", @ref = $"output:{checkpoint}", summary = $"matched={matches.Count} missing={missing.Count} forbidden={forbiddenCount}" } }
         };
     }
 
