@@ -105,7 +105,7 @@ internal static class Program
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
                 if (sessions.LegacyCompat)
-                    return NativeCodeSearch.IsNativeTool(context.Params.Name)
+                    return NativeCodeSearch.IsNativeTool(context.Params.Name) || context.Params.Name == "search_source"
                         ? await sessions.CallLegacySearchAsync(projectSearch, context, cancellationToken).ConfigureAwait(false)
                         : await sessions.CallLegacyAsync(context, cancellationToken).ConfigureAwait(false);
                 if (!NativeCodeSearch.IsNativeTool(context.Params.Name))
@@ -7477,6 +7477,7 @@ internal static class Program
                 NativeCodeSearchCatalog.Definition("find_code_symbol"),
                 NativeCodeSearchCatalog.Definition("find_code_references"),
                 NativeCodeSearchCatalog.Definition("get_source_context"),
+                NativeCodeSearchCatalog.Definition("search_source"),
                 Tool("stop_debug", "Stop the implicit session and release its owner.", """{"type":"object","properties":{},"additionalProperties":false}"""),
             ],
         };

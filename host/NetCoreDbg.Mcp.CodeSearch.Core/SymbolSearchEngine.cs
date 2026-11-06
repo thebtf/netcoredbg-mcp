@@ -160,6 +160,74 @@ public sealed class SymbolSearchEngine
         return results;
     }
 
+    /// <summary>Searches project source lines with a cooperative deadline and a bounded .NET regex match.</summary>
+    public IReadOnlyList<ReferenceMatch> SearchSource(
+        string pattern,
+        string? fileGlob,
+        double timeoutSeconds,
+        int maxResults,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(pattern);
+        if (pattern.Length == 0)
+            throw new ArgumentException("Search pattern must not be empty", nameof(pattern));
+        if (!double.IsFinite(timeoutSeconds) || timeoutSeconds <= 0
+            || timeoutSeconds > (int.MaxValue - 1) / 1000d)
+            throw new ArgumentOutOfRangeException(nameof(timeoutSeconds));
+        if (maxResults < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxResults));
+
+        var timeout = TimeSpan.FromMilliseconds(Math.Max(1, Math.Ceiling(timeoutSeconds * 1000)));
+        var regex = new Regex(pattern, RegexOptions.CultureInvariant, timeout);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            var operation = StartOperation("search_source", deadline.Token);
+            var rules = LoadGitIgnoreRules(operation);
+            var limit = Math.Min(maxResults, _settings.MaximumReferenceResults);
+            var results = new List<ReferenceMatch>();
+            foreach (var path in SourceFiles(fileGlob, rules, operation))
+            {
+                var relativeFile = RelativePath(path);
+                var lineNumber = 0;
+                foreach (var line in ReadLines(path, operation))
+                {
+                    operation.Check();
+                    lineNumber++;
+                    var matches = regex.IsMatch(line.Span);
+                    operation.Check();
+                    if (!matches)
+                        continue;
+
+                    if (_settings.Strict && results.Count == _settings.MaximumReferenceResults)
+                        ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
+                    results.Add(new ReferenceMatch(relativeFile, lineNumber, FormatContext(line.Span)));
+                    if (!_settings.Strict && results.Count >= limit)
+                        return results;
+                    if (_settings.Strict && maxResults < _settings.MaximumReferenceResults && results.Count == maxResults)
+                    {
+                        results.Sort(ReferenceMatchComparer.Instance);
+                        return results;
+                    }
+                }
+            }
+            operation.Check();
+            if (_settings.Strict)
+                results.Sort(ReferenceMatchComparer.Instance);
+            return results;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            throw new TimeoutException("search_source exceeded its cooperative timeout");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new TimeoutException("search_source regex match exceeded its timeout");
+        }
+    }
+
     public SourceContext GetSourceContext(
         string filePath,
         int line,
@@ -1061,7 +1129,16 @@ public sealed class SymbolSearchEngine
 
                     var characterClass = pattern[(index + 1)..closing];
                     expression.Append('[');
-                    expression.Append(characterClass[0] == '!' ? "^" + characterClass[1..] : characterClass);
+                    if (characterClass[0] == '!')
+                    {
+                        expression.Append('^');
+                        expression.Append(characterClass.AsSpan(1));
+                    }
+                    else
+                    {
+                        if (characterClass[0] == '^') expression.Append('\\');
+                        expression.Append(characterClass);
+                    }
                     expression.Append(']');
                     index = closing;
                     break;

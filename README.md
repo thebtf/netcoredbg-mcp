@@ -161,12 +161,13 @@ serialized response has a separate 256 KiB bound. Limit violations fail rather
 than returning silent partial data. Sorting uses .NET ordinal string order;
 non-finite numeric collection values are refused. Full Python parity is not claimed.
 
-The three native code-search tools work before and during a session. Their
+The four native code-search tools work before and during a session. Their
 Python-style envelopes report the current observed state at response time.
 Operator project pins remain authoritative; otherwise initialize-era client
 roots are resolved per request, with the existing startup-directory fallback.
-Search remains bounded by native policy and project boundaries; `search_source`
-is not implemented in this mode, even though Python-compatible action hints name it.
+`search_source` uses case-sensitive .NET regular expressions, not Python `re`
+parity, and returns at most 1,000 matches. Its timeout is cooperative and
+bounds each regex match; blocked file I/O or glob matching may exceed it.
 
 Mux mutation admission uses `_meta.muxSessionId`; reads remain available while
 execution waits, and the opt-in mode advertises `experimental.x-mux` with
