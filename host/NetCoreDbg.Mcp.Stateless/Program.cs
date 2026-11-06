@@ -311,6 +311,9 @@ internal static class Program
         private const string ClearBreakpoints = "clear_breakpoints";
         private const string AddTracepoint = "add_tracepoint";
         private const string RemoveTracepoint = "remove_tracepoint";
+        private const string GroupCreate = "instrumentation_group_create";
+        private const string GroupInspect = "instrumentation_group_inspect";
+        private const string GroupClear = "instrumentation_group_clear";
         private const string GetTraceLog = "get_trace_log";
         private const string ClearTraceLog = "clear_trace_log";
         private const string MarkTraceCursor = "mark_trace_cursor";
@@ -364,6 +367,26 @@ internal static class Program
         private readonly SemaphoreSlim _legacyBreakpointGate = new(1, 1);
         // Identity survives option changes; incarnation fences observations from earlier revisions.
         private readonly List<(string File, int Line, long Incarnation, long Identity, string? Condition, string? HitCondition)> _legacyBreakpoints = [];
+        private sealed class LegacyGroupBreakpoint(string file, int line, string? condition, string? hitCondition, long incarnation, long identity)
+        {
+            internal string File { get; } = file;
+            internal int Line { get; } = line;
+            internal string? Condition { get; } = condition;
+            internal string? HitCondition { get; } = hitCondition;
+            internal long Incarnation { get; } = incarnation;
+            internal long Identity { get; } = identity;
+            internal long ObservedIncarnation { get; set; }
+            internal bool Verified { get; set; }
+            internal int? DapLine { get; set; }
+            internal int? Id { get; set; }
+        }
+        private sealed class LegacyInstrumentationGroup(string name)
+        {
+            internal string Name { get; } = name;
+            internal List<LegacyGroupBreakpoint> Breakpoints { get; } = [];
+            internal List<LegacyTracepoint> Tracepoints { get; } = [];
+        }
+        private readonly Dictionary<string, LegacyInstrumentationGroup> _legacyGroups = new(StringComparer.Ordinal);
         private sealed class LegacyTracepoint(string id, string file, int line, string expression, long incarnation, long identity)
         {
             internal string Id { get; } = id;
@@ -374,6 +397,7 @@ internal static class Program
             internal long Identity { get; } = identity;
             internal long ObservedIncarnation { get; set; }
             internal int? DapLine { get; set; }
+            internal int? BreakpointId { get; set; }
             internal bool Verified { get; set; }
             internal long HitCount { get; set; }
             internal double LastHit { get; set; } = double.NegativeInfinity;
@@ -397,6 +421,7 @@ internal static class Program
         private NetCoreDbgSession? _legacyBreakpointObserverSession;
         private readonly StringComparer _legacyBreakpointPathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         private readonly HashSet<string> _legacyUnconfirmedBreakpointFiles = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        private readonly HashSet<string> _legacyGroupUnconfirmedFiles = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         private bool _legacyUnconfirmedBreakpointOverflow;
         private string? _legacyBreakpointSessionId;
         private long _legacySessionGeneration;
@@ -783,7 +808,7 @@ internal static class Program
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
-                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression
+                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
@@ -852,7 +877,7 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint or ClearTraceLog or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
@@ -884,8 +909,6 @@ internal static class Program
                     _legacyOwner = muxId;
                     if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
                 }
-                if (name is AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint)
-                    _legacyTraceRevision++;
                 if (name is MarkTraceCursor or GetTraceDelta)
                     return LegacyTraceCursorOperation(name, arguments);
                 if (name == GetTraceLog)
@@ -910,32 +933,36 @@ internal static class Program
                     _legacyTraceLog.Clear();
                     return LegacyResponse(new { cleared });
                 }
-                if (name is AddTracepoint or RemoveTracepoint)
+                if (name is GroupCreate or GroupInspect or GroupClear)
                 {
-                    LegacyTracepoint point;
-                    if (name == AddTracepoint)
+                    if (!arguments.TryGetValue("name", out var groupNameValue) || groupNameValue.ValueKind != JsonValueKind.String
+                        || groupNameValue.GetString() is not { } groupName)
+                        return LegacyGroupFailure(string.Empty, "invalid group name");
+                    if (name == GroupCreate && !ValidLegacyGroupName(groupName))
+                        return LegacyGroupFailure(groupName, "invalid group name");
+                    if (name == GroupCreate && _legacyGroups.ContainsKey(groupName))
+                        return LegacyGroupFailure(groupName, "group already exists");
+                    if (name != GroupCreate && !_legacyGroups.ContainsKey(groupName))
+                        return LegacyGroupFailure(groupName, "group not found");
+                    if (name == GroupInspect)
+                        return WithLegacyBreakpointState(() => LegacyGroupResponse(_legacyGroups[groupName], inspect: true));
+                    if (_legacyStarting || _legacyStopping || (_legacySessionId is null && _legacyBreakpointSessionId is not null))
+                        return LegacyError("A breakpoint or lifecycle operation is still settling.");
+
+                    LegacyInstrumentationGroup group;
+                    if (name == GroupCreate)
                     {
-                        _legacyTraceManagerCreated = true;
-                        if (!breakpointSourceValid || !arguments.TryGetValue("line", out var traceLine)
-                            || !TryReadOutputLineCount(traceLine, out var lineNumber) || lineNumber is < 1 or > int.MaxValue
-                            || !arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
-                            || expression.GetString() is not { } expressionText || Encoding.UTF8.GetByteCount(expressionText) > 4096)
-                            return LegacyError("Invalid tracepoint source, line or expression.");
-                        if (_legacyTracepoints.Count + _legacyBreakpoints.Count + _legacyFunctionBreakpoints.Count >= MaximumBreakpointCount)
-                            return LegacyError("Breakpoint limit reached.");
-                        var existing = FindLegacyBreakpoint(breakpointFile!, (int)lineNumber);
-                        var incarnation = ++_legacyBreakpointIncarnation;
-                        var identity = existing >= 0 ? _legacyBreakpoints[existing].Identity
-                            : _legacyTracepoints.FirstOrDefault(item => item.Line == (int)lineNumber && _legacyBreakpointPathComparer.Equals(item.File, breakpointFile))?.Identity ?? incarnation;
-                        point = new LegacyTracepoint($"tp-{++_legacyTraceCounter}", breakpointFile!, (int)lineNumber, expressionText, incarnation, identity);
+                        if (!TryCreateLegacyGroup(groupName, arguments, out group))
+                            return LegacyGroupFailure(groupName, "invalid or empty instrumentation group");
+                        if (group.Breakpoints.Any(point => !LegacyOwnersCompatible(point.File, point.Line, group))
+                            || group.Tracepoints.Any(point => !LegacyOwnersCompatible(point.File, point.Line, group)))
+                            return LegacyGroupFailure(groupName, "unsupported overlapping breakpoint predicates or tracepoint");
                     }
-                    else
-                    {
-                        if (!arguments.TryGetValue("tracepoint_id", out var idValue) || idValue.ValueKind != JsonValueKind.String
-                            || _legacyTracepoints.FirstOrDefault(item => item.Id == idValue.GetString()) is not { } existing)
-                            return LegacyError("Tracepoint not found.");
-                        point = existing;
-                    }
+                    else group = _legacyGroups[groupName];
+                    var files = group.Breakpoints.Select(static point => point.File)
+                        .Concat(group.Tracepoints.Select(static point => point.File)).Distinct(_legacyBreakpointPathComparer).ToArray();
+                    if (files.Any(file => !IsLegacyGroupMutationSourceConfirmed(file)))
+                        return LegacyError("Breakpoint application is unconfirmed; stop the session before changing this group.", "unknown");
                     if (_legacySessionId is not null)
                     {
                         if (!_legacyBreakpointGate.Wait(0)) return LegacyError("A breakpoint update is already in progress.");
@@ -943,6 +970,96 @@ internal static class Program
                         _legacyBreakpointSessionId = _legacySessionId;
                     }
                     cancellationToken.ThrowIfCancellationRequested();
+                    _legacyTraceRevision++;
+                    if (name == GroupCreate)
+                    {
+                        _legacyGroups.Add(groupName, group);
+                        _legacyTracepoints.AddRange(group.Tracepoints);
+                        if (group.Tracepoints.Count != 0) _legacyTraceManagerCreated = true;
+                    }
+                    if (_legacySessionId is { } groupSession)
+                    {
+                        var replacements = files.Select(file => (File: file,
+                            Lines: SnapshotLegacyBreakpointLines(file, name == GroupClear ? group : null))).ToArray();
+                        foreach (var file in files)
+                        {
+                            MarkLegacyBreakpointUnconfirmed(file);
+                            _legacyGroupUnconfirmedFiles.Add(file);
+                        }
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        CallToolResult? failed = null;
+                        foreach (var replacement in replacements)
+                        {
+                            var groupRequest = LegacyRequest(name == GroupClear ? RemoveBreakpoint : AddBreakpoint, groupSession, new Dictionary<string, JsonElement>
+                            {
+                                ["file"] = JsonSerializer.SerializeToElement(replacement.File),
+                                ["line"] = JsonSerializer.SerializeToElement(name == GroupClear ? 1 : replacement.Lines[0].Line),
+                            });
+                            var groupUpdate = await UpdateBreakpointAsync(groupRequest, context.JsonRpcRequest.Id, cancellationToken,
+                                remove: name == GroupClear, replacement.Lines).ConfigureAwait(false);
+                            if (groupUpdate.IsError == true) { failed = groupUpdate; break; }
+                        }
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        if (_legacySessionId != groupSession || failed is not null)
+                            return LegacyError("Group retained; breakpoint application is unconfirmed. Do not retry automatically.", "unknown");
+                        foreach (var file in files)
+                        {
+                            _legacyGroupUnconfirmedFiles.Remove(file);
+                            _legacyUnconfirmedBreakpointFiles.Remove(file);
+                        }
+                    }
+                    if (name == GroupClear)
+                    {
+                        _legacyGroups.Remove(groupName);
+                        foreach (var point in group.Tracepoints) _legacyTracepoints.Remove(point);
+                        _legacyResources.SignalBreakpoints();
+                        return LegacyGroupCleared(group);
+                    }
+                    _legacyResources.SignalBreakpoints();
+                    return WithLegacyBreakpointState(() => LegacyGroupResponse(group, inspect: false));
+                }
+                if (name is AddTracepoint or RemoveTracepoint)
+                {
+                    LegacyTracepoint point;
+                    if (name == AddTracepoint)
+                    {
+                        if (breakpointSourceValid && IsLegacyGroupSourceQuarantined(breakpointFile!))
+                            return LegacyError("Breakpoint application is unconfirmed; stop the session before changing this source.", "unknown");
+                        if (!breakpointSourceValid || !arguments.TryGetValue("line", out var traceLine)
+                            || !TryReadOutputLineCount(traceLine, out var lineNumber) || lineNumber is < 1 or > int.MaxValue
+                            || !arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
+                            || expression.GetString() is not { } expressionText || Encoding.UTF8.GetByteCount(expressionText) > 4096)
+                            return LegacyError("Invalid tracepoint source, line or expression.");
+                        if (!LegacyOwnersCompatible(breakpointFile!, (int)lineNumber, addTrace: true))
+                            return LegacyError("Unsupported overlapping group predicate and tracepoint.");
+                        if (LegacyOwnedBreakpointCount() >= MaximumBreakpointCount)
+                            return LegacyError("Breakpoint limit reached.");
+                        var incarnation = ++_legacyBreakpointIncarnation;
+                        var identity = LegacyPhysicalIdentity(breakpointFile!, (int)lineNumber) ?? incarnation;
+                        point = new LegacyTracepoint($"tp-{++_legacyTraceCounter}", breakpointFile!, (int)lineNumber, expressionText, incarnation, identity);
+                    }
+                    else
+                    {
+                        if (!arguments.TryGetValue("tracepoint_id", out var idValue) || idValue.ValueKind != JsonValueKind.String
+                            || _legacyTracepoints.FirstOrDefault(item => item.Id == idValue.GetString()) is not { } existing)
+                            return LegacyError("Tracepoint not found.");
+                        if (_legacyGroups.Values.Any(group => group.Tracepoints.Contains(existing)))
+                            return LegacyError("Tracepoint belongs to an instrumentation group.");
+                        point = existing;
+                    }
+                    if (IsLegacyGroupSourceQuarantined(point.File))
+                        return LegacyError("Breakpoint application is unconfirmed; stop the session before changing this source.", "unknown");
+                    if (_legacySessionId is not null)
+                    {
+                        if (!_legacyBreakpointGate.Wait(0)) return LegacyError("A breakpoint update is already in progress.");
+                        breakpointHeld = true;
+                        _legacyBreakpointSessionId = _legacySessionId;
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _legacyTraceRevision++;
+                    if (name == AddTracepoint) _legacyTraceManagerCreated = true;
                     if (name == AddTracepoint) _legacyTracepoints.Add(point); else _legacyTracepoints.Remove(point);
                     var requested = SnapshotLegacyBreakpointLines(point.File);
                     if (_legacySessionId is { } traceSession)
@@ -977,7 +1094,7 @@ internal static class Program
                     var index = _legacyFunctionBreakpoints.FindIndex(item => item.Name == function);
                     var previousFunction = index >= 0 ? _legacyFunctionBreakpoints[index] : null;
                     if (name == RemoveFunctionBreakpoint && index < 0) return LegacyResponse(new { removed = false, function });
-                    if (name == AddFunctionBreakpoint && index < 0 && _legacyBreakpoints.Count + _legacyFunctionBreakpoints.Count >= MaximumBreakpointCount)
+                    if (name == AddFunctionBreakpoint && index < 0 && LegacyOwnedBreakpointCount() >= MaximumBreakpointCount)
                         return LegacyError("Breakpoint limit reached.");
                     if (name == AddFunctionBreakpoint && !LegacyFunctionOptionsFit(index, function, condition, hitCondition))
                         return LegacyError("Breakpoint options exceed the retained state limit.");
@@ -992,6 +1109,7 @@ internal static class Program
                         _legacyBreakpointSessionId = _legacySessionId;
                     }
                     cancellationToken.ThrowIfCancellationRequested();
+                    _legacyTraceRevision++;
                     if (name == RemoveFunctionBreakpoint) _legacyFunctionBreakpoints.RemoveAt(index);
                     else
                     {
@@ -1040,6 +1158,8 @@ internal static class Program
                             return LegacyResponse(LegacyBreakpointSnapshot(breakpointFile, includeHits: true));
                         });
                     }
+                    if (breakpointFile is null ? _legacyGroupUnconfirmedFiles.Count != 0 : IsLegacyGroupSourceQuarantined(breakpointFile))
+                        return LegacyError("Breakpoint application is unconfirmed; stop the session before clearing this source.", "unknown");
                     var files = new List<string>();
                     var clearLines = new Dictionary<string, LegacyRequestedLine[]>(_legacyBreakpointPathComparer);
                     var confirmedFiles = new List<string>();
@@ -1067,6 +1187,7 @@ internal static class Program
                             _legacyBreakpointSessionId = _legacySessionId;
                         }
                         cancellationToken.ThrowIfCancellationRequested();
+                        _legacyTraceRevision++;
                         for (var index = _legacyBreakpoints.Count - 1; index >= 0; index--)
                         {
                             var breakpoint = _legacyBreakpoints[index];
@@ -1078,7 +1199,7 @@ internal static class Program
                         if (_legacySessionId is not null)
                             foreach (var file in files) MarkLegacyBreakpointUnconfirmed(file);
                         if (breakpointFile is null && _legacySessionId is null) _legacyFunctionBreakpoints.Clear();
-                        if (_legacyBreakpoints.Count == 0) _legacyBreakpointObservationsIncomplete = false;
+                        if (!LegacyHasStoppingBreakpoints()) _legacyBreakpointObservationsIncomplete = false;
                         if (files.Count > 0) _legacyResources.SignalBreakpoints();
                         return null;
                     });
@@ -1150,6 +1271,11 @@ internal static class Program
                         return LegacyError("Invalid breakpoint line.");
                     if (!breakpointSourceValid) return LegacyError("Breakpoint source unavailable.");
                     breakpointLine = (int)lineNumber;
+                    if (IsLegacyGroupSourceQuarantined(breakpointFile!))
+                        return LegacyError("Breakpoint application is unconfirmed; stop the session before changing this source.", "unknown");
+                    if (name == AddBreakpoint && !LegacyOwnersCompatible(breakpointFile!, breakpointLine,
+                        overrideDirect: true, directCondition: breakpointCondition, directHitCondition: breakpointHitCondition))
+                        return LegacyError("Unsupported overlapping breakpoint predicates.");
                     arguments.Remove("condition");
                     arguments.Remove("hit_condition");
                     arguments["file"] = JsonSerializer.SerializeToElement(breakpointFile);
@@ -1157,7 +1283,7 @@ internal static class Program
                     var admission = WithLegacyBreakpointState<CallToolResult?>(() =>
                     {
                         var index = FindLegacyBreakpoint(breakpointFile!, breakpointLine);
-                        if (name == AddBreakpoint && index < 0 && _legacyBreakpoints.Count + _legacyFunctionBreakpoints.Count >= MaximumBreakpointCount)
+                        if (name == AddBreakpoint && index < 0 && LegacyOwnedBreakpointCount() >= MaximumBreakpointCount)
                             return LegacyError("Breakpoint limit reached.");
                         if (name == AddBreakpoint && !LegacyBreakpointOptionsFit(index, breakpointCondition, breakpointHitCondition))
                             return LegacyError("Breakpoint options exceed the retained state limit.");
@@ -1165,10 +1291,12 @@ internal static class Program
                         {
                             if (name == AddBreakpoint)
                             {
+                                _legacyTraceRevision++;
                                 ApplyLegacyBreakpoint(breakpointFile!, breakpointLine, false, breakpointCondition, breakpointHitCondition);
                                 _legacyResources.SignalBreakpoints();
                                 return LegacyResponse(new { file = breakpointFile, line = breakpointLine, condition = breakpointCondition, verified = false });
                             }
+                            if (index >= 0) _legacyTraceRevision++;
                             var removed = ApplyLegacyBreakpoint(breakpointFile!, breakpointLine, true);
                             if (removed) _legacyResources.SignalBreakpoints();
                             return LegacyResponse(new { removed });
@@ -1177,6 +1305,7 @@ internal static class Program
                         breakpointHeld = true;
                         _legacyBreakpointSessionId = _legacySessionId;
                         cancellationToken.ThrowIfCancellationRequested();
+                        if (name == AddBreakpoint || index >= 0) _legacyTraceRevision++;
                         breakpointRemoved = ApplyLegacyBreakpoint(breakpointFile!, breakpointLine, name == RemoveBreakpoint, breakpointCondition, breakpointHitCondition);
                         if (name == AddBreakpoint || breakpointRemoved) _legacyResources.SignalBreakpoints();
                         if (name == RemoveBreakpoint && !breakpointRemoved) return LegacyResponse(new { removed = false });
@@ -1230,9 +1359,10 @@ internal static class Program
                             breakpointSession.WithLegacyBreakpointLock(() =>
                             {
                                 ReconcileLegacyBreakpointObservations(breakpointSession);
-                                _legacyBreakpointObservationsIncomplete = _legacyBreakpoints.Count != 0 && !breakpointSession.LegacyBreakpointEventsComplete;
+                                _legacyBreakpointObservationsIncomplete = LegacyHasStoppingBreakpoints() && !breakpointSession.LegacyBreakpointEventsComplete;
                                 return true;
                             });
+                        ClearLegacyGroupsAfterConfirmedStop();
                         foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
                             _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
                         _legacySessionId = null;
@@ -1271,7 +1401,7 @@ internal static class Program
                     }
                     var launchConfig = new Dictionary<string, JsonElement>(arguments, StringComparer.Ordinal);
                     arguments["justMyCode"] = JsonSerializer.SerializeToElement(false);
-                    var startupFiles = _legacyBreakpoints.Select(static point => point.File).Concat(_legacyTracepoints.Select(static point => point.File)).Distinct(_legacyBreakpointPathComparer);
+                    var startupFiles = _legacyBreakpoints.Select(static point => point.File).Concat(_legacyGroups.Values.SelectMany(static group => group.Breakpoints.Select(static point => point.File))).Concat(_legacyTracepoints.Select(static point => point.File)).Distinct(_legacyBreakpointPathComparer);
                     var startupBreakpoints = startupFiles.SelectMany(file => SnapshotLegacyBreakpointLines(file).Select(line => (File: file, Line: line))).ToArray();
                     arguments["breakpoints"] = JsonSerializer.SerializeToElement(startupBreakpoints.Select(static point => new { file = point.File, line = point.Line.Line }).ToArray());
                     for (var index = 0; index < _legacyFunctionBreakpoints.Count; index++)
@@ -1284,7 +1414,9 @@ internal static class Program
                     var traceGeneration = _legacySessionGeneration;
                     _legacyTraceLastContext = null;
                     _legacyTracePauseVeto = false;
-                    foreach (var point in _legacyTracepoints) { point.Verified = false; point.DapLine = null; point.ObservedIncarnation = 0; }
+                    foreach (var point in _legacyTracepoints) { point.Verified = false; point.DapLine = null; point.BreakpointId = null; point.ObservedIncarnation = 0; }
+                    foreach (var point in _legacyGroups.Values.SelectMany(static group => group.Breakpoints))
+                    { point.Verified = false; point.DapLine = null; point.Id = null; point.ObservedIncarnation = 0; }
                     _legacyStarting = true;
                     _legacyGate.Release();
                     gateHeld = false;
@@ -1594,6 +1726,7 @@ internal static class Program
                         cancellationToken.ThrowIfCancellationRequested();
                         _legacyOutputEvidence.Clear();
                     }
+                    ClearLegacyGroupsAfterConfirmedStop();
                     return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
@@ -1766,9 +1899,10 @@ internal static class Program
                         breakpointSession.WithLegacyBreakpointLock(() =>
                         {
                             ReconcileLegacyBreakpointObservations(breakpointSession);
-                            _legacyBreakpointObservationsIncomplete = _legacyBreakpoints.Count != 0 && !breakpointSession.LegacyBreakpointEventsComplete;
+                            _legacyBreakpointObservationsIncomplete = LegacyHasStoppingBreakpoints() && !breakpointSession.LegacyBreakpointEventsComplete;
                             return true;
                         });
+                    ClearLegacyGroupsAfterConfirmedStop();
                     foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
                         _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
                     _legacySessionId = null;
@@ -2118,14 +2252,14 @@ internal static class Program
                 {
                     _legacyBreakpointObservations.Remove(_legacyBreakpoints[index].Incarnation);
                     _legacyBreakpoints.RemoveAt(index);
-                    if (_legacyBreakpoints.Count == 0) _legacyBreakpointObservationsIncomplete = false;
+                    if (!LegacyHasStoppingBreakpoints()) _legacyBreakpointObservationsIncomplete = false;
                 }
                 return index >= 0;
             }
             if (index < 0)
             {
                 var incarnation = ++_legacyBreakpointIncarnation;
-                var sharedIdentity = _legacyTracepoints.FirstOrDefault(point => point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file))?.Identity ?? incarnation;
+                var sharedIdentity = LegacyPhysicalIdentity(file, line) ?? incarnation;
                 _legacyBreakpoints.Add((file, line, incarnation, sharedIdentity, condition, hitCondition));
             }
             else
@@ -2243,6 +2377,15 @@ internal static class Program
                     foreach (var point in _legacyTracepoints)
                         if (_legacyBreakpointPathComparer.Equals(point.File, file)
                             && (!LegacyTraceObservationCurrent(point) || ((point.DapLine ?? point.Line) == frame.Line && point.Line != physicalLine))) return;
+                    foreach (var groupPoint in _legacyGroups.Values.SelectMany(static group => group.Breakpoints))
+                    {
+                        var sameFile = _legacyBreakpointPathComparer.Equals(groupPoint.File, file);
+                        if (!sameFile && !_legacyBreakpointPathComparer.Equals(Path.GetFileName(groupPoint.File), Path.GetFileName(file))) continue;
+                        if (!groupPoint.Verified) return;
+                        if ((groupPoint.DapLine ?? groupPoint.Line) != frame.Line) continue;
+                        if (!sameFile || groupPoint.Line != physicalLine) return;
+                        mayContinue = false;
+                    }
                     foreach (var user in _legacyBreakpoints)
                     {
                         var sameFile = _legacyBreakpointPathComparer.Equals(user.File, file);
@@ -2347,7 +2490,8 @@ internal static class Program
             });
         }
 
-        private bool LegacyBreakpointObservationsComplete() => _legacyBreakpoints.Count == 0
+        private bool LegacyHasStoppingBreakpoints() => _legacyBreakpoints.Count != 0 || _legacyGroups.Values.Any(static group => group.Breakpoints.Count != 0);
+        private bool LegacyBreakpointObservationsComplete() => !LegacyHasStoppingBreakpoints()
             || (_legacyBreakpointObserverSession is { } session ? session.LegacyBreakpointEventsComplete : !_legacyBreakpointObservationsIncomplete);
 
         private void ReconcileLegacyBreakpointObservations(NetCoreDbgSession session)
@@ -2363,6 +2507,15 @@ internal static class Program
                     point.ObservedIncarnation = observation.Incarnation;
                     point.Verified = observation.Verified && !observation.Removed;
                     point.DapLine = observation.DapLine;
+                    point.BreakpointId = observation.Id;
+                }
+                foreach (var point in _legacyGroups.Values.SelectMany(static group => group.Breakpoints))
+                {
+                    if (point.Line != observation.Line || !_legacyBreakpointPathComparer.Equals(point.File, observation.File)) continue;
+                    point.ObservedIncarnation = observation.Incarnation;
+                    point.Verified = observation.Verified && !observation.Removed;
+                    point.DapLine = observation.DapLine;
+                    point.Id = observation.Id;
                 }
                 if (index < 0 || _legacyBreakpoints[index].Incarnation != observation.Incarnation) continue;
                 if (observation.Removed)
@@ -2372,7 +2525,7 @@ internal static class Program
                 }
                 else _legacyBreakpointObservations[observation.Incarnation] = observation;
             }
-            if (_legacyBreakpoints.Count == 0) _legacyBreakpointObservationsIncomplete = false;
+            if (!LegacyHasStoppingBreakpoints()) _legacyBreakpointObservationsIncomplete = false;
         }
         private void ReconcileLegacyFunctionBreakpoints()
         {
@@ -2398,6 +2551,17 @@ internal static class Program
                     ? new { line = breakpoint.Line, dap_line = observed?.DapLine, condition = breakpoint.Condition, verified = observed?.Verified ?? false, hit_count = _legacyBreakpointObserverSession?.GetLegacyHitCount(breakpoint.File, breakpoint.Line) ?? 0 }
                     : new { line = breakpoint.Line, dap_line = observed?.DapLine, condition = breakpoint.Condition, verified = observed?.Verified ?? false });
             }
+            var groupedLocations = new List<(string File, int Line)>();
+            foreach (var point in _legacyGroups.Values.SelectMany(static group => group.Breakpoints))
+            {
+                if (file is not null && !_legacyBreakpointPathComparer.Equals(file, point.File)) continue;
+                if (FindLegacyBreakpoint(point.File, point.Line) >= 0 || groupedLocations.Any(item => item.Line == point.Line && _legacyBreakpointPathComparer.Equals(item.File, point.File))) continue;
+                groupedLocations.Add((point.File, point.Line));
+                if (!result.TryGetValue(point.File, out var entries)) result[point.File] = entries = [];
+                entries.Add(includeHits
+                    ? new { line = point.Line, dap_line = point.DapLine, condition = point.Condition, verified = point.Verified, hit_count = _legacyBreakpointObserverSession?.GetLegacyHitCount(point.File, point.Line) ?? 0 }
+                    : new { line = point.Line, dap_line = point.DapLine, condition = point.Condition, verified = point.Verified });
+            }
             if (includeHits && file is null && _legacyFunctionBreakpoints.Count > 0)
             {
                 ReconcileLegacyFunctionBreakpoints();
@@ -2409,12 +2573,8 @@ internal static class Program
         private bool LegacyTraceObservationCurrent(LegacyTracepoint point)
         {
             if (!point.Verified) return false;
-            var user = FindLegacyBreakpoint(point.File, point.Line);
-            if (user >= 0) return point.ObservedIncarnation == _legacyBreakpoints[user].Incarnation;
-            foreach (var owner in _legacyTracepoints)
-                if (owner.Line == point.Line && _legacyBreakpointPathComparer.Equals(owner.File, point.File))
-                    return point.ObservedIncarnation == owner.Incarnation;
-            return false;
+            var physical = SnapshotLegacyBreakpointLines(point.File).FirstOrDefault(line => line.Line == point.Line);
+            return point.ObservedIncarnation == physical.Incarnation;
         }
 
         private void MarkLegacyBreakpointUnconfirmed(string file)
@@ -2424,32 +2584,263 @@ internal static class Program
             else _legacyUnconfirmedBreakpointFiles.Add(file);
         }
 
+        private bool IsLegacyGroupSourceQuarantined(string file) => _legacyGroupUnconfirmedFiles.Contains(file);
+
+        private bool IsLegacyGroupMutationSourceConfirmed(string file)
+        {
+            if (_legacyUnconfirmedBreakpointOverflow || IsLegacyGroupSourceQuarantined(file)) return false;
+            foreach (var pending in _legacyUnconfirmedBreakpointFiles)
+            {
+                if (_legacyGroupUnconfirmedFiles.Contains(pending)) continue;
+                if (_legacyBreakpointPathComparer.Equals(pending, file)
+                    || _legacyBreakpointPathComparer.Equals(Path.GetFileName(pending), Path.GetFileName(file))) return false;
+            }
+            return true;
+        }
+
+        private bool LegacyOwnersCompatible(string file, int line, LegacyInstrumentationGroup? candidate = null,
+            bool overrideDirect = false, string? directCondition = null, string? directHitCondition = null, bool addTrace = false)
+        {
+            string? predicate = null;
+            string? hitPredicate = null;
+            var havePredicate = false;
+            var conflict = false;
+            var conditionalGroup = false;
+            void AddStopping(string? condition, string? hit, bool groupOwner)
+            {
+                condition = string.IsNullOrEmpty(condition) ? null : condition;
+                hit = string.IsNullOrEmpty(hit) ? null : hit;
+                if (condition is null && hit is null) return;
+                if (groupOwner) conditionalGroup = true;
+                if (havePredicate && (predicate != condition || hitPredicate != hit)) conflict = true;
+                else { havePredicate = true; predicate = condition; hitPredicate = hit; }
+            }
+            var direct = FindLegacyBreakpoint(file, line);
+            if (overrideDirect) AddStopping(directCondition, directHitCondition, false);
+            else if (direct >= 0) AddStopping(_legacyBreakpoints[direct].Condition, _legacyBreakpoints[direct].HitCondition, false);
+            foreach (var group in _legacyGroups.Values)
+                foreach (var point in group.Breakpoints)
+                    if (point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file))
+                        AddStopping(point.Condition, point.HitCondition, true);
+            if (candidate is not null)
+                foreach (var point in candidate.Breakpoints)
+                    if (point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file))
+                        AddStopping(point.Condition, point.HitCondition, true);
+            var hasTrace = addTrace || _legacyTracepoints.Any(point => point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file))
+                || (candidate is not null && candidate.Tracepoints.Any(point => point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file)));
+            return !conflict && !(conditionalGroup && hasTrace);
+        }
+
         private bool IsLegacyTraceSourceConfirmed(string file)
         {
             if (_legacyUnconfirmedBreakpointOverflow) return false;
+            foreach (var pending in _legacyGroupUnconfirmedFiles)
+                if (_legacyBreakpointPathComparer.Equals(pending, file)
+                    || _legacyBreakpointPathComparer.Equals(Path.GetFileName(pending), Path.GetFileName(file))) return false;
             foreach (var pending in _legacyUnconfirmedBreakpointFiles)
                 if (_legacyBreakpointPathComparer.Equals(pending, file)
                     || _legacyBreakpointPathComparer.Equals(Path.GetFileName(pending), Path.GetFileName(file))) return false;
             return true;
         }
 
-        private LegacyRequestedLine[] SnapshotLegacyBreakpointLines(string file)
+        private void ClearLegacyGroupsAfterConfirmedStop()
+        {
+            if (_legacyGroups.Count != 0)
+            {
+                foreach (var group in _legacyGroups.Values)
+                    foreach (var point in group.Tracepoints) _legacyTracepoints.Remove(point);
+                _legacyGroups.Clear();
+                _legacyTraceRevision++;
+                _legacyResources.SignalBreakpoints();
+            }
+            if (_legacyBreakpoints.Count == 0) _legacyBreakpointObservationsIncomplete = false;
+            _legacyGroupUnconfirmedFiles.Clear();
+            _legacyUnconfirmedBreakpointFiles.Clear();
+            _legacyUnconfirmedBreakpointOverflow = false;
+        }
+
+        private long? LegacyPhysicalIdentity(string file, int line)
+        {
+            var direct = FindLegacyBreakpoint(file, line);
+            if (direct >= 0) return _legacyBreakpoints[direct].Identity;
+            var grouped = _legacyGroups.Values.SelectMany(static group => group.Breakpoints)
+                .FirstOrDefault(point => point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file));
+            if (grouped is not null) return grouped.Identity;
+            return _legacyTracepoints.FirstOrDefault(point => point.Line == line && _legacyBreakpointPathComparer.Equals(point.File, file))?.Identity;
+        }
+
+        private LegacyRequestedLine[] SnapshotLegacyBreakpointLines(string file, LegacyInstrumentationGroup? excluding = null)
         {
             var lines = new List<LegacyRequestedLine>();
+            var grouped = _legacyGroups.Values.Where(group => !ReferenceEquals(group, excluding))
+                .SelectMany(static group => group.Breakpoints).Where(point => _legacyBreakpointPathComparer.Equals(point.File, file)).ToArray();
+            var excludedTraces = excluding?.Tracepoints;
+            var traces = _legacyTracepoints.Where(point => _legacyBreakpointPathComparer.Equals(point.File, file)
+                && (excludedTraces is null || !excludedTraces.Contains(point))).ToArray();
             foreach (var breakpoint in _legacyBreakpoints)
             {
                 if (!_legacyBreakpointPathComparer.Equals(breakpoint.File, file)) continue;
-                var shared = _legacyTracepoints.Any(point => point.Line == breakpoint.Line && _legacyBreakpointPathComparer.Equals(point.File, file));
+                var unconditional = traces.Any(point => point.Line == breakpoint.Line)
+                    || grouped.Any(point => point.Line == breakpoint.Line && string.IsNullOrEmpty(point.Condition) && string.IsNullOrEmpty(point.HitCondition));
                 lines.Add(new LegacyRequestedLine(breakpoint.Line, breakpoint.Incarnation,
-                    shared ? null : breakpoint.Condition, shared ? null : breakpoint.HitCondition, breakpoint.Identity));
+                    unconditional ? null : breakpoint.Condition, unconditional ? null : breakpoint.HitCondition, breakpoint.Identity));
             }
-            foreach (var point in _legacyTracepoints)
+            foreach (var point in grouped)
             {
-                if (_legacyBreakpointPathComparer.Equals(point.File, file) && !lines.Any(line => line.Line == point.Line))
-                    lines.Add(new LegacyRequestedLine(point.Line, point.Incarnation, Identity: point.Identity));
+                if (lines.Any(line => line.Line == point.Line)) continue;
+                var unconditional = traces.Any(trace => trace.Line == point.Line)
+                    || grouped.Any(other => other.Line == point.Line && string.IsNullOrEmpty(other.Condition) && string.IsNullOrEmpty(other.HitCondition));
+                lines.Add(new LegacyRequestedLine(point.Line, point.Incarnation,
+                    unconditional ? null : point.Condition, unconditional ? null : point.HitCondition, point.Identity));
             }
+            foreach (var point in traces)
+                if (!lines.Any(line => line.Line == point.Line))
+                    lines.Add(new LegacyRequestedLine(point.Line, point.Incarnation, Identity: point.Identity));
             return lines.ToArray();
         }
+
+        private int LegacyOwnedBreakpointCount() => _legacyBreakpoints.Count + _legacyTracepoints.Count
+            + _legacyFunctionBreakpoints.Count + _legacyGroups.Values.Sum(static group => group.Breakpoints.Count);
+
+        private static bool ValidLegacyGroupName(string name) => name.Length is > 0 and <= 64
+            && name.All(static c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '-' or '.');
+
+        private bool TryCreateLegacyGroup(string name, Dictionary<string, JsonElement> arguments, out LegacyInstrumentationGroup group)
+        {
+            group = new LegacyInstrumentationGroup(name);
+            var specs = new List<(bool Trace, string File, int Line, string? Condition, string? HitCondition, string? Expression)>();
+            foreach (var (key, trace) in new[] { ("breakpoints", false), ("tracepoints", true) })
+            {
+                if (!arguments.TryGetValue(key, out var items) || items.ValueKind == JsonValueKind.Null) continue;
+                if (items.ValueKind != JsonValueKind.Array) return false;
+                foreach (var item in items.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object || specs.Count >= MaximumBreakpointCount) return false;
+                    var fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                    foreach (var field in item.EnumerateObject())
+                        if (!fields.TryAdd(field.Name, field.Value)) return false;
+                    if (fields.Keys.Any(field => field is not ("file" or "line" or "condition" or "hit_condition" or "expression"))
+                        || !fields.TryGetValue("file", out var fileValue) || fileValue.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(fileValue.GetString())
+                        || !NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(fileValue.GetString()!, out var file, requireExistingFile: true)
+                        || !fields.TryGetValue("line", out var lineValue) || !TryReadOutputLineCount(lineValue, out var line)
+                        || line is < 1 or > int.MaxValue
+                        || !TryReadOptionalLegacyBreakpointOption(fields, "condition", out var condition)
+                        || !TryReadOptionalLegacyBreakpointOption(fields, "hit_condition", out var hitCondition)) return false;
+                    string? expression = null;
+                    if (trace && (!fields.TryGetValue("expression", out var value) || value.ValueKind != JsonValueKind.String
+                        || (expression = value.GetString()) is null || Encoding.UTF8.GetByteCount(expression) > 4096)) return false;
+                    if (!trace && fields.ContainsKey("expression")) return false;
+                    if (trace && (condition is not null || hitCondition is not null)) return false;
+                    if (Encoding.UTF8.GetByteCount(condition ?? string.Empty) + Encoding.UTF8.GetByteCount(hitCondition ?? string.Empty) > 4096) return false;
+                    specs.Add((trace, file, (int)line, condition, hitCondition, expression));
+                }
+            }
+            if (specs.Count == 0 || _legacyGroups.Count >= MaximumBreakpointCount
+                || specs.Count + _legacyBreakpoints.Count + _legacyTracepoints.Count + _legacyFunctionBreakpoints.Count
+                    + _legacyGroups.Values.Sum(static value => value.Breakpoints.Count) > MaximumBreakpointCount) return false;
+            foreach (var spec in specs)
+            {
+                var incarnation = ++_legacyBreakpointIncarnation;
+                var identity = LegacyPhysicalIdentity(spec.File, spec.Line)
+                    ?? group.Breakpoints.FirstOrDefault(point => point.Line == spec.Line && _legacyBreakpointPathComparer.Equals(point.File, spec.File))?.Identity
+                    ?? group.Tracepoints.FirstOrDefault(point => point.Line == spec.Line && _legacyBreakpointPathComparer.Equals(point.File, spec.File))?.Identity
+                    ?? incarnation;
+                if (spec.Trace)
+                    group.Tracepoints.Add(new LegacyTracepoint($"tp-{++_legacyTraceCounter}", spec.File, spec.Line, spec.Expression!, incarnation, identity));
+                else
+                    group.Breakpoints.Add(new LegacyGroupBreakpoint(spec.File, spec.Line, spec.Condition, spec.HitCondition, incarnation, identity));
+            }
+            return true;
+        }
+
+        private CallToolResult LegacyGroupEnvelope(object data, params string[] actions)
+        {
+            var state = LegacySnapshot().State;
+            var result = Result(new
+            {
+                state,
+                next_actions = LegacyActions(state).Concat(actions).Distinct(StringComparer.Ordinal).ToArray(),
+                message = state == "idle" ? "No active debug session." : "Debug session state observed.",
+                data
+            }, false);
+            return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
+                ? result : LegacyError("Instrumentation evidence exceeds 256 KiB.", state);
+        }
+
+        private CallToolResult LegacyGroupFailure(string name, string reason) =>
+            LegacyGroupEnvelope(new { status = "FAIL", reason, group = name }, GroupCreate);
+
+        private CallToolResult LegacyGroupResponse(LegacyInstrumentationGroup group, bool inspect)
+        {
+            var breakpoints = group.Breakpoints.Select(point => new
+            {
+                kind = "breakpoint",
+                file = point.File,
+                line = point.Line,
+                condition = point.Condition,
+                hit_condition = point.HitCondition,
+                verified = point.Verified,
+                id = point.Id,
+                dap_line = point.DapLine,
+                hit_count = _legacyBreakpointObserverSession?.GetLegacyHitCount(point.File, point.Line) ?? 0,
+            }).ToArray();
+            var tracepoints = group.Tracepoints.Select(point =>
+            {
+                var entries = _legacyTraceLog.Where(entry => entry.tracepoint_id == point.Id).ToArray();
+                return new
+                {
+                    kind = "tracepoint",
+                    id = point.Id,
+                    file = point.File,
+                    line = point.Line,
+                    expression = point.Expression,
+                    breakpoint_id = point.BreakpointId,
+                    dap_line = point.DapLine,
+                    hit_count = point.HitCount,
+                    log_count = entries.Length,
+                    logs = entries.Take(20).Select(static entry => new
+                    { entry.line, entry.expression, entry.value, entry.tracepoint_id }).ToArray()
+                };
+            }).ToArray();
+            var summary = new
+            {
+                group = group.Name,
+                breakpoint_count = breakpoints.Length,
+                tracepoint_count = tracepoints.Length,
+                hit_count = breakpoints.Sum(static point => point.hit_count),
+                trace_log_count = tracepoints.Sum(static point => point.log_count)
+            };
+            var applicationConfirmed = group.Breakpoints.Select(static point => point.File)
+                .Concat(group.Tracepoints.Select(static point => point.File)).All(IsLegacyGroupMutationSourceConfirmed);
+            var hitCountsComplete = group.Breakpoints.Count == 0 || (_legacySessionId is null
+                ? !_legacyBreakpointObservationsIncomplete
+                : _legacyBreakpointObserverSession is { } observer && observer.LegacyHitCountsComplete && LegacyBreakpointObservationsComplete());
+            var complete = applicationConfirmed && (!inspect || hitCountsComplete);
+            return LegacyGroupEnvelope(new
+            {
+                status = complete ? "PASS" : "FAIL",
+                reason = !applicationConfirmed ? "instrumentation application is unconfirmed" : !complete ? "breakpoint hit counts are unconfirmed" : inspect ? "instrumentation group inspected" : "instrumentation group created",
+                group = group.Name,
+                breakpoints,
+                tracepoints,
+                application = !applicationConfirmed ? "unknown" : _legacySessionId is null ? "deferred" : "acknowledged",
+                hit_counts_complete = hitCountsComplete,
+                summary,
+                evidence_refs = new[] { new { kind = "instrumentation_group", @ref = $"group:{group.Name}", summary = "instrumentation group" } }
+            },
+                GroupInspect, GroupClear);
+        }
+
+        private CallToolResult LegacyGroupCleared(LegacyInstrumentationGroup group) => LegacyGroupEnvelope(new
+        {
+            status = "PASS",
+            reason = "instrumentation group cleared",
+            group = group.Name,
+            removed = new { breakpoints = group.Breakpoints.Count, tracepoints = group.Tracepoints.Count },
+            summary = new { group = group.Name, breakpoint_count = 0, tracepoint_count = 0, hit_count = 0, trace_log_count = 0 },
+            evidence_refs = new[] { new { kind = "instrumentation_group", @ref = $"group:{group.Name}", summary = "instrumentation group" } },
+        }, GroupCreate);
 
         private bool LegacyFunctionOptionsFit(int replacementIndex, string name, string? condition, string? hitCondition)
         {
@@ -2788,6 +3179,8 @@ internal static class Program
                     RemoveFunctionBreakpoint => key != "function_name",
                     AddTracepoint => key is not ("file" or "line" or "expression"),
                     RemoveTracepoint => key != "tracepoint_id",
+                    GroupCreate => key is not ("name" or "breakpoints" or "tracepoints"),
+                    GroupInspect or GroupClear => key != "name",
                     GetTraceLog => key is not ("since" or "tracepoint_id"),
                     ClearTraceLog => true,
                     MarkTraceCursor => key != "tracepoint_id",
@@ -7438,6 +7831,9 @@ internal static class Program
                 Tool("list_breakpoints", "List requested source breakpoints and observed verification and hit counts; global listing also includes function breakpoints.", """{"type":"object","properties":{"file":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("add_tracepoint", "Add an owner-guarded source tracepoint; ambiguous hits remain stopped and uncertain evaluations are not retried.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647},"expression":{"type":"string"}},"required":["file","line","expression"],"additionalProperties":false}"""),
                 Tool("remove_tracepoint", "Remove a tracepoint while preserving a coincident user breakpoint.", """{"type":"object","properties":{"tracepoint_id":{"type":"string"}},"required":["tracepoint_id"],"additionalProperties":false}"""),
+                Tool("instrumentation_group_create", "Create a named group of source breakpoints and tracepoints.", """{"type":"object","properties":{"name":{"type":"string"},"breakpoints":{"type":["array","null"],"items":{"type":"object"}},"tracepoints":{"type":["array","null"],"items":{"type":"object"}}},"required":["name"],"additionalProperties":false}"""),
+                Tool("instrumentation_group_inspect", "Inspect a named group's breakpoint hits and trace logs.", """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("instrumentation_group_clear", "Remove only the named group's instrumentation.", """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("get_trace_log", "Read bounded process-local trace entries; entries are retained across stop.", """{"type":"object","properties":{"since":{"type":["number","null"]},"tracepoint_id":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("mark_trace_cursor", "Mark a process-local trace-log boundary, optionally filtered by tracepoint.", """{"type":"object","properties":{"tracepoint_id":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("get_trace_delta", "Read entries after a trace cursor or monotonic timestamp; stale marks report lost retention.", """{"type":"object","properties":{"cursor":{"type":["object","number","null"]},"limit":{"type":["integer","null"]},"tracepoint_id":{"type":["string","null"]}},"required":["cursor"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),

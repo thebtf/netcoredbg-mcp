@@ -55,18 +55,19 @@ only `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`,
 `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
-`find_code_references`, and `get_source_context`. Debug operations use implicit
-session binding and selected Python-style response envelopes.
+`find_code_references`, `get_source_context`, `search_source`, `add_tracepoint`,
+`remove_tracepoint`, `get_trace_log`, `clear_trace_log`, `mark_trace_cursor`,
+`get_trace_delta`, `instrumentation_group_create`, `instrumentation_group_inspect`,
+and `instrumentation_group_clear`. Debug operations use implicit session binding
+and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
 
-`debuggee_activity` observes reader-received DAP events over 1–30,000 ms
-(default 1,000) from an initially running session. It does not measure executed
-instructions. Native tracepoint tools are not available, so `traceEntries` is
-zero for this host; it is not evidence that arbitrary debuggee tracing is absent.
-In legacy mode, a successful launch is projected as running until the first
-lifecycle event, as in Python; this is not an observed DAP `continued` event.
+`debuggee_activity` observes reader-received DAP events and legacy trace entries
+over 1–30,000 ms (default 1,000) from an initially running session. It does not
+measure executed instructions. A successful launch is projected as running until
+the first lifecycle event, as in Python; this is not an observed DAP `continued` event.
 Unprojectable states, including stops without a thread ID, are refused.
 
 `get_build_diagnostics(include_warnings=true)` reads the latest accepted legacy
@@ -244,7 +245,20 @@ its original line. If several requested points share the stopped effective line,
 attribution is unavailable rather than assigned arbitrarily. Counts reset on stop;
 pending or unavailable attribution returns an error. Clear records all requested removals first;
 on a file-set refusal or uncertain result it stops dispatching further files and
-does not retry automatically. Function breakpoints remain unsupported.
+does not retry automatically.
+
+Instrumentation groups own their breakpoints and tracepoints separately from
+directly added points. Clearing a group leaves independent owners in place;
+confirmed stop or restart clears groups but retains independent requests. Shared
+stopping points with identical conditions retain those conditions. If an
+unconditional stopping point shares the line, the physical breakpoint is
+unconditional. The native route rejects differing non-empty predicates, even when
+an unconditional owner also exists, and rejects a conditional group breakpoint
+sharing a line with a tracepoint. This is not full Python parity. If a group file
+replacement is refused or unconfirmed, the group is retained and source
+mutations for that normalized file are refused until confirmed stop. Trace
+observation remains conservative when filenames are ambiguous. Inspection
+reports failure when application or required hit counts are unconfirmed.
 
 `set_variable` requires mux ownership and the calling client's selected stopped
 context. After an admitted attempt, select a fresh stack before inspecting or
