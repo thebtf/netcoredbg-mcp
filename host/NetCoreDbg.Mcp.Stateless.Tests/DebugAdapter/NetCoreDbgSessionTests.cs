@@ -2145,6 +2145,20 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public async Task TracepointContinue_StaleContextIsRefusedBeforeDapWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(LifecycleMode: "all-stop"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var result = await session.ContinueTracepointAsync(context + "-stale", observation.Token);
+        Assert.False(result.Admitted);
+        Assert.Equal("Refused", result.Outcome);
+        Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+        Assert.False(await session.GetCallStackIsRefusedAsync(1, 0, 1, observation.Token));
+    }
+
+    [Fact]
     public async Task StepOver_NextCorrelationCollisionWithPendingStackTrace_FailsActiveBeforeUnrelatedRouting()
     {
         await using var session = await StartAsync(new FixtureConfiguration(
