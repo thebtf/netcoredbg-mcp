@@ -15,10 +15,75 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import netcoredbg_mcp.posix_process_owner as owner_module
 from netcoredbg_mcp.posix_process_owner import PosixOwnedProcess
+
+
+def test_attach_safe_guardian_control_eof_does_not_signal_live_adapter():
+    control = MagicMock()
+    control.recv.side_effect = [
+        b'{"argv":["adapter"],"cwd":null}\n',
+        b'{"command":"attach_safe"}\n',
+        b'{"command":"cleanup","grace_timeout":0,"force_timeout":0}\n',
+        b"",
+    ]
+    root = MagicMock(pid=123)
+    root.poll.return_value = None
+    notifications = []
+    with (
+        patch.object(owner_module.socket, "socket", return_value=control),
+        patch.object(owner_module, "_has_private_session", return_value=True),
+        patch.object(owner_module, "_close_guardian_stdio"),
+        patch.object(owner_module.signal, "signal"),
+        patch.object(owner_module.signal, "SIGCHLD", 17, create=True),
+        patch.object(owner_module.subprocess, "Popen", return_value=root),
+        patch.object(owner_module.select, "select", return_value=([control], [], [])),
+        patch.object(owner_module.os, "killpg", create=True) as killpg,
+        patch.object(owner_module.os, "kill") as kill,
+        patch.object(
+            owner_module, "_notify",
+            side_effect=lambda _control, event, **_kw: notifications.append(event),
+        ),
+    ):
+        assert owner_module._guardian_main(10) == 0
+    assert notifications == ["started", "attach_safe", "cleanup_error"]
+    root.wait.assert_called_once_with()
+    killpg.assert_not_called()
+    kill.assert_not_called()
+
+
+def test_guardian_launch_mode_restores_cleanup_after_pre_attach_abort():
+    control = MagicMock()
+    control.recv.side_effect = [
+        b'{"argv":["adapter"],"cwd":null}\n',
+        b'{"command":"attach_safe"}\n',
+        b'{"command":"launch_mode"}\n',
+        b"",
+    ]
+    root = MagicMock(pid=123)
+    root.poll.return_value = None
+    notifications = []
+    with (
+        patch.object(owner_module.socket, "socket", return_value=control),
+        patch.object(owner_module, "_has_private_session", return_value=True),
+        patch.object(owner_module, "_close_guardian_stdio"),
+        patch.object(owner_module.signal, "signal"),
+        patch.object(owner_module.signal, "SIGCHLD", 17, create=True),
+        patch.object(owner_module.subprocess, "Popen", return_value=root),
+        patch.object(owner_module.select, "select", return_value=([control], [], [])),
+        patch.object(
+            owner_module, "_notify",
+            side_effect=lambda _c, event, **_kw: notifications.append(event),
+        ),
+        patch.object(owner_module, "_guardian_cleanup", side_effect=StopIteration) as cleanup,
+        unittest.TestCase().assertRaises(StopIteration),
+    ):
+        owner_module._guardian_main(10)
+    assert notifications == ["started", "attach_safe", "launch_mode"]
+    cleanup.assert_called_once()
+
 
 _CHILD = r"""
 import json, os, signal, stat, sys, time

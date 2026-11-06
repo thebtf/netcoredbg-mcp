@@ -21,9 +21,9 @@ from typing import Any, Literal, Protocol
 
 _ADMISSION_CLEANUP_TIMEOUT = 5.0
 _ACCOUNTING_POLL_SECONDS = 0.01
+_PROCESS_OBSERVATION_POLL_SECONDS = 0.1
 _FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS = 0.05
 _FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS = 1.0
-_INFINITE = 0xFFFFFFFF
 _WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 258
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
@@ -160,6 +160,10 @@ class _WindowsApi(Protocol):
 
     def set_kill_on_close(self, job_handle: int) -> None: ...
 
+    def clear_kill_on_close(self, job_handle: int) -> None: ...
+
+    def restore_kill_on_close(self, job_handle: int) -> None: ...
+
     def assign_process(self, job_handle: int, process_handle: int) -> None: ...
 
     def is_process_in_job(self, process_handle: int, job_handle: int) -> bool: ...
@@ -292,6 +296,34 @@ class _Kernel32:
             _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
             self._ctypes.byref(info),
             self._ctypes.sizeof(info),
+        ):
+            raise self._error(AdmissionStage.SET_LIMITS)
+
+    def clear_kill_on_close(self, job_handle: int) -> None:
+        info = self._extended_limit_information()
+        if not self._query_information(
+            job_handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            self._ctypes.byref(info), self._ctypes.sizeof(info), None,
+        ):
+            raise self._error(AdmissionStage.SET_LIMITS)
+        info.BasicLimitInformation.LimitFlags &= ~_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._set_information(
+            job_handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            self._ctypes.byref(info), self._ctypes.sizeof(info),
+        ):
+            raise self._error(AdmissionStage.SET_LIMITS)
+
+    def restore_kill_on_close(self, job_handle: int) -> None:
+        info = self._extended_limit_information()
+        if not self._query_information(
+            job_handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            self._ctypes.byref(info), self._ctypes.sizeof(info), None,
+        ):
+            raise self._error(AdmissionStage.SET_LIMITS)
+        info.BasicLimitInformation.LimitFlags |= _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._set_information(
+            job_handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            self._ctypes.byref(info), self._ctypes.sizeof(info),
         ):
             raise self._error(AdmissionStage.SET_LIMITS)
 
@@ -771,6 +803,7 @@ class WindowsOwnedProcess:
         self._drain_task: asyncio.Task[OwnerDrainReceipt] | None = None
         self._drain_receipt: OwnerDrainReceipt | None = None
         self._closed = False
+        self._attach_safe = False
 
     @property
     def pid(self) -> int:
@@ -927,15 +960,15 @@ class WindowsOwnedProcess:
 
         if self._returncode is not None:
             return self._returncode
-        handle = self._process_handle
-        if handle is None:
-            return 0
-        await asyncio.to_thread(self._api.wait_for_process, handle, _INFINITE)
-        result = self._api.exit_code(handle)
-        if result is None:
-            raise RuntimeError("signaled Windows process has no exit code")
-        self._returncode = result
-        return result
+        while self._process_handle is not None:
+            result = self._api.exit_code(self._process_handle)
+            if result is not None:
+                self._returncode = result
+                return result
+            await asyncio.sleep(_PROCESS_OBSERVATION_POLL_SECONDS)
+        if self._returncode is None:
+            raise RuntimeError("Windows process handle closed before exit was observed")
+        return self._returncode
 
     def _query_active_processes(self) -> int:
         """Private accounting probe used by the drain and controlled fixture."""
@@ -960,6 +993,28 @@ class WindowsOwnedProcess:
             return True
         self._returncode = returncode
         return False
+
+    async def prepare_attach_safe(self) -> None:
+        if self._closed or self._job_handle is None or self._drain_task is not None:
+            raise RuntimeError("adapter owner is already closing")
+        if not self._attach_safe:
+            self._api.clear_kill_on_close(self._job_handle)
+            self._attach_safe = True
+
+    async def restore_pre_attach(self) -> None:
+        if self._closed or self._job_handle is None:
+            raise RuntimeError("adapter owner is already closed")
+        self._api.restore_kill_on_close(self._job_handle)
+        self._attach_safe = False
+
+    async def observe_passive(self, timeout: float = 0.0) -> OwnerDrainReceipt:
+        if not self._attach_safe:
+            raise RuntimeError("adapter owner is not attach-safe")
+        if self._closed and self._drain_receipt is not None:
+            return self._drain_receipt
+        receipt = await self._wait_for_zero(timeout, forced=False, root_was_forced=False)
+        self._drain_receipt = receipt
+        return receipt
 
     async def drain_after_grace(
         self,
@@ -1004,6 +1059,9 @@ class WindowsOwnedProcess:
             self._drain_receipt = graceful
             return graceful
         if graceful.status is DrainStatus.FAILED:
+            self._drain_receipt = graceful
+            return graceful
+        if self._attach_safe:
             self._drain_receipt = graceful
             return graceful
         if self._job_handle is None:
@@ -1124,6 +1182,8 @@ class WindowsOwnedProcess:
             or receipt.status is not DrainStatus.DRAINED
             or receipt.active_processes != 0
         ):
+            if self._attach_safe:
+                return await self.observe_passive()
             receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
         if self.stdin is not None:
             self.stdin.close()
