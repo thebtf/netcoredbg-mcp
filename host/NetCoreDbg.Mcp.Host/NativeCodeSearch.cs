@@ -61,6 +61,7 @@ internal sealed class NativeCodeSearch
                 "find_code_symbol" => await FindCodeSymbolAsync(context, arguments, linked.Token).ConfigureAwait(false),
                 "find_code_references" => await FindCodeReferencesAsync(context, arguments, linked.Token).ConfigureAwait(false),
                 "get_source_context" => await GetSourceContextAsync(context, arguments, linked.Token).ConfigureAwait(false),
+                "search_source" => await SearchSourceAsync(context, arguments, linked.Token).ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Unsupported native code-search tool: {context.Params.Name}"),
             };
         }
@@ -108,6 +109,25 @@ internal sealed class NativeCodeSearch
         var maxResults = OptionalInt32(arguments, "max_results", 1000);
         var engine = await CreateEngineAsync(context, cancellationToken).ConfigureAwait(false);
         var results = ToJson(engine.FindCodeReferences(name, maxResults, cancellationToken));
+        return Success(new JsonObject
+        {
+            ["results"] = results,
+            ["count"] = results.Count,
+            ["project_root"] = engine.ProjectRoot,
+        });
+    }
+
+    private async ValueTask<CallToolResult> SearchSourceAsync(
+        RequestContext<CallToolRequestParams> context,
+        IDictionary<string, JsonElement>? arguments,
+        CancellationToken cancellationToken)
+    {
+        var pattern = RequiredString(arguments, "pattern");
+        var fileGlob = OptionalString(arguments, "file_glob");
+        var timeout = OptionalDouble(arguments, "timeout_seconds", 5.0);
+        var maxResults = OptionalInt32(arguments, "max_results", 1000);
+        var engine = await CreateEngineAsync(context, cancellationToken).ConfigureAwait(false);
+        var results = ToJson(engine.SearchSource(pattern, fileGlob, timeout, maxResults, cancellationToken));
         return Success(new JsonObject
         {
             ["results"] = results,
@@ -255,6 +275,15 @@ internal sealed class NativeCodeSearch
         return result;
     }
 
+    private static double OptionalDouble(IDictionary<string, JsonElement>? arguments, string name, double defaultValue)
+    {
+        if (arguments?.TryGetValue(name, out var value) != true)
+            return defaultValue;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var result) || !double.IsFinite(result))
+            throw new ArgumentException($"{name} must be a finite number");
+        return result;
+    }
+
 
     private CallToolResult Success(JsonObject data) => _useModernResultEnvelope
         ? Result(new JsonObject { ["data"] = data }, isError: false)
@@ -341,6 +370,10 @@ internal static class NativeCodeSearchCatalog
             name,
             "Read source lines around a project-scoped location.",
             """{"properties":{"file":{"title":"File","type":"string"},"line":{"title":"Line","type":"integer"},"radius":{"default":10,"title":"Radius","type":"integer"}},"required":["file","line"],"title":"get_source_contextArguments","type":"object"}"""),
+        "search_source" => Tool(
+            name,
+            "Search project source using case-sensitive .NET regex, not Python re parity. Timeout checks are cooperative and bound each regex match; blocked file I/O or glob matching may exceed it.",
+            """{"properties":{"pattern":{"title":"Pattern","type":"string"},"file_glob":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"File Glob"},"timeout_seconds":{"default":5.0,"title":"Timeout Seconds","type":"number"},"max_results":{"default":1000,"title":"Max Results","type":"integer"}},"required":["pattern"],"title":"search_sourceArguments","type":"object"}"""),
         _ => throw new ArgumentOutOfRangeException(nameof(name)),
     };
 

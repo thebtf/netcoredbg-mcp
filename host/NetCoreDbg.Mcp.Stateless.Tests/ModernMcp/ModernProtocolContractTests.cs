@@ -26,6 +26,14 @@ public sealed class ModernProtocolContractTests
             var root = Path.Combine(scratch, "project");
             Directory.CreateDirectory(root);
             await File.WriteAllTextAsync(Path.Combine(root, "Alpha.cs"), "public class VisibleProbe\n{\n    public VisibleProbe Next;\n}\n");
+            Directory.CreateDirectory(Path.Combine(root, "Nested"));
+            Directory.CreateDirectory(Path.Combine(root, "ignored"));
+            await File.WriteAllTextAsync(Path.Combine(root, ".gitignore"), "ignored/\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "Nested", "Search.cs"), "first line\n    SearchNeedle42;   \n  SearchNeedle99;\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "View.xaml"), "  <Text>SearchNeedle17</Text>  \n");
+            await File.WriteAllTextAsync(Path.Combine(root, "ignored", "Hidden.cs"), "SearchNeedle88\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "Long.cs"), new string('a', 4096) + "!\n");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "OutsideSearch.cs"), "SearchNeedle77\n");
             await File.WriteAllTextAsync(Path.Combine(scratch, "Outside.cs"), "outside-project-secret");
             var rootsCalls = 0;
             await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
@@ -36,8 +44,7 @@ public sealed class ModernProtocolContractTests
                 startupTimeout: TimeSpan.FromSeconds(10));
             var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(new JsonObject(), new RequestId("legacy-search-list")));
             var names = Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => item!["name"]!.GetValue<string>()).ToArray();
-            foreach (var name in new[] { "find_code_symbol", "find_code_references", "get_source_context" }) Assert.Contains(name, names);
-            Assert.DoesNotContain("search_source", names);
+            foreach (var name in new[] { "find_code_symbol", "find_code_references", "get_source_context", "search_source" }) Assert.Contains(name, names);
             var owner = new JsonObject { ["muxSessionId"] = "legacy-search-owner" };
 
             async Task<JsonObject> SearchAsync(string name, JsonObject arguments, string state)
@@ -63,6 +70,50 @@ public sealed class ModernProtocolContractTests
                 Assert.Equal(2, references["data"]?["count"]?.GetValue<int>());
                 var context = await SearchAsync("get_source_context", new JsonObject { ["file"] = "Alpha.cs", ["line"] = 2, ["radius"] = 1 }, state);
                 Assert.Equal(3, Assert.IsType<JsonArray>(context["data"]?["lines"]).Count);
+                var search = await SearchAsync("search_source", new JsonObject { ["pattern"] = "SearchNeedle[0-9]+" }, state);
+                var searchData = Assert.IsType<JsonObject>(search["data"]);
+                Assert.Equal(root, searchData["project_root"]?.GetValue<string>());
+                Assert.Equal(3, searchData["count"]?.GetValue<int>());
+                var matches = Assert.IsType<JsonArray>(searchData["results"]);
+                Assert.Equal(3, matches.Count);
+                Assert.Contains(matches, item => item?["file"]?.GetValue<string>() == "Nested/Search.cs"
+                    && item?["line"]?.GetValue<int>() == 2 && item?["context"]?.GetValue<string>() == "SearchNeedle42;");
+                Assert.Contains(matches, item => item?["file"]?.GetValue<string>() == "Nested/Search.cs"
+                    && item?["line"]?.GetValue<int>() == 3 && item?["context"]?.GetValue<string>() == "SearchNeedle99;");
+                Assert.Contains(matches, item => item?["file"]?.GetValue<string>() == "View.xaml"
+                    && item?["line"]?.GetValue<int>() == 1 && item?["context"]?.GetValue<string>() == "<Text>SearchNeedle17</Text>");
+
+                var globbed = await SearchAsync("search_source", new JsonObject { ["pattern"] = "SearchNeedle[0-9]+", ["file_glob"] = "*.xaml" }, state);
+                Assert.Equal(1, globbed["data"]?["count"]?.GetValue<int>());
+                Assert.Equal("View.xaml", Assert.Single(Assert.IsType<JsonArray>(globbed["data"]?["results"]))?["file"]?.GetValue<string>());
+
+                var limited = await SearchAsync("search_source", new JsonObject { ["pattern"] = "SearchNeedle[0-9]+", ["max_results"] = 1 }, state);
+                Assert.Equal(1, limited["data"]?["count"]?.GetValue<int>());
+                Assert.Single(Assert.IsType<JsonArray>(limited["data"]?["results"]));
+                var caseSensitive = await SearchAsync("search_source", new JsonObject { ["pattern"] = "searchneedle42" }, state);
+                Assert.Equal(0, caseSensitive["data"]?["count"]?.GetValue<int>());
+                var timedOut = await SearchAsync("search_source", new JsonObject
+                {
+                    ["pattern"] = "^(a+)+$",
+                    ["file_glob"] = "Long.cs",
+                    ["timeout_seconds"] = 0.01,
+                }, state);
+                Assert.NotNull(timedOut["error"]);
+                Assert.False(timedOut.ContainsKey("data"));
+
+
+                foreach (var arguments in new[]
+                {
+                    new JsonObject { ["pattern"] = "[" },
+                    new JsonObject { ["pattern"] = "" },
+                    new JsonObject { ["pattern"] = "SearchNeedle", ["max_results"] = 0 },
+                    new JsonObject { ["pattern"] = "SearchNeedle", ["timeout_seconds"] = 0 },
+                })
+                {
+                    var invalid = await SearchAsync("search_source", arguments, state);
+                    Assert.NotNull(invalid["error"]);
+                    Assert.False(invalid.ContainsKey("data"));
+                }
                 var outside = await SearchAsync("get_source_context", new JsonObject { ["file"] = "../Outside.cs", ["line"] = 1 }, state);
                 Assert.NotNull(outside["error"]);
                 Assert.False(outside.ContainsKey("data"));

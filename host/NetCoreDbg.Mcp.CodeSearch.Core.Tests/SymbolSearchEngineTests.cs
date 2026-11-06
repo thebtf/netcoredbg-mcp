@@ -25,6 +25,23 @@ public sealed class SymbolSearchEngineTests
         Assert.Contains("Symbol name must not be empty", argument.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void LegacySearchSource_TreatsLeadingCaretAsLiteralInFileGlobClass()
+    {
+        using var root = TestRoot.Create();
+        root.Write("A.cs", "Needle\n");
+        root.Write("B.cs", "Needle\n");
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+
+        var results = engine.SearchSource("Needle", "[^B]*.cs", 5, 100);
+
+        Assert.Equal(["B.cs"], results.Select(static result => result.File));
+        var negated = engine.SearchSource("Needle", "[!B]*.cs", 5, 100);
+        Assert.Equal(["A.cs"], negated.Select(static result => result.File));
+        root.Write(".gitignore", "[^B]*.cs\n");
+        Assert.Equal(["A.cs"], engine.FindCodeReferences("Needle", 100).Select(static result => result.File));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
