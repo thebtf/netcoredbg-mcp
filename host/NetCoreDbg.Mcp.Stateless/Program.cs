@@ -300,6 +300,7 @@ internal static class Program
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string GetBuildDiagnostics = "get_build_diagnostics";
+        private const string VerifyDebugFreshness = "verify_debug_freshness";
         private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
         private const string StepInto = "step_into";
@@ -814,7 +815,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
+                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -896,6 +897,9 @@ internal static class Program
                 gateHeld = true;
                 if (HasInvalidLegacyArguments(name, arguments))
                     return LegacyError("Unsupported or invalid argument.");
+                LegacyDebugFreshness.Arguments? freshnessArguments = null;
+                if (name == VerifyDebugFreshness && !LegacyDebugFreshness.TryParse(arguments, out freshnessArguments))
+                    return LegacyError("Unsupported or invalid argument.");
                 if (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && breakpointGeneration != _legacySessionGeneration)
                     return LegacyError("Debug session changed before breakpoint admission.", "unknown");
                 if (_legacyBreakpointSessionId is not null
@@ -922,7 +926,7 @@ internal static class Program
                     return LegacyError("A debug session is starting.");
                 if (mutation && _legacyStopping)
                     return LegacyError("A debug session is stopping.");
-                if ((mutation || (name == DebuggeeActivity && muxId is not null)) && name is not (StartDebug or AttachDebug) && _legacySessionId is not null)
+                if ((mutation || (name is (DebuggeeActivity or VerifyDebugFreshness) && muxId is not null)) && name is not (StartDebug or AttachDebug) && _legacySessionId is not null)
                 {
                     var timeout = 60.0;
                     var configured = Environment.GetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT");
@@ -935,11 +939,14 @@ internal static class Program
                         _legacyHasOwner = false;
                         _legacyOwner = null;
                     }
-                    if (_legacyHasOwner && _legacyOwner != muxId && !(name == DebuggeeActivity && _legacyOwner is null))
+                    if (_legacyHasOwner && _legacyOwner != muxId && !(name is (DebuggeeActivity or VerifyDebugFreshness) && _legacyOwner is null))
                         return LegacyError("Debug session is owned by another agent.");
-                    _legacyHasOwner = true;
-                    _legacyOwner = muxId;
-                    if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                    if (name != VerifyDebugFreshness)
+                    {
+                        _legacyHasOwner = true;
+                        _legacyOwner = muxId;
+                    }
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner == muxId) _legacyOwnerActivity = Stopwatch.GetTimestamp();
                 }
                 if (_legacyAttachClosing && mutation && name != StopDebug)
                     return LegacyError("Attach cleanup is unconfirmed; only owner stop can re-enter it.", "unknown");
@@ -1911,6 +1918,61 @@ internal static class Program
                         return LegacyError("Debug session changed before diagnostics completed.");
                     cancellationToken.ThrowIfCancellationRequested();
                     return parsed;
+                }
+                if (name == VerifyDebugFreshness)
+                {
+                    if (_legacyStarting || _legacyStopping || _legacyAttachClosing) return LegacyError("A debug session transition is in progress.");
+                    var freshnessGeneration = _legacySessionGeneration;
+                    var freshnessSessionId = _legacySessionId;
+                    var projectPath = freshnessSessionId is not null && _legacyAttachSession is null ? _legacyResolvedLaunch?.ProjectRoot : null;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    if (projectPath is null)
+                        projectPath = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken,
+                            context.Params.InputResponses, context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (freshnessGeneration != _legacySessionGeneration || freshnessSessionId != _legacySessionId || _legacyStarting || _legacyStopping || _legacyAttachClosing)
+                        return LegacyError("Debug session changed before freshness observation.");
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner is not null && _legacyOwner != muxId)
+                        return LegacyError("Debug session is owned by another agent.");
+                    NetCoreDbgSession? freshnessSession = null;
+                    if (freshnessSessionId is not null && (!_sessions.TryGetValue(freshnessSessionId, out freshnessSession) || !_isUsable(freshnessSession)))
+                        return LegacyError("Debug session state is unavailable.");
+                    var snapshot = freshnessSession?.GetLegacyResourceState();
+                    if (snapshot is { Complete: false } || snapshot is { DetailsComplete: false })
+                        return LegacyError("Debug session evidence is incomplete.");
+                    var inventory = freshnessSession?.GetRuntimeInventory(true, MaximumSerializedInspectionBytes);
+                    if (inventory is { } observedInventory && observedInventory.Status != DapRuntimeInventoryStatus.Success)
+                        return LegacyError("Runtime inventory state is unavailable or too large.");
+                    var moduleContent = inventory?.SerializedContent ?? "{\"modules\":[]}";
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    object? data = null;
+                    string? error = null;
+                    try
+                    {
+                        data = await Task.Run(() =>
+                        {
+                            using var moduleDocument = JsonDocument.Parse(moduleContent);
+                            return LegacyDebugFreshness.Verify(freshnessArguments!, projectPath, snapshot?.ProcessId, snapshot?.ProcessName,
+                                snapshot?.Sources, moduleDocument.RootElement.GetProperty("modules"));
+                        }, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
+                    {
+                        error = "Invalid or unavailable freshness path.";
+                    }
+                    await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (freshnessGeneration != _legacySessionGeneration || freshnessSessionId != _legacySessionId || _legacyStarting || _legacyStopping || _legacyAttachClosing
+                        || (freshnessSessionId is not null && (!_sessions.TryGetValue(freshnessSessionId, out var currentFreshnessSession) || !ReferenceEquals(currentFreshnessSession, freshnessSession))))
+                        return LegacyError("Debug session changed before freshness observation.");
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner is not null && _legacyOwner != muxId)
+                        return LegacyError("Debug session is owned by another agent.");
+                    if (error is not null) return LegacyError(error);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return LegacyBoundedUtilityResponse(data!, LegacySnapshot().State);
                 }
                 if (name == GetDebugState)
                 {
@@ -3714,6 +3776,7 @@ internal static class Program
                     SearchOutput => key is not ("pattern" or "context_lines" or "category"),
                     "output_checkpoint" => key != "name",
                     "output_assert_since" => key is not ("checkpoint" or "required" or "forbidden" or "regex" or "max_matches"),
+                    VerifyDebugFreshness => key is not ("expected_process_id" or "expected_process_name" or "expected_workspace" or "expected_sources" or "expected_modules" or "expected_artifacts" or "require_active_process"),
                     _ => true,
                 };
                 if (invalid) return true;
@@ -8450,6 +8513,7 @@ internal static class Program
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("debuggee_activity", "Observe DAP events and trace entries during a bounded running-session window.", """{"type":"object","properties":{"window_ms":{"type":"integer","minimum":1,"maximum":30000,"default":1000}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("verify_debug_freshness", "Compare recorded DAP process metadata, observed inventories, workspace and artifact paths; a recorded PID does not prove liveness or process identity.", """{"type":"object","properties":{"expected_process_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"expected_process_name":{"type":["string","null"]},"expected_workspace":{"type":["string","null"]},"expected_sources":{"type":["array","null"],"items":{"type":"string"}},"expected_modules":{"type":["array","null"],"items":{"type":"string"}},"expected_artifacts":{"type":["array","null"],"items":{"type":"string"}},"require_active_process":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_call_stack", "Read up to 256 frames from a stopped thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]},"levels":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Set a source breakpoint; requested options require advertised adapter support and are not proof of enforcement.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647},"condition":{"type":["string","null"]},"hit_condition":{"type":["string","null"]}},"required":["file","line"],"additionalProperties":false}"""),
