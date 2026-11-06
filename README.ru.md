@@ -54,12 +54,27 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
 привязку сессии и отдельные форматы ответов в стиле Python.
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+`get_build_diagnostics(include_warnings=true)` возвращает результат последней
+принятой legacy pre-build и сохраняет его после stop. Новая pre-build очищает
+предыдущий результат. Незавершённая или отклонённая попытка не показывает старую
+диагностику. При завершённой ошибке доступны этап, argv, рабочая папка и
+сохранённый вывод. Native выполняет restore и build отдельно и показывает только
+последний этап и вывод последней повторной попытки. Для каждого потока хранятся
+не более 5 000 000 символов UTF-16. На этом пределе количество ошибок и
+предупреждений недоступно: вывод может быть обрезан. При тайм-ауте или отмене
+частичный вывод не сохраняется, диагностика отмечается как неполная. При ошибке
+запуска или очистки результата может не быть. Разбор использует Python-шаблоны
+MSBuild, но отличается разделением строк. В отличие от Python, native возвращает
+ошибку без частичных данных, если ответ больше 256 КиБ, строка превышает 256 Ки
+кодовых единиц UTF-16, разбор занимает больше двух секунд или один поиск regex —
+больше 100 мс. Современный API и Python по умолчанию не меняются.
 
 `restart_debug` сохраняет параметры последнего успешного запуска. По умолчанию
 `rebuild=true` требует сохранённый `build_project`. При `rebuild=false`

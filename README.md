@@ -53,12 +53,27 @@ only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
 session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+`get_build_diagnostics(include_warnings=true)` reads the latest accepted legacy
+pre-build result, retained across stop. A new pre-build clears the prior result;
+an incomplete or rejected attempt does not expose stale diagnostics. Completed
+failures include the executed stage, argv, working directory and retained output.
+Native restore and build use separate commands; only the final stage and final
+retry output are reported. Each output stream retains at most 5,000,000 UTF-16
+characters. At that limit, counts are unavailable because output may be truncated.
+Timeout and cancellation omit partial output and report incomplete diagnostics;
+launch or cleanup failures may leave no result. Diagnostic parsing follows the
+Python location and simple MSBuild patterns, with native line splitting. Unlike
+Python, native returns an error without partial data if the response exceeds
+256 KiB, a line exceeds 256 Ki UTF-16 code units, parsing exceeds two seconds,
+or one regex match exceeds 100 ms. This does not change the modern API or Python
+default.
 
 `restart_debug` retains the last successful launch configuration. Its default
 `rebuild=true` requires a saved `build_project`; `rebuild=false` preserves the
