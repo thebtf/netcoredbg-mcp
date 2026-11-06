@@ -612,6 +612,8 @@ class SessionState:
     last_memory_event: MemoryEventBody | None = None
     transport_terminal: TransportTerminalSummary | None = None
     execution_outcome_unknown: bool = False
+    unconfirmed_attach_pids: list[int] = field(default_factory=list)
+    unconfirmed_attach_omitted: int = 0
     activity_epoch: object = field(
         default_factory=object,
         init=False,
@@ -678,4 +680,15 @@ class SessionState:
             })
         if self.transport_terminal is not None:
             payload["transportTerminal"] = self.transport_terminal.to_dict()
+        if self.unconfirmed_attach_pids or self.unconfirmed_attach_omitted:
+            payload["unconfirmedAttaches"] = [
+                {
+                    "requestedPid": pid,
+                    "pidIsProcessIdentity": False,
+                    "detachStatus": "unconfirmed",
+                    "targetSurvival": "unknown",
+                }
+                for pid in self.unconfirmed_attach_pids
+            ]
+            payload["unconfirmedAttachesOmitted"] = self.unconfirmed_attach_omitted
         return payload

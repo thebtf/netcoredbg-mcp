@@ -252,6 +252,13 @@ class _DapRun:
     process_task: asyncio.Task[None] | None = None
     finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
     terminal: DapTransportTerminal | None = None
+    attach_safe: bool = False
+    attach_preparation: asyncio.Task[None] | None = None
+    attach_dispatched: bool = False
+    attach_restoring: bool = False
+    attach_policy_uncertain: bool = False
+    attach_restoration_done: asyncio.Event | None = None
+    pre_attach_restored_after_terminal: bool = False
 
 
 def _sanitize_terminal_text(value: object) -> str:
@@ -481,6 +488,101 @@ class DAPClient:
 
         self._transport_terminal_handler = handler
 
+    def attach_may_have_dispatched(self, generation: object) -> bool:
+        run = self._run
+        return run is None or run.generation != generation or run.attach_dispatched
+
+    async def prepare_attach_safe(self, generation: object) -> None:
+        run = self._run
+        if run is None or run.generation != generation or run.phase is not _RunPhase.ACTIVE:
+            raise RuntimeError("adapter is not active for attach safety preparation")
+        if run.attach_restoring or run.attach_policy_uncertain:
+            raise RuntimeError("adapter cleanup policy restoration is unresolved")
+        if run.attach_preparation is None:
+            async def prepare() -> None:
+                owner = run.owner or run.posix_owner
+                if owner is None:
+                    raise RuntimeError("adapter has no retained owner for safe attach")
+                if run.posix_owner is not None:
+                    run.attach_safe = True
+                    run.attach_policy_uncertain = True
+                await owner.prepare_attach_safe()
+                run.attach_safe = True
+                run.attach_policy_uncertain = False
+
+            run.attach_preparation = asyncio.create_task(prepare())
+        await asyncio.shield(run.attach_preparation)
+        if self._run is not run or run.phase is not _RunPhase.ACTIVE:
+            raise RuntimeError("adapter terminated during attach safety preparation")
+
+    async def restore_pre_attach(self, generation: object) -> None:
+        run = self._run
+        if run is None or run.generation != generation or run.attach_dispatched:
+            raise RuntimeError("cannot restore policy after a possible attach write")
+        if run.attach_preparation is None:
+            return
+        if run.phase is not _RunPhase.ACTIVE:
+            finalizer = run.finalizer_task
+            if finalizer is None:
+                raise RuntimeError("terminal adapter finalizer is unavailable")
+            await asyncio.shield(finalizer)
+            if self._run is not run or run.attach_dispatched:
+                raise RuntimeError("cannot restore policy after a possible attach write")
+            receipt = run.owner_drain_receipt
+            if (
+                (receipt is not None and receipt.status is DrainStatus.DRAINED
+                 and receipt.active_processes == 0)
+                or (run.posix_cleanup_result is not None
+                    and run.posix_cleanup_result.complete)
+            ):
+                run.attach_safe = False
+                run.attach_preparation = None
+                return
+            owner = run.owner or run.posix_owner
+            if owner is None:
+                raise RuntimeError("adapter owner is missing during policy restoration")
+            await owner.restore_pre_attach()
+            run.attach_safe = False
+            run.attach_preparation = None
+            run.pre_attach_restored_after_terminal = True
+            return
+        run.attach_restoring = True
+        run.attach_policy_uncertain = True
+        run.attach_restoration_done = asyncio.Event()
+        try:
+            try:
+                await asyncio.shield(run.attach_preparation)
+            except Exception:
+                pass
+            if self._run is not run or run.attach_dispatched:
+                raise RuntimeError("cannot restore policy after a possible attach write")
+            owner = run.owner or run.posix_owner
+            if owner is None:
+                raise RuntimeError("adapter owner is missing during policy restoration")
+            await owner.restore_pre_attach()
+            run.attach_safe = False
+            run.attach_preparation = None
+            run.attach_policy_uncertain = False
+        finally:
+            run.attach_restoring = False
+            run.attach_restoration_done.set()
+
+    async def observe_attach_cleanup(self) -> OwnerDrainReceipt | PosixCleanupResult:
+        run = self._run
+        if run is None or not run.attach_safe:
+            raise RuntimeError("no attach-safe adapter owner")
+        if run.owner is not None:
+            receipt = await run.owner.observe_passive()
+            self._apply_owner_drain_receipt(run, receipt)
+            if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+                await run.owner.aclose()
+            return receipt
+        if run.posix_owner is not None:
+            result = await run.posix_owner.observe_passive()
+            run.posix_cleanup_result = result
+            return result
+        raise RuntimeError("attach-safe adapter owner is missing")
+
     async def start(
         self,
         *,
@@ -615,6 +717,16 @@ class DAPClient:
             return None
 
         receipt = run.owner_drain_receipt
+        if (run.pre_attach_restored_after_terminal and not run.attach_dispatched
+                and (receipt is None or receipt.status is not DrainStatus.DRAINED
+                     or receipt.active_processes != 0)):
+            receipt = await owner.drain_after_grace(
+                grace_timeout=NATURAL_EXIT_TIMEOUT,
+                force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
+            )
+            run.owner_drain_receipt = receipt
+            if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+                await owner.aclose()
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
@@ -712,9 +824,22 @@ class DAPClient:
         """Settle work, join bounded observations, clean up, and publish once."""
 
         self._settle_pending(run.pending)
+        if run.attach_preparation is not None:
+            try:
+                await asyncio.shield(run.attach_preparation)
+            except Exception:
+                pass
+        if run.attach_restoration_done is not None:
+            await run.attach_restoration_done.wait()
         process = run.process
 
-        if run.owner is not None:
+        if run.attach_safe:
+            if run.owner is not None:
+                receipt = await run.owner.observe_passive()
+                self._apply_owner_drain_receipt(run, receipt)
+            elif run.posix_owner is not None:
+                run.posix_cleanup_result = await run.posix_owner.observe_passive()
+        elif run.owner is not None:
             # This is deliberately inside the elected Wave-1 finalizer. No
             # observer or manager branch can publish terminal state before the
             # retained Job has reported its accounting drain outcome.
@@ -768,7 +893,12 @@ class DAPClient:
             and not run.stdout_task.done()
         ):
             run.stdout_task.cancel()
-        if run.owner is not None:
+        if run.attach_safe:
+            if (run.owner is not None and run.owner_drain_receipt is not None
+                    and run.owner_drain_receipt.status is DrainStatus.DRAINED
+                    and run.owner_drain_receipt.active_processes == 0):
+                await run.owner.aclose()
+        elif run.owner is not None:
             close_receipt = await run.owner.aclose()
             if close_receipt is not None:
                 self._apply_owner_drain_receipt(run, close_receipt)
@@ -947,6 +1077,13 @@ class DAPClient:
             request.command,
             format_request_arguments_for_log(request.command, request.arguments),
         )
+        if request.command == Commands.ATTACH:
+            run = self._run
+            if (run is None or run.process is not self._process
+                    or run.phase is not _RunPhase.ACTIVE or not run.attach_safe
+                    or run.attach_restoring or run.attach_policy_uncertain):
+                raise RuntimeError("attach request has no active safety binding")
+            run.attach_dispatched = True
         self._process.stdin.write(data)
 
     async def _send(self, request: DAPRequest) -> None:

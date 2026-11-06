@@ -1189,10 +1189,18 @@ adapters and the FlaUI bridge created by this server. It does not turn a numeric
 PID, a DAP process event, or a saved record into permission to terminate a process.
 Old PID files are left untouched and inert; startup no longer sweeps their PIDs.
 
-Stopping or cleaning up an attached debug session detaches from the target rather
-than terminating it. An explicit `terminate_debug` request remains a separate
-action. Cleaning up the FlaUI bridge does not grant ownership of the UI app.
-Cleanup failures remain incomplete results, not successful removal of records.
+Installed Python 0.23.13 can report a successful stop after an unconfirmed attach
+detach and may force the adapter; losing the adapter can also end the attached
+target. Do not attach to a process that cannot be lost.
+
+In the unreleased source-built Python server, stopping an attached session sends
+one non-terminating disconnect request and reports CLR detach as unconfirmed,
+even if the adapter acknowledges it. The cleanup owner is retained while its
+outcome is unconfirmed. `debug://state` records requested PIDs as observations,
+not process identities, and target survival remains unknown. Safety after an
+unexpected host or adapter exit is not established. An explicit
+`terminate_debug` request remains a separate action. Cleaning up the FlaUI
+bridge does not grant ownership of the UI app.
 
 On Windows, cleanup uses retained process and Job handles. On POSIX, a private
 guardian controls its own live process group, including ordinary descendants

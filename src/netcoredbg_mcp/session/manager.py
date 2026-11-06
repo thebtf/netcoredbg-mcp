@@ -164,13 +164,27 @@ class SessionManager:
         self._stopping_dap_run: object | None = None
         self._windows_adapter_admission_generation: object | None = None
         self._debuggee_mode: tuple[object | None, str] | None = None
+        self._attach_disconnect: tuple[object | None, asyncio.Task[Any] | None] | None = None
+        self._retained_posix_attach: set[object] = set()
         self._registry_observations: dict[object | None, list[ProcessEntry]] = {}
         self._registry_owner_tokens: dict[object, object] = {}
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
+        previous_state = getattr(self, "_state", None)
+        if previous_state is not None:
+            session_state.unconfirmed_attach_pids = list(previous_state.unconfirmed_attach_pids)
+            session_state.unconfirmed_attach_omitted = previous_state.unconfirmed_attach_omitted
         session_state.output_buffer = _ResourceOutputBuffer(self._on_output_buffer_cleared)
         return session_state
+
+    def _record_unconfirmed_attach(self, requested_pid: int) -> None:
+        observations = self._state.unconfirmed_attach_pids
+        if len(observations) == 8:
+            del observations[0]
+            self._state.unconfirmed_attach_omitted += 1
+        observations.append(requested_pid)
+        self._publish_resource_updates(STATE_URI)
 
     def _on_output_buffer_cleared(self) -> None:
         self._output_bytes = 0
@@ -806,6 +820,22 @@ class SessionManager:
         for observation in self._registry_observations.pop(generation, ()):
             self._process_registry.forget(observation)
 
+    def _release_drained_attach_owner(self, generation: object | None, receipt: object) -> None:
+        owner = self._client.adapter_owner
+        if not isinstance(owner, OwnedProcessRef) or not isinstance(receipt, OwnerDrainReceipt):
+            return
+        if not self._owner_receipt_releases_generation(receipt, expected_owner=owner):
+            return
+        self._release_generation_owner(generation)
+        observations = self._registry_observations.get(generation, [])
+        retained = []
+        for observation in observations:
+            if observation.role == "netcoredbg":
+                self._process_registry.forget(observation)
+            else:
+                retained.append(observation)
+        self._registry_observations[generation] = retained
+
     def _release_generation_owner(self, generation: object | None) -> None:
         token = self._registry_owner_tokens.pop(generation, None)
         if token is not None:
@@ -828,6 +858,13 @@ class SessionManager:
             async with self._lifecycle_lock:
                 if self._registry_owner_tokens.get(generation) is not token:
                     return CleanupOutcome(complete=True)
+                if generation in self._retained_posix_attach:
+                    result = await owner.observe_passive()
+                    return CleanupOutcome(
+                        False,
+                        error=("POSIX attached adapter exited, but guardian group cleanup "
+                               f"is unconfirmed (adapter exit={result.root_returncode})"),
+                    )
                 if (
                     self._client is not source_client
                     or self._active_dap_run != generation
@@ -907,7 +944,12 @@ class SessionManager:
         if active_generation is None:
             self._active_dap_run = terminal.generation
 
-        self._forget_generation_observations(terminal.generation)
+        if self._debuggee_mode == (terminal.generation, "attach"):
+            self._release_drained_attach_owner(
+                terminal.generation, source_client.adapter_cleanup_result
+            )
+        else:
+            self._forget_generation_observations(terminal.generation)
         last_event_seq: int | None = None
         last_event_name: str | None = None
         if terminal.last_dap_event is not None:
@@ -935,8 +977,13 @@ class SessionManager:
         if terminal.debuggee_exit_code is not None and self._state.exit_code is None:
             self._state.exit_code = terminal.debuggee_exit_code
 
-        self._state.execution_outcome_unknown = False
+        self._state.execution_outcome_unknown = (
+            self._debuggee_mode == (terminal.generation, "attach")
+            and terminal.debuggee_exit_code is None
+        )
         if self._stopping_dap_run == terminal.generation:
+            if self._debuggee_mode == (terminal.generation, "attach"):
+                self._publish_resource_updates(STATE_URI, THREADS_URI)
             return
         self._set_state(DebugState.TERMINATED)
         self._execution_event.set()
@@ -1749,6 +1796,8 @@ class SessionManager:
         generation = self._active_dap_run
         if generation is None:
             return NoOwnedAdapter()
+        if self._debuggee_mode == (generation, "attach"):
+            raise RuntimeError("CLR detach is unconfirmed; retained adapter cannot be replaced")
 
         owner = source_client.adapter_owner
         if owner is None or owner.generation != generation:
@@ -1789,6 +1838,31 @@ class SessionManager:
         """Join a retained terminal owner before a new generation can replace it."""
         retained_generation = self._active_dap_run
         if retained_generation is None:
+            return
+        if self._debuggee_mode == (retained_generation, "attach"):
+            try:
+                receipt = await self._client.observe_attach_cleanup()
+            except Exception as error:
+                raise RuntimeError("Attached adapter cleanup remains unconfirmed") from error
+            self._release_drained_attach_owner(retained_generation, receipt)
+            retained = self._client.adapter_cleanup_owner
+            if (isinstance(retained, PosixOwnedProcess)
+                    and isinstance(receipt, PosixCleanupResult)
+                    and receipt.root_returncode is not None
+                    and retained.returncode == receipt.root_returncode
+                    and retained_generation in self._registry_owner_tokens):
+                self._retained_posix_attach.add(retained_generation)
+                self._active_dap_run = None
+                self._debuggee_mode = None
+                return
+            owner = self._client.adapter_owner
+            if (not isinstance(owner, OwnedProcessRef)
+                    or not isinstance(receipt, OwnerDrainReceipt)
+                    or not self._owner_receipt_releases_generation(receipt, expected_owner=owner)
+                    or retained_generation in self._registry_owner_tokens):
+                raise RuntimeError("Attached adapter cleanup remains unconfirmed")
+            self._active_dap_run = None
+            self._debuggee_mode = None
             return
         owner = self._client.adapter_owner
         if not isinstance(owner, OwnedProcessRef):
@@ -1849,6 +1923,8 @@ class SessionManager:
                 ),
                 False,
             )
+        if self._debuggee_mode == (generation, "attach"):
+            raise RuntimeError("CLR detach is unconfirmed; retained adapter cannot be finalized")
 
         cancelled = False
         if request_disconnect:
@@ -2287,18 +2363,38 @@ class SessionManager:
         self._bind_debuggee_mode(dap_generation, "attach")
 
         try:
-            await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
-        except asyncio.TimeoutError as e:
-            raise RuntimeError("Timeout waiting for session initialization") from e
+            try:
+                await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
+            except asyncio.TimeoutError as e:
+                raise RuntimeError("Timeout waiting for session initialization") from e
 
-        await self._sync_all_breakpoints()
-        await self._client.set_exception_breakpoints([])
+            await self._sync_all_breakpoints()
+            await self._client.set_exception_breakpoints([])
+            await self._client.prepare_attach_safe(dap_generation)
 
-        # NOTE: justMyCode is NOT supported in attach mode by netcoredbg (upstream limitation).
-        # The parameter is passed for API consistency but will be ignored by the debugger.
-        # Stack traces may be incomplete - use start_debug/launch for full functionality.
-        self._begin_debuggee_epoch()
-        response = await self._client.attach(process_id, just_my_code=False)
+            # justMyCode is ignored by netcoredbg in attach mode.
+            self._begin_debuggee_epoch()
+            response = await self._client.attach(process_id, just_my_code=False)
+        except BaseException:
+            if not self._client.attach_may_have_dispatched(dap_generation):
+                restoration = asyncio.create_task(self._client.restore_pre_attach(dap_generation))
+                try:
+                    while True:
+                        try:
+                            await asyncio.shield(restoration)
+                            break
+                        except asyncio.CancelledError:
+                            if restoration.cancelled():
+                                raise RuntimeError("adapter policy restoration was cancelled")
+                except Exception as error:
+                    raise RuntimeError(
+                        "adapter policy restoration failed; reuse blocked"
+                    ) from error
+                self._debuggee_mode = None
+            else:
+                self._record_unconfirmed_attach(process_id)
+            raise
+        self._record_unconfirmed_attach(process_id)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")
         self._require_live_dap_generation(dap_generation, "attach")
@@ -2337,6 +2433,51 @@ class SessionManager:
             # publication. Join foreground work inside the `try` so cancellation
             # cannot strand that marker and misclassify a delayed finalizer result.
             await self._cancel_stealth_foreground_restore_task()
+            if (self._debuggee_mode == (stopping_generation, "attach")
+                    and not self._client.attach_may_have_dispatched(stopping_generation)):
+                await self._client.restore_pre_attach(stopping_generation)
+                self._debuggee_mode = None
+            if self._debuggee_mode == (stopping_generation, "attach"):
+                if (self._attach_disconnect is None
+                        or self._attach_disconnect[0] != stopping_generation):
+                    task = (
+                        asyncio.create_task(self._client.disconnect(terminate=False))
+                        if self._client.is_running else None
+                    )
+                    self._attach_disconnect = (stopping_generation, task)
+                disconnect_task = self._attach_disconnect[1]
+                detail = "adapter transport was unavailable"
+                if disconnect_task is not None:
+                    while True:
+                        try:
+                            response = await asyncio.shield(disconnect_task)
+                            detail = (
+                                "disconnect acknowledged; CLR detach is not confirmed"
+                                if response.success else
+                                f"disconnect rejected: {response.message or 'no detail'}"
+                            )
+                            break
+                        except asyncio.CancelledError:
+                            if disconnect_task.cancelled():
+                                detail = "disconnect operation was cancelled"
+                                break
+                            cancelled = True
+                        except Exception as error:
+                            detail = f"disconnect failed: {error}"
+                            break
+                if isinstance(self._client, DAPClient):
+                    try:
+                        receipt = await self._client.observe_attach_cleanup()
+                        self._release_drained_attach_owner(stopping_generation, receipt)
+                    except Exception as error:
+                        logger.warning("Passive attached-adapter observation failed: %s", error)
+                self._state.execution_outcome_unknown = True
+                self._publish_resource_updates(STATE_URI)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise RuntimeError(
+                    f"CLR detach unconfirmed ({detail}); adapter cleanup is separate"
+                )
             if isinstance(owner, OwnedProcessRef):
                 if validated_owner_receipt is None:
                     effective_receipt, cancelled = await self._join_owned_adapter_finalizer(

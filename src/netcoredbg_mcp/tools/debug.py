@@ -304,8 +304,9 @@ def register_debug_tools(
         This is an UPSTREAM limitation that CANNOT be fixed by this MCP server.
         Result: stack traces will be incomplete/empty, debugging will be unreliable.
 
-        ONLY use this if you MUST debug an already-running process that you
-        cannot restart (e.g., production service, container you cannot control).
+        ATTACH SAFETY: Stop requests detach once but cannot confirm CLR detach.
+        Target survival after host or adapter failure is unproven. Do not attach
+        to a process that you cannot afford to lose.
 
         For normal debugging, ALWAYS use start_debug which has full functionality.
         If start_debug fails with build errors, fix the build - don't switch to attach.
@@ -595,7 +596,7 @@ def register_debug_tools(
                 state="unknown" if unknown else session.state.state,
                 next_actions=["get_debug_state", "stop_debug"] if unknown else None,
                 message=(
-                    "Tracepoint operation may have executed; do not retry it automatically."
+                    "Execution outcome is unconfirmed; do not retry operations automatically."
                     if unknown else None
                 ),
             )

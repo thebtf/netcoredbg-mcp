@@ -879,10 +879,16 @@ ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=...
 Старые PID-файлы остаются нетронутыми и не участвуют в очистке. При запуске
 сервер больше не завершает процессы по PID из этих файлов.
 
-Остановка и очистка сессии attach отключают отладчик от целевого процесса,
-а не завершают этот процесс. Явный запрос `terminate_debug` остаётся отдельным
-действием. Очистка FlaUI bridge не даёт права завершать подключённое UI-приложение.
-При ошибке очистки результат остаётся неполным: удаление записей не означает успех.
+**Attach safety:** Installed Python 0.23.13 can report an unconfirmed detach as
+successful and may force its adapter; losing the adapter can end the target.
+Do not attach to a process that cannot be lost.
+
+In the unreleased source-built Python server, stop sends one non-terminating
+disconnect request and reports CLR detach as unconfirmed even after an
+acknowledgement. Requested PIDs are observations, not process identities;
+target survival and safety after unexpected host or adapter exit are unknown.
+An explicit `terminate_debug` remains a separate action. FlaUI bridge cleanup
+does not grant ownership of the UI app.
 
 На Windows очистка использует сохранённые дескрипторы процесса и Job.
 На POSIX частный процесс-наблюдатель управляет собственной действующей группой
