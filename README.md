@@ -47,7 +47,7 @@ read-only preview retains its modern-only protocol boundary.
 
 The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
-only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
+only `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
@@ -60,6 +60,14 @@ session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+`debuggee_activity` observes reader-received DAP events over 1–30,000 ms
+(default 1,000) from an initially running session. It does not measure executed
+instructions. Native tracepoint tools are not available, so `traceEntries` is
+zero for this host; it is not evidence that arbitrary debuggee tracing is absent.
+In legacy mode, a successful launch is projected as running until the first
+lifecycle event, as in Python; this is not an observed DAP `continued` event.
+Unprojectable states, including stops without a thread ID, are refused.
 
 `get_build_diagnostics(include_warnings=true)` reads the latest accepted legacy
 pre-build result, retained across stop. A new pre-build clears the prior result;

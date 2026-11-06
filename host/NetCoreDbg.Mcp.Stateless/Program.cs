@@ -274,6 +274,7 @@ internal static class Program
     {
         private const string StartDebug = "start_debug";
         private const string GetDebugState = "get_debug_state";
+        private const string DebuggeeActivity = "debuggee_activity";
         private const string StopDebug = "stop_debug";
         private const string RestartDebug = "restart_debug";
         private const string TerminateDebug = "terminate_debug";
@@ -747,7 +748,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or "output_checkpoint" or "output_assert_since"
+                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -828,7 +829,7 @@ internal static class Program
                     return LegacyError("A debug session is starting.");
                 if (mutation && _legacyStopping)
                     return LegacyError("A debug session is stopping.");
-                if (mutation && name != StartDebug && _legacySessionId is not null)
+                if ((mutation || (name == DebuggeeActivity && muxId is not null)) && name != StartDebug && _legacySessionId is not null)
                 {
                     var timeout = 60.0;
                     var configured = Environment.GetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT");
@@ -841,7 +842,7 @@ internal static class Program
                         _legacyHasOwner = false;
                         _legacyOwner = null;
                     }
-                    if (_legacyHasOwner && _legacyOwner != muxId)
+                    if (_legacyHasOwner && _legacyOwner != muxId && !(name == DebuggeeActivity && _legacyOwner is null))
                         return LegacyError("Debug session is owned by another agent.");
                     _legacyHasOwner = true;
                     _legacyOwner = muxId;
@@ -1281,6 +1282,83 @@ internal static class Program
                         stopReason = snapshot.Reason,
                         exitCode = snapshot.ExitCode
                     }, snapshot.State);
+                }
+                if (name == DebuggeeActivity)
+                {
+                    long windowMs = 1000;
+                    if (arguments.TryGetValue("window_ms", out var window) &&
+                        (window.ValueKind != JsonValueKind.Number || !window.TryGetInt64(out windowMs) || windowMs is < 1 or > 30000))
+                        return LegacyError("window_ms must be an integer from 1 to 30000");
+                    if (_legacyStarting || _legacyStopping || _legacySessionId is not { } activityId ||
+                        !_sessions.TryGetValue(activityId, out var activitySession))
+                        return LegacyError("debuggee_activity requires state RUNNING");
+                    var before = activitySession.CaptureLegacyActivity();
+                    if (ProjectLegacyState(before.State).State != "running" || !_isUsable(activitySession))
+                        return LegacyError("debuggee_activity requires state RUNNING");
+                    var generation = _legacySessionGeneration;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    await Task.Delay((int)windowMs, cancellationToken).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    gateHeld = true;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var after = activitySession.CaptureLegacyActivity();
+                    var end = ProjectLegacyState(after.State);
+                    if (_legacySessionGeneration != generation || _legacySessionId != activityId || _legacyStarting || _legacyStopping ||
+                        end.State is not ("running" or "stopped" or "terminated") ||
+                        (end.State != "terminated" && (!_sessions.TryGetValue(activityId, out var currentActivity) ||
+                            !ReferenceEquals(currentActivity, activitySession) || !_isUsable(activitySession))) ||
+                        (end.State == "terminated" && LegacySnapshot(activityId).State != "terminated"))
+                        return LegacyError("debug session changed during activity window");
+                    var continued = after.Continued - before.Continued;
+                    var stopped = after.Stopped - before.Stopped;
+                    var steps = after.StepStops - before.StepStops;
+                    var output = after.Output - before.Output;
+                    var added = after.ModuleNew - before.ModuleNew;
+                    var changed = after.ModuleChanged - before.ModuleChanged;
+                    var removed = after.ModuleRemoved - before.ModuleRemoved;
+                    var signals = new List<string>();
+                    if (continued > 0) signals.Add("continuedEvents");
+                    if (stopped > 0) signals.Add("stoppedEvents");
+                    if (steps > 0) signals.Add("stepStops");
+                    if (output > 0) signals.Add("outputEvents");
+                    if (added > 0) signals.Add("moduleEvents.new");
+                    if (changed > 0) signals.Add("moduleEvents.changed");
+                    if (removed > 0) signals.Add("moduleEvents.removed");
+                    static object ActivityState(DapSessionState state, int? pid)
+                    {
+                        var projected = ProjectLegacyState(state);
+                        var execution = projected.State == "stopped" ? projected.Reason switch
+                        {
+                            "breakpoint" or "function breakpoint" or "data breakpoint" or "entry" => "stopped-at-breakpoint",
+                            "exception" => "stopped-at-exception",
+                            "step" => "stepping",
+                            "pause" => "stopped-at-pause",
+                            _ => "stopped-other"
+                        } : projected.State;
+                        return new { state = projected.State, execState = execution, stopReason = projected.Reason, debuggeePid = pid };
+                    }
+                    return LegacyResponse(new
+                    {
+                        windowMs,
+                        startedAt = before.CapturedAt,
+                        endedAt = after.CapturedAt,
+                        elapsedMs = (after.CapturedAt - before.CapturedAt) * 1000,
+                        start = ActivityState(before.State, before.ProcessId),
+                        end = ActivityState(after.State, after.ProcessId),
+                        deltas = new
+                        {
+                            continuedEvents = continued,
+                            stoppedEvents = stopped,
+                            stepStops = steps,
+                            outputEvents = output,
+                            moduleEvents = new { total = added + changed + removed, @new = added, changed, removed },
+                            traceEntries = 0
+                        },
+                        observedActivity = signals.Count != 0,
+                        activitySignals = signals,
+                        instructionsExecuted = new { available = false, reason = "The current NetCoreDbg/DAP capability surface exposes no executed-instruction counter." }
+                    }, end.State);
                 }
                 if (name is SearchOutput or "output_checkpoint" or "output_assert_since")
                 {
@@ -2097,6 +2175,7 @@ internal static class Program
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
                     GetOutputTail => key is not ("lines" or "category"),
+                    DebuggeeActivity => key != "window_ms",
                     GetBuildDiagnostics => key != "include_warnings",
                     SearchOutput => key is not ("pattern" or "context_lines" or "category"),
                     "output_checkpoint" => key != "name",
@@ -2476,7 +2555,7 @@ internal static class Program
 
         private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot(string sessionId)
         {
-            if (_sessions.TryGetValue(sessionId, out var session)) return ProjectLegacyState(session.State);
+            if (_sessions.TryGetValue(sessionId, out var session)) return ProjectLegacyState(session.LegacyState);
             lock (_lifetimeGate)
             {
                 if (_outputs.TryGetValue(sessionId, out var output))
@@ -2507,7 +2586,7 @@ internal static class Program
         {
             "idle" => ["start_debug"],
             "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "get_output", "get_output_tail", "stop_debug"],
-            "running" => ["get_debug_state", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
+            "running" => ["get_debug_state", "debuggee_activity", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
             _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
         };
 
@@ -6710,6 +6789,7 @@ internal static class Program
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("debuggee_activity", "Observe DAP events during a bounded running-session window; trace tools are unavailable.", """{"type":"object","properties":{"window_ms":{"type":"integer","minimum":1,"maximum":30000,"default":1000}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_call_stack", "Read up to 256 frames from a stopped thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]},"levels":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Set a source breakpoint; requested options require advertised adapter support and are not proof of enforcement.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647},"condition":{"type":["string","null"]},"hit_condition":{"type":["string","null"]}},"required":["file","line"],"additionalProperties":false}"""),

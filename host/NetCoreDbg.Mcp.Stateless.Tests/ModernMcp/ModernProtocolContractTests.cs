@@ -4330,6 +4330,225 @@ public sealed class ModernProtocolContractTests
         Assert.Null(driver.Client.ServerCapabilities?.Resources);
     }
 
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_RejectsUnprojectableEndState()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["event"] = "continued", ["body"] = new JsonObject { ["allThreadsContinued"] = true } }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(new JsonObject
+                {
+                    ["event"] = "stopped",
+                    ["body"] = new JsonObject { ["reason"] = "pause", ["allThreadsStopped"] = true }
+                })
+            })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-invalid-end-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var activity = LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1500 }, owner);
+            await Task.Delay(200);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.Equal("debug session changed during activity window", (await activity)["error"]?.GetValue<string>());
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_ReportsObservedEventDeltas()
+    {
+        static JsonObject Event(string name, JsonObject body) => new() { ["event"] = name, ["body"] = body };
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(Event("continued", new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true })),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(
+                Event("continued", new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true }),
+                new JsonObject { ["category"] = "stdout", ["output"] = "activity\n" },
+                new JsonObject { ["category"] = "invalid", ["output"] = "ignored\n" },
+                new JsonObject { ["category"] = "stdout", ["output"] = "" },
+                Event("module", new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 1, ["name"] = "app" } }),
+                Event("module", new JsonObject { ["reason"] = "changed", ["module"] = new JsonObject { ["id"] = 1, ["name"] = "app" } }),
+                Event("module", new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = 1, ["name"] = "app" } }),
+                Event("stopped", new JsonObject { ["reason"] = "step", ["threadId"] = 1, ["allThreadsStopped"] = true }))
+            })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var activity = LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1500 }, owner);
+            await Task.Delay(200);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var result = await activity;
+            Assert.Null(result["error"]);
+            var data = Assert.IsType<JsonObject>(result["data"]);
+            Assert.Equal("running", data["start"]?["state"]?.GetValue<string>());
+            Assert.Equal("stopped", data["end"]?["state"]?.GetValue<string>());
+            Assert.Equal("stepping", data["end"]?["execState"]?.GetValue<string>());
+            Assert.Equal(1, data["deltas"]?["continuedEvents"]?.GetValue<int>());
+            Assert.Equal(1, data["deltas"]?["stoppedEvents"]?.GetValue<int>());
+            Assert.Equal(1, data["deltas"]?["stepStops"]?.GetValue<int>());
+            Assert.Equal(2, data["deltas"]?["outputEvents"]?.GetValue<int>());
+            Assert.Equal(3, data["deltas"]?["moduleEvents"]?["total"]?.GetValue<int>());
+            Assert.Equal(1, data["deltas"]?["moduleEvents"]?["new"]?.GetValue<int>());
+            Assert.Equal(1, data["deltas"]?["moduleEvents"]?["changed"]?.GetValue<int>());
+            Assert.Equal(1, data["deltas"]?["moduleEvents"]?["removed"]?.GetValue<int>());
+            Assert.Equal(0, data["deltas"]?["traceEntries"]?.GetValue<int>());
+            Assert.True(data["observedActivity"]?.GetValue<bool>());
+            Assert.Equal(new[] { "continuedEvents", "stoppedEvents", "stepStops", "outputEvents", "moduleEvents.new", "moduleEvents.changed", "moduleEvents.removed" },
+                Assert.IsType<JsonArray>(data["activitySignals"]).Select(item => item!.GetValue<string>()));
+            Assert.False(data["instructionsExecuted"]?["available"]?.GetValue<bool>());
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject(), owner))["error"]);
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_RejectsForeignOwnerButAllowsMissingMuxId()
+    {
+        var script = new JsonObject { ["launch"] = new JsonArray(new JsonObject { ["event"] = "continued", ["body"] = new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true } }) };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "activity-other" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var denied = await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1 }, other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var anonymous = await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1 }, new JsonObject());
+            Assert.Null(anonymous["error"]);
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_AcceptsLaunchWithoutContinuedEvent()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-launch-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner);
+            Assert.Equal("running", state["state"]?.GetValue<string>());
+            var activity = await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1 }, owner);
+            Assert.Null(activity["error"]);
+            Assert.Equal("running", activity["data"]?["start"]?["state"]?.GetValue<string>());
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_PreservesStoppedEventBeforeLaunchAcknowledgement()
+    {
+        var script = new JsonObject { ["launch"] = new JsonArray(new JsonObject { ["event"] = "stopped", ["body"] = new JsonObject { ["reason"] = "breakpoint", ["threadId"] = 1, ["allThreadsStopped"] = true } }) };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-stopped-launch-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            Assert.Equal("stopped", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1 }, owner))["error"]);
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_ClaimsNamedOwnerAfterAnonymousLaunch()
+    {
+        var script = new JsonObject { ["launch"] = new JsonArray(new JsonObject { ["event"] = "continued", ["body"] = new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true } }) };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString(), ["NETCOREDBG_SESSION_TIMEOUT"] = "0" }));
+        var anonymous = new JsonObject();
+        var owner = new JsonObject { ["muxSessionId"] = "activity-after-anonymous" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, anonymous))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var activity = await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1 }, owner);
+            Assert.Null(activity["error"]);
+        }
+        finally
+        {
+            // Expire the named claim so cleanup uses the driver's original anonymous launch identity.
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), anonymous))["data"]?["success"]?.GetValue<bool>());
+        }
+    }
+
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_ValidatesWindowAndRejectsSessionReplacement()
+    {
+        var script = new JsonObject { ["launch"] = new JsonArray(new JsonObject { ["event"] = "continued", ["body"] = new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true } }) };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-replacement-owner" };
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(new JsonObject(), new RequestId("activity-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == "debuggee_activity");
+        var windowSchema = tool["inputSchema"]?["properties"]?["window_ms"];
+        Assert.Equal("integer", windowSchema?["type"]?.GetValue<string>());
+        Assert.Equal(1, windowSchema?["minimum"]?.GetValue<int>());
+        Assert.Equal(30000, windowSchema?["maximum"]?.GetValue<int>());
+        Assert.Equal(1000, windowSchema?["default"]?.GetValue<int>());
+        foreach (var value in new JsonNode?[] { JsonValue.Create(true), JsonValue.Create(0), JsonValue.Create(30001), JsonValue.Create(1.5), JsonValue.Create("1000"), null })
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = value }, owner))["error"]);
+        Assert.Equal("debuggee_activity requires state RUNNING", (await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject(), owner))["error"]?.GetValue<string>());
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        var quiet = await LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject(), owner);
+        Assert.Null(quiet["error"]);
+        Assert.Equal(1000, quiet["data"]?["windowMs"]?.GetValue<int>());
+        Assert.False(quiet["data"]?["observedActivity"]?.GetValue<bool>());
+        Assert.Empty(Assert.IsType<JsonArray>(quiet["data"]?["activitySignals"]));
+        var activity = LegacyConsoleCallAsync(driver, "debuggee_activity", new JsonObject { ["window_ms"] = 1500 }, owner);
+        await Task.Delay(200);
+        Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        var result = await activity;
+        Assert.Equal("debug session changed during activity window", result["error"]?.GetValue<string>());
+        Assert.Null(result["data"]);
+    }
+
+    [Fact]
+    public async Task LegacyCompat_DebuggeeActivity_CancellationDoesNotBlockStop()
+    {
+        var script = new JsonObject { ["launch"] = new JsonArray(new JsonObject { ["event"] = "continued", ["body"] = new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true } }) };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "activity-cancel-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        using var cancel = new CancellationTokenSource();
+        var activity = driver.CallToolRawAsync("debuggee_activity", new JsonObject { ["window_ms"] = 30000 }, owner, new RequestId("activity-cancel"), cancel.Token);
+        await Task.Delay(200);
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await activity);
+        Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+    }
+
     private static async Task<JsonObject> LegacyConsoleCallAsync(ModernMcpProcessDriver driver, string tool,
         JsonObject arguments, JsonObject meta, TimeSpan? timeout = null)
     {
