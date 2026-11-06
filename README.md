@@ -48,7 +48,7 @@ read-only preview retains its modern-only protocol boundary.
 The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
 only `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
-`get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
+`get_scopes`, `get_variables`, `evaluate_expression`, `quick_evaluate`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
@@ -213,6 +213,18 @@ If the stopped context changes before a stack, scope, variable or evaluation
 response is published, the legacy route returns an error instead of mixing
 epochs. A dispatched evaluation may already have executed; an unknown outcome
 must not be retried automatically.
+
+`quick_evaluate` requires a running session and mux ownership. It requests a
+pause, waits for a matching stopped thread, evaluates once and resumes the same
+current stop after a successful or explicitly rejected evaluation. A breakpoint
+or changed stop observed before resume, or a pause, stop or restart admitted
+before resume write admission, prevents that automatic resume.
+DAP does not correlate a stopped event to a particular pause request, so an
+indistinguishable external pause cannot be ruled out. Cancellation or an
+unconfirmed write is not retried and may close the debug session; a failed
+operation may leave the program stopped. A supplied `frame_id` is not tracked as
+previously issued. Resume acknowledgement does not guarantee that the program
+is still running when the response is received.
 
 Source-line breakpoints can be added or removed while idle. Optional `condition`
 and `hit_condition` are retained with the requested location and applied only if

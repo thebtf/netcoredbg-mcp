@@ -132,7 +132,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name is "pause_execution" or "get_modules" or "get_progress" or "get_loaded_sources" or "configure_exceptions" or "set_variable" or "search_output" or "get_stop_context" or "get_exception_context"
+                        && name is "pause_execution" or "quick_evaluate" or "get_modules" or "get_progress" or "get_loaded_sources" or "configure_exceptions" or "set_variable" or "search_output" or "get_stop_context" or "get_exception_context"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null
                         && (rawArguments is not JsonObject objectArguments
@@ -284,6 +284,7 @@ internal static class Program
         private const string GetStepInTargets = "get_step_in_targets";
         private const string GetVariables = "get_variables";
         private const string EvaluateExpression = "evaluate_expression";
+        private const string QuickEvaluate = "quick_evaluate";
         private const string SetVariable = "set_variable";
         private const string GetExceptionInfo = "get_exception_info";
         private const string GetStopContext = "get_stop_context";
@@ -808,7 +809,7 @@ internal static class Program
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
-                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression
+                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
@@ -877,7 +878,7 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
@@ -1330,6 +1331,7 @@ internal static class Program
                     if (_legacySessionId is { } previous)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+                        if (_sessions.TryGetValue(previous, out var restartSession)) restartSession.VetoQuickPause();
                         _legacySessionGeneration++;
                         _legacyStopping = true;
                         _legacyInspectionSessionId = null;
@@ -1730,6 +1732,71 @@ internal static class Program
                     return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                if (name == QuickEvaluate)
+                {
+                    if (!arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
+                        || expression.GetString() is not { } text || Encoding.UTF8.GetByteCount(text) > MaximumSerializedInspectionBytes)
+                        return LegacyError("Invalid expression.");
+                    int? frameId = null;
+                    if (arguments.TryGetValue("frame_id", out var frame) && frame.ValueKind != JsonValueKind.Null)
+                    {
+                        if (!TryReadOutputLineCount(frame, out var number) || number is < int.MinValue or > int.MaxValue)
+                            return LegacyError("Invalid frame_id.");
+                        frameId = (int)number;
+                    }
+                    if (!_sessions.TryGetValue(sessionId, out var quickSession) || !_slots.TryGetValue(sessionId, out var quickSlot))
+                        return LegacyError("No active debug session.");
+                    if (LegacySnapshot(sessionId).State != "running") return LegacyError("Program is not running; use evaluate_expression instead.");
+                    if (_legacyTracePauseVeto) return LegacyError("A previous pause may still stop the program; use explicit execution control.");
+                    var quickLease = quickSlot.TryAcquire();
+                    if (quickLease is null) return LegacyError("No active debug session.");
+                    using var quickCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    _stepOverRequests.TryAdd(context.JsonRpcRequest.Id, quickCancellation);
+                    _legacyInspectionSessionId = null;
+                    _legacyInspectionContextId = null;
+                    _legacyInspectionMuxId = null;
+                    _legacyCurrentFrameId = null;
+                    _legacyInspectionRevision++;
+                    _legacyTracePauseVeto = true;
+                    _legacyTraceRevision++;
+                    var quickPauseRevision = ++_legacyTracePauseRevision;
+                    _legacyCompositeEvaluations++;
+                    compositeEvaluationHeld = true;
+                    var close = false;
+                    (DapEvaluateResult? Value, string? Error, bool Drain) evaluated;
+                    try
+                    {
+                        using var operation = CancellationTokenSource.CreateLinkedTokenSource(quickCancellation.Token, quickLease.AbortToken);
+                        var quickOperation = quickSession.QuickEvaluateAsync(text, frameId, operation.Token);
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        evaluated = await quickOperation.ConfigureAwait(false);
+                        close = evaluated.Drain;
+                    }
+                    catch (Exception exception)
+                    {
+                        close = quickSession.RequiresInspectionDrain() || exception is DapPauseCanceledException { RequiresDrain: true }
+                            or DapContinueCanceledException { RequiresDrain: true } || exception is not OperationCanceledException;
+                        if (exception is OperationCanceledException && quickCancellation.IsCancellationRequested) throw;
+                        evaluated = (null, "Quick evaluation failed or its outcome is unknown; do not retry automatically.", close);
+                    }
+                    finally
+                    {
+                        _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(context.JsonRpcRequest.Id, quickCancellation));
+                        quickLease.Dispose();
+                        if (close) { try { await quickSlot.CloseAndDrainAsync().ConfigureAwait(false); } catch (Exception) { } }
+                    }
+                    await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (_legacySessionId != sessionId || !_sessions.TryGetValue(sessionId, out var currentQuick) || !ReferenceEquals(currentQuick, quickSession))
+                        return LegacyError("Quick evaluation outcome is unknown; do not retry automatically.", "unknown");
+                    if (quickPauseRevision == _legacyTracePauseRevision
+                        && (evaluated.Error is null || evaluated.Error == NetCoreDbgSession.QuickEvaluationFailedAfterResume))
+                        _legacyTracePauseVeto = false;
+                    if (evaluated.Error is not null) return LegacyError(evaluated.Error);
+                    var value = evaluated.Value!;
+                    return LegacyBoundedUtilityResponse(new { result = value.Result, type = value.Type ?? "", variablesReference = value.VariablesReference }, LegacySnapshot(sessionId).State);
+                }
                 var terminateFallback = false;
                 if (name == TerminateDebug)
                 {
@@ -1801,6 +1868,7 @@ internal static class Program
                 }
                 if (name == PauseExecution)
                 {
+                    if (_sessions.TryGetValue(sessionId, out var pauseSession)) pauseSession.VetoQuickPause();
                     _legacyTracePauseVeto = true;
                     _legacyTraceRevision++;
                     _legacyTracePauseRevision++;
@@ -1873,6 +1941,7 @@ internal static class Program
                 if (name == StopDebug)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (_sessions.TryGetValue(sessionId, out var stopSession)) stopSession.VetoQuickPause();
                     _legacySessionGeneration++;
                     _legacyStopping = true;
                     OutputLifetime? retiringOutput;
@@ -3189,7 +3258,7 @@ internal static class Program
                     GetScopes => key != "frame_id",
                     GetStepInTargets => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
-                    EvaluateExpression => key is not ("expression" or "frame_id"),
+                    EvaluateExpression or QuickEvaluate => key is not ("expression" or "frame_id"),
                     ReadMemory => key is not ("memory_reference" or "offset" or "count"),
                     Disassemble => key is not ("memory_reference" or "offset" or "instruction_offset" or "instruction_count" or "resolve_symbols"),
                     GetLocations => key != "location_reference",
@@ -7842,6 +7911,7 @@ internal static class Program
                 Tool("get_scopes", "Get scopes for the current stopped stack frame, or an explicit frame ID. Select a fresh stack after execution.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_variables", "Get variables for a reference in the current stopped context. Filtering is unsupported; paging is nonnegative.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":"null"},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["variables_reference"],"additionalProperties":false}"""),
                 Tool("evaluate_expression", "Evaluate in the current stopped context. Expressions may mutate the debuggee; mux ownership is required and uncertain writes are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
+                Tool("quick_evaluate", "Pause a running owned session, evaluate once and resume only the same observed pause stop. Uncertain actions are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
                 Tool("set_variable", "Set a variable in the selected stopped context; select a fresh stack afterwards. Uncertain writes must not be retried automatically.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["variables_reference","name","value"],"additionalProperties":false}"""),
                 Tool("configure_exceptions", "Replace exception filters with owner permission. Omitted or null filters select an empty list.", """{"type":"object","properties":{"filters":{"type":["array","null"],"items":{"type":"string"}}},"additionalProperties":false}"""),
                 Tool("get_exception_info", "Read exception information for the observed stopped context and optional thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),

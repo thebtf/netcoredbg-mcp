@@ -1362,6 +1362,305 @@ public sealed class ModernProtocolContractTests
         }
     }
 
+    private static ModernMcpStartOptions QuickEvaluateOptions(string pauseMode = "ack-before-stopped-held") => new(
+        ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+        FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true,
+            PauseResponseMode: pauseMode, NextResponseMode: "continue-ack-only"));
+
+    private static async Task StartQuickEvaluateSessionAsync(ModernMcpProcessDriver driver, JsonObject owner)
+    {
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(owner, new RequestId("quick-evaluate-catalog")));
+        Assert.Contains(Assert.IsType<JsonArray>(catalog["tools"]), item => item?["name"]?.GetValue<string>() == "quick_evaluate");
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner))["data"]?["success"]?.GetValue<bool>());
+        Assert.Equal("running", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_RunningWaitsForStopEvaluatesFrameAndResumesOnce()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-evaluate-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var pending = LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "tupleVar" }, owner);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            Assert.False(pending.IsCompleted);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), a => a.Command is "stackTrace" or "evaluate" or "continue");
+            driver.ReleasePauseStoppedEvent();
+            var result = await pending;
+            Assert.Null(result["error"]);
+            Assert.Equal("(\"test\", 123)", result["data"]?["result"]?.GetValue<string>());
+            Assert.Equal("(string, int)", result["data"]?["type"]?.GetValue<string>());
+            Assert.Equal(1002, result["data"]?["variablesReference"]?.GetValue<int>());
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).Where(a => a.Command is "pause" or "stackTrace" or "evaluate" or "continue").ToArray();
+            Assert.Equal(new[] { "pause", "stackTrace", "evaluate", "continue" }, actions.Select(a => a.Command));
+            Assert.Equal(1, JsonNode.Parse(actions[1].Detail!)?["arguments"]?["threadId"]?.GetValue<int>());
+            Assert.Equal(1, JsonNode.Parse(actions[2].Detail!)?["arguments"]?["frameId"]?.GetValue<int>());
+            Assert.Equal("tupleVar", JsonNode.Parse(actions[2].Detail!)?["arguments"]?["expression"]?.GetValue<string>());
+            Assert.Equal(1, JsonNode.Parse(actions[3].Detail!)?["arguments"]?["threadId"]?.GetValue<int>());
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_NegativeEvaluationReturnsErrorAndResumesOnce()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-negative-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var pending = LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "fixture:negative" }, owner);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            var result = await pending;
+            Assert.NotNull(result["error"]);
+            Assert.Null(result["data"]);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).Where(a => a.Command is "pause" or "stackTrace" or "evaluate" or "continue").ToArray();
+            Assert.Equal(new[] { "pause", "stackTrace", "evaluate", "continue" }, actions.Select(a => a.Command));
+            Assert.Equal("running", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_RejectsStoppedAndForeignOwnerWithoutDispatch()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "quick-other" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var denied = await LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "6 * 7" }, other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), a => a.Command is "pause" or "evaluate" or "continue");
+            Assert.True((await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject { ["thread_id"] = 1 }, owner))["data"]?["success"]?.GetValue<bool>());
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            await driver.WaitForFixtureRecordAsync("pause-stopped", deadline.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            before = (await driver.ReadNativeActionsAsync()).Count;
+            var stopped = await LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "6 * 7" }, owner);
+            Assert.NotNull(stopped["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), a => a.Command is "pause" or "evaluate" or "continue");
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_BreakpointDuringPauseIsNotContinued()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions("ack-before-breakpoint-held"));
+        var owner = new JsonObject { ["muxSessionId"] = "quick-breakpoint-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var pending = LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "6 * 7" }, owner);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            var result = await pending;
+            Assert.NotNull(result["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), a => a.Command is "evaluate" or "continue");
+            Assert.Equal("stopped", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_ChangedStopDuringEvaluationIsNotContinued()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-restop-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var pending = LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "fixture:hold-then-continued-restop" }, owner);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            await driver.WaitForFixtureRecordAsync("evaluate-restopped-event", deadline.Token);
+            driver.ReleaseStackTraceResponse();
+            var result = await pending;
+            Assert.NotNull(result["error"]);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            Assert.Single(actions, a => a.Command == "evaluate");
+            Assert.DoesNotContain(actions, a => a.Command == "continue");
+            Assert.Equal("stopped", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            driver.ReleaseStackTraceResponse();
+            await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_PreHeaderVetoPreservesStoppedSession()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", PauseResponseMode: "ack-before-stopped-held", NextResponseMode: "continue-ack-only"),
+            Path.GetFullPath(BreakpointSourcePath), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30), TimeSpan.FromMilliseconds(300), CancellationToken.None);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", deadline.Token);
+        await session.WaitForReaderBarrierAsync(deadline.Token);
+        var field = typeof(NetCoreDbgSessionContractDriver).GetField("_session", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var target = field.GetValue(session)!;
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var dispatch = target.GetType().GetMethod("DispatchMessage", flags)!;
+        dispatch.Invoke(target, [JsonSerializer.SerializeToElement(new { seq = 10000, type = "event", @event = "continued", body = new { threadId = 1, allThreadsContinued = true } })]);
+        var quick = target.GetType().GetMethod("QuickEvaluateAsync", flags)!;
+        var operation = Assert.IsAssignableFrom<Task>(quick.Invoke(target, ["fixture:hold", null, deadline.Token]));
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("pause-stop-gated", deadline.Token);
+            session.Fixture.ReleasePauseStoppedEvent();
+            await session.Fixture.WaitForTranscriptKindAsync("evaluate-response-gated", deadline.Token);
+            session.ArmDapWriteBeforeHeaderBarrier();
+            session.Fixture.ReleaseStackTraceResponse();
+            await session.WaitForDapPreHeaderWriteAsync(deadline.Token);
+            target.GetType().GetMethod("VetoQuickPause", flags)!.Invoke(target, []);
+            session.ReleaseDapWriteBarrier();
+            await operation.WaitAsync(deadline.Token);
+            var result = operation.GetType().GetProperty("Result")!.GetValue(operation)!;
+            Assert.NotNull(result.GetType().GetField("Item2")!.GetValue(result));
+            Assert.True(session.IsUsable);
+            Assert.False(session.IsExecutionClosing);
+            Assert.Equal("stopped", session.State.Event);
+            Assert.True(session.CanCaptureInspectionTarget());
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "request" && entry.Command == "continue");
+        }
+        finally
+        {
+            session.Fixture.ReleasePauseStoppedEvent();
+            session.Fixture.ReleaseStackTraceResponse();
+            session.ReleaseDapWriteBarrier();
+            await Record.ExceptionAsync(async () => await operation.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_QuickEvaluate_StopOrRestartDuringEvaluationNeverResumes(bool restart)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-stop-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        Task<JsonObject>? pending = null;
+        Task<JsonObject>? stop = null;
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            pending = LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "fixture:hold" }, owner, TimeSpan.FromSeconds(30));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            stop = LegacyConsoleCallAsync(driver, restart ? "restart_debug" : "stop_debug",
+                restart ? new JsonObject { ["rebuild"] = false } : new JsonObject(), owner, TimeSpan.FromSeconds(30));
+            while ((await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>() != "unknown")
+                await Task.Delay(10, deadline.Token);
+            Assert.False(stop.IsCompleted);
+            driver.ReleaseStackTraceResponse();
+            Assert.NotNull((await pending.WaitAsync(TimeSpan.FromSeconds(10)))["error"]);
+            Assert.True((await stop.WaitAsync(TimeSpan.FromSeconds(15)))["data"]?["success"]?.GetValue<bool>());
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            Assert.Single(actions, a => a.Command == "evaluate");
+            Assert.DoesNotContain(actions, a => a.Command == "continue");
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            driver.ReleaseStackTraceResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(15)));
+            if (stop is not null) await Record.ExceptionAsync(async () => await stop.WaitAsync(TimeSpan.FromSeconds(15)));
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_CancelledEvaluationDoesNotReplayOrContinue()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "quick-cancel-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            using var cancellation = new CancellationTokenSource();
+            var pending = driver.CallToolRawAsync("quick_evaluate", new JsonObject { ["expression"] = "fixture:hold" }, owner,
+                new RequestId("quick-evaluate-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(30));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            driver.ReleasePauseStoppedEvent();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
+            await driver.WaitForFixtureRecordAsync("disconnect-response", deadline.Token);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            Assert.Single(actions, a => a.Command == "pause");
+            Assert.Single(actions, a => a.Command == "evaluate");
+            Assert.DoesNotContain(actions, a => a.Command == "continue");
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            driver.ReleaseStackTraceResponse();
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_QuickEvaluate_UncertainPauseIsNotRetriedOrReportedAsSuccess()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions("wrong-command"));
+        var owner = new JsonObject { ["muxSessionId"] = "quick-uncertain-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "quick_evaluate", new JsonObject { ["expression"] = "6 * 7" }, owner, TimeSpan.FromSeconds(35));
+            Assert.NotNull(result["error"]);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            Assert.Single(actions, a => a.Command == "pause");
+            Assert.DoesNotContain(actions, a => a.Command is "evaluate" or "continue");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
     [Fact]
     public async Task LegacyCompat_OutputEvidence_IdleCheckpointDuplicateAndMissing()
     {
