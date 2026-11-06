@@ -128,7 +128,8 @@ internal static class LegacyDebugFreshness
         var moduleNames = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var module in modules.EnumerateArray())
         {
-            var path = module.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? DisplayPath(p.GetString()!) : null;
+            var rawPath = module.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+            var path = string.IsNullOrEmpty(rawPath) ? null : DisplayPath(rawPath);
             var name = module.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
             if (string.IsNullOrEmpty(name)) name = path is null ? null : Path.GetFileName(path);
             var record = new Dictionary<string, object?> { ["name"] = name, ["path"] = path };

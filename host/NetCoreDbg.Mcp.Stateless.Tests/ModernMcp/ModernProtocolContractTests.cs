@@ -5954,12 +5954,14 @@ public sealed class ModernProtocolContractTests
             ["launch"] = new JsonArray(
                 new JsonObject { ["event"] = "process", ["body"] = new JsonObject { ["systemProcessId"] = Environment.ProcessId, ["name"] = "FixtureApp", ["isLocalProcess"] = false } },
                 new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "new", ["source"] = new JsonObject { ["name"] = "Program.cs", ["path"] = source } } },
-                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "", ["path"] = artifact, ["symbolStatus"] = "Symbols loaded." } } }),
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "", ["path"] = artifact, ["symbolStatus"] = "Symbols loaded." } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 8, ["name"] = "NoPath.dll", ["path"] = "" } } }),
             ["threads"] = new JsonArray(new JsonObject
             {
                 ["entries"] = new JsonArray(
                 new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "removed", ["source"] = new JsonObject { ["name"] = "Program.cs", ["path"] = source } } },
-                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "App.dll", ["path"] = artifact } } })
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = 7 } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = 8 } } })
             })
         };
         try
@@ -5990,11 +5992,16 @@ public sealed class ModernProtocolContractTests
                 Assert.Equal("FixtureApp", pass["data"]?["process"]?["process_name"]?.GetValue<string>());
                 Assert.True(pass["data"]?["workspace"]?["matched"]?.GetValue<bool>());
                 Assert.Equal(source, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["loaded_sources"]?["paths"]))?.GetValue<string>());
-                Assert.Equal("App.dll", Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]))?["name"]?.GetValue<string>());
-                Assert.Equal("Symbols loaded.", Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]))?["symbolStatus"]?.GetValue<string>());
+                var records = Assert.IsType<JsonArray>(pass["data"]?["modules"]?["records"]);
+                var namedFromPath = Assert.Single(records, item => item?["id"]?.GetValue<int>() == 7);
+                Assert.Equal("App.dll", namedFromPath?["name"]?.GetValue<string>());
+                Assert.Equal("Symbols loaded.", namedFromPath?["symbolStatus"]?.GetValue<string>());
                 Assert.Equal(artifact, Assert.Single(Assert.IsType<JsonArray>(pass["data"]?["artifacts"]?["existing"]))?.GetValue<string>());
                 Assert.Empty(Assert.IsType<JsonArray>(pass["data"]?["warnings"]));
                 Assert.Empty(Assert.IsType<JsonArray>(pass["data"]?["mismatches"]));
+                var emptyPathMatch = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject { ["expected_modules"] = new JsonArray(".") }, owner);
+                Assert.Equal("FAIL", emptyPathMatch["data"]?["status"]?.GetValue<string>());
+                Assert.Null(Assert.Single(records, item => item?["id"]?.GetValue<int>() == 8)?["path"]);
                 Assert.NotNull((await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), foreign))["error"]);
                 Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "verify_debug_freshness", Expected(), new JsonObject()))["data"]?["status"]?.GetValue<string>());
                 var failed = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject
