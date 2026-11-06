@@ -1168,6 +1168,225 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_OutputEvidence_IdleCheckpointDuplicateAndMissing()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var owner = new JsonObject { ["muxSessionId"] = "idle-evidence-owner" };
+        var checkpoint = await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner);
+        Assert.Equal("PASS", checkpoint["data"]?["status"]?.GetValue<string>());
+        Assert.Equal("before", checkpoint["data"]?["checkpoint"]?.GetValue<string>());
+        var noOutput = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "before", ["regex"] = false }, owner);
+        Assert.Equal("PASS", noOutput["data"]?["status"]?.GetValue<string>());
+        Assert.Equal(1, noOutput["data"]?["searched_range"]?["start_sequence"]?.GetValue<int>());
+        Assert.Null(noOutput["data"]?["searched_range"]?["end_sequence"]);
+        var duplicate = await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner);
+        Assert.Equal("FAIL", duplicate["data"]?["status"]?.GetValue<string>());
+        var missing = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "missing" }, owner);
+        Assert.Equal("FAIL", missing["data"]?["status"]?.GetValue<string>());
+        var empty = await LegacyConsoleCallAsync(driver, "search_output", new JsonObject { ["pattern"] = "ready" }, owner);
+        Assert.Equal("ready", empty["data"]?["pattern"]?.GetValue<string>());
+        Assert.Equal(0, empty["data"]?["match_count"]?.GetValue<int>());
+        Assert.Empty(Assert.IsType<JsonArray>(empty["data"]?["matches"]));
+        var stopped = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+        Assert.True(stopped["data"]?["success"]?.GetValue<bool>());
+        var afterStop = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "before" }, owner);
+        Assert.Equal("FAIL", afterStop["data"]?["status"]?.GetValue<string>());
+        Assert.Equal("output checkpoint not found", afterStop["data"]?["reason"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_OutputEvidence_RefusedLaunchCannotHideForbiddenOutput()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "forbidden launch marker\n" }),
+            ["launchRefused"] = true,
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "refused-output-owner" };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+        try
+        {
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, owner);
+            Assert.NotNull(started["error"]);
+            var output = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), owner);
+            Assert.Equal(string.Empty, output["data"]?["output"]?.GetValue<string>());
+            var result = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject
+            {
+                ["checkpoint"] = "before",
+                ["forbidden"] = new JsonArray("forbidden launch marker"),
+                ["regex"] = false,
+            }, owner);
+            Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_OutputEvidence_PreStartCheckpointAssertionsAndStopReset()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["category"] = "stdout", ["output"] = "ready [1]\nready [2]\n" },
+                new JsonObject { ["category"] = "stderr", ["output"] = "warning: slow\nfatal [x]\n" }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "evidence-owner" };
+        var foreign = new JsonObject { ["muxSessionId"] = "evidence-foreign" };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            active = true;
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner);
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "foreign" }, foreign))["error"]);
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "before" }, foreign))["error"]);
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+            var passed = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject
+            {
+                ["checkpoint"] = "before",
+                ["required"] = new JsonArray("ready [", "warning: slow"),
+                ["forbidden"] = new JsonArray("fatal [absent]"),
+                ["regex"] = false,
+                ["max_matches"] = 1,
+            }, owner);
+            Assert.Equal("PASS", passed["data"]?["status"]?.GetValue<string>());
+            Assert.Empty(Assert.IsType<JsonArray>(passed["data"]?["missing_required"]));
+            Assert.Empty(Assert.IsType<JsonArray>(passed["data"]?["forbidden_matches"]));
+            var match = Assert.Single(Assert.IsType<JsonArray>(passed["data"]?["matches"]));
+            Assert.Equal("ready [", match?["pattern"]?.GetValue<string>());
+            Assert.Equal("ready [1]", match?["text"]?.GetValue<string>());
+            var failed = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject
+            {
+                ["checkpoint"] = "before",
+                ["required"] = new JsonArray("missing [literal]"),
+                ["forbidden"] = new JsonArray("fatal [x]"),
+                ["regex"] = false,
+            }, owner);
+            Assert.Equal("FAIL", failed["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("missing [literal]", Assert.Single(Assert.IsType<JsonArray>(failed["data"]?["missing_required"]))?.GetValue<string>());
+            Assert.Equal("fatal [x]", Assert.Single(Assert.IsType<JsonArray>(failed["data"]?["forbidden_matches"]))?["pattern"]?.GetValue<string>());
+            var capped = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject
+            {
+                ["checkpoint"] = "before",
+                ["forbidden"] = new JsonArray("fatal [x]"),
+                ["regex"] = false,
+                ["max_matches"] = 0,
+            }, owner);
+            Assert.Equal("FAIL", capped["data"]?["status"]?.GetValue<string>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_OutputEvidence_ClearedOrTrimmedRangeCannotPass(bool trim)
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "forbidden marker\n" }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(
+                new JsonObject { ["category"] = "stdout", ["output"] = "replacement output one\n" },
+                new JsonObject { ["category"] = "stderr", ["output"] = "replacement output two\n" })
+            }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString(),
+                ["NETCOREDBG_MAX_OUTPUT_BYTES"] = trim ? "32" : "64",
+            }));
+        var owner = new JsonObject { ["muxSessionId"] = "truncated-evidence-owner" };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            active = true;
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner);
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            if (!trim) _ = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject { ["clear"] = true }, owner);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var output = await LegacyConsoleCallAsync(driver, "get_output", new JsonObject(), owner);
+            Assert.DoesNotContain("forbidden marker", output["data"]?["output"]?.GetValue<string>());
+            Assert.Contains("replacement output two", output["data"]?["output"]?.GetValue<string>());
+            var result = await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject
+            {
+                ["checkpoint"] = "before",
+                ["forbidden"] = new JsonArray("forbidden marker"),
+                ["regex"] = false,
+            }, owner);
+            Assert.Equal("FAIL", result["data"]?["status"]?.GetValue<string>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_OutputEvidence_SearchUsesCaseInsensitivePatternCategoryAndContext()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["category"] = "stdout", ["output"] = "before\nREADY 1\nafter\n" },
+                new JsonObject { ["category"] = "stderr", ["output"] = "ready 2\n" }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "search-evidence-owner" };
+        var foreign = new JsonObject { ["muxSessionId"] = "search-evidence-reader" };
+        var active = false;
+        try
+        {
+            active = true;
+            var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner);
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var all = await LegacyConsoleCallAsync(driver, "search_output", new JsonObject { ["pattern"] = "ready [0-9]", ["context_lines"] = 1 }, foreign);
+            Assert.Equal("ready [0-9]", all["data"]?["pattern"]?.GetValue<string>());
+            Assert.Equal(2, all["data"]?["match_count"]?.GetValue<int>());
+            Assert.Equal(2, Assert.IsType<JsonArray>(all["data"]?["matches"]).Count);
+            var filtered = await LegacyConsoleCallAsync(driver, "search_output", new JsonObject { ["pattern"] = "ready [0-9]", ["context_lines"] = 1, ["category"] = "stdout" }, foreign);
+            Assert.Equal(1, filtered["data"]?["match_count"]?.GetValue<int>());
+            var match = Assert.Single(Assert.IsType<JsonArray>(filtered["data"]?["matches"]));
+            Assert.Equal(2, match?["line_number"]?.GetValue<int>());
+            Assert.Equal("READY 1", match?["match"]?.GetValue<string>());
+            Assert.Equal(new[] { "before", "READY 1", "after" }, Assert.IsType<JsonArray>(match?["context"]).Select(item => item!.GetValue<string>()));
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_OutputReadsAreShared_OnlyOwnerCanConsumeWholeBuffer()
     {
         var script = new JsonObject

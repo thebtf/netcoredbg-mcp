@@ -54,12 +54,37 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
 привязку сессии и отдельные форматы ответов в стиле Python.
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+Legacy `search_output` читает общий буфер без очистки. Он использует регулярные
+выражения .NET без учёта регистра и культуры, фильтрует категории до разбиения
+на строки, считает все совпадения и возвращает не более 50. Для checkpoint и
+проверки активной сессии нужно владение mux. Checkpoint, созданный до запуска,
+сохраняется после первого успешного старта и естественного завершения программы.
+Успешный stop удаляет его, в том числе в состоянии idle при подтверждённой
+очистке. Если после checkpoint вывод был отброшен при очистке,
+усечении записи или ограничении буфера, проверка возвращает FAIL. Чтение с
+фильтром категории не очищает буфер.
+Если запуск адаптера уже начался, но старт отклонён, отменён или не опубликован
+по другой причине, существующие checkpoint возвращают FAIL даже без наблюдаемого
+вывода: неопубликованный вывод мог быть потерян. Ошибки проверки до запуска
+адаптера не делают checkpoint недействительными. При неподтверждённой очистке
+операции checkpoint в состоянии idle возвращают ошибку.
+
+Проверки поддерживают буквальный поиск и регулярные выражения .NET с учётом
+регистра. В отличие от Python, запрещённое совпадение возвращает FAIL и при
+нулевом или отрицательном `max_matches`. Лимит evidence не меняет результат
+проверки. Native ограничивает число checkpoint значением 1024, число шаблонов —
+256, длину шаблона — 4096 кодовых единиц UTF-16, проверяемый текст — 2 Ми
+кодовых единиц UTF-16, каждый список совпадений — 256 элементами, а размер
+сериализованного ответа — 256 КиБ. При превышении лимита времени или размера
+возвращается ошибка. Полная совместимость regex и Unicode с Python не заявлена
+(#549).
 
 `restart_debug` сохраняет параметры последнего успешного запуска. По умолчанию
 `rebuild=true` требует сохранённый `build_project`. При `rebuild=false`
