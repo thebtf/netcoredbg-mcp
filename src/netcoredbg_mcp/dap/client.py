@@ -229,6 +229,9 @@ class _DapRun:
     generation: object
     process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess
     pending: dict[int, asyncio.Future[DAPResponse]]
+    response_observers: dict[int, tuple[str, Callable[[DAPResponse], None]]] = field(
+        default_factory=dict
+    )
     phase: _RunPhase = _RunPhase.ACTIVE
     first_trigger: DapTerminalTrigger | None = None
     protocol_terminated: bool = False
@@ -450,6 +453,10 @@ class DAPClient:
     def is_running(self) -> bool:
         """Check if DAP client is connected."""
         return self._process is not None and self._process.returncode is None
+
+    @property
+    def active_generation(self) -> object | None:
+        return self._run.generation if self._run is not None else None
 
     @property
     def adapter_pid(self) -> int | None:
@@ -1004,6 +1011,7 @@ class DAPClient:
         timeout: float = 30.0,
         *,
         admission: Callable[[], bool] | None = None,
+        on_response: Callable[[DAPResponse], None] | None = None,
     ) -> DAPResponse:
         """Send one request only while the current adapter run accepts work."""
         run = self._run
@@ -1026,6 +1034,9 @@ class DAPClient:
                 seq = self._seq
                 future = asyncio.get_running_loop().create_future()
                 run.pending[seq] = future
+                if on_response is not None:
+                    run.response_observers[seq] = (command, on_response)
+                    future.add_done_callback(lambda _future: run.response_observers.pop(seq, None))
                 self._pending = run.pending
                 request = DAPRequest(
                     seq=seq, command=command, arguments=arguments or {}
@@ -1043,6 +1054,7 @@ class DAPClient:
             if future is None:
                 raise
             run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
             if not future.done():
                 future.set_exception(
                     RuntimeError("netcoredbg process died — pending request cancelled")
@@ -1051,6 +1063,7 @@ class DAPClient:
         except BaseException:
             if future is not None:
                 run.pending.pop(seq, None)
+                run.response_observers.pop(seq, None)
                 if not future.done():
                     future.cancel()
             raise
@@ -1061,11 +1074,13 @@ class DAPClient:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
             raise TimeoutError(
                 f"Request {command} timed out after {timeout}s"
             ) from None
         except asyncio.CancelledError:
             run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
             raise
 
     def _write(self, request: DAPRequest) -> None:
@@ -1151,10 +1166,28 @@ class DAPClient:
 
             if isinstance(message, DAPResponse):
                 logger.debug("<<< Response %s: success=%s", message.command, message.success)
+                response_run = run if run is not None else self._run
                 pending = run.pending if run is not None else self._pending
                 future = pending.pop(message.request_seq, None)
+                observer = (
+                    response_run.response_observers.pop(message.request_seq, None)
+                    if response_run is not None else None
+                )
                 if future and not future.done():
-                    future.set_result(message)
+                    try:
+                        if observer is not None and observer[0] != message.command:
+                            raise RuntimeError(
+                                f"DAP response command mismatch: expected {observer[0]}, "
+                                f"received {message.command}"
+                            )
+                        if (observer is not None and response_run is not None
+                                and response_run is self._run
+                                and response_run.phase is _RunPhase.ACTIVE):
+                            observer[1](message)
+                    except Exception as error:
+                        future.set_exception(error)
+                    else:
+                        future.set_result(message)
 
             elif isinstance(message, DAPEvent):
                 event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
@@ -1424,9 +1457,13 @@ class DAPClient:
             },
         )
 
-    async def loaded_sources(self) -> DAPResponse:
+    async def loaded_sources(
+        self, *, on_response: Callable[[DAPResponse], None] | None = None
+    ) -> DAPResponse:
         """Get all sources currently loaded by the debugged process."""
-        return await self.send_request(Commands.LOADED_SOURCES)
+        if on_response is None:
+            return await self.send_request(Commands.LOADED_SOURCES)
+        return await self._send_request(Commands.LOADED_SOURCES, on_response=on_response)
 
     async def disassemble(
         self,
