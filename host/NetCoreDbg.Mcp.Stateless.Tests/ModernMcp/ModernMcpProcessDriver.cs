@@ -847,6 +847,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     // These results are emitted only after owned failed-start cleanup succeeds.
                     lastTransition = request.CompletedOrder;
                 }
+                else if (IsComplete(request.Result, false) && payload?["state"]?.GetValue<string>() == "idle"
+                    && StringValue(payload["error"]) == "START_DEBUG_BUILD_FAILED")
+                {
+                    // The completed build failed before an adapter could be started.
+                    lastTransition = request.CompletedOrder;
+                }
                 else return false;
             }
             else if (name == "restart_debug")

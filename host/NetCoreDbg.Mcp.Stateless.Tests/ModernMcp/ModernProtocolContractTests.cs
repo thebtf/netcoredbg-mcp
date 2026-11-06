@@ -480,6 +480,150 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_BuildDiagnostics_BeforeBuildReportsNoBuild()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var result = await LegacyConsoleCallAsync(driver, "get_build_diagnostics", new JsonObject(), new JsonObject());
+        Assert.Null(result["error"]);
+        Assert.Equal("idle", result["state"]?.GetValue<string>());
+        Assert.Equal("No build has been performed yet.", result["data"]?["message"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_BuildDiagnostics_RetainsLatestCompletedBuildAndFiltersWarnings()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var project = Path.Combine(scratch, "BuildProbe.csproj");
+            var source = Path.Combine(scratch, "Program.cs");
+            var output = Path.Combine(scratch, "bin", "Debug", "net8.0", "BuildProbe.dll");
+            await File.WriteAllTextAsync(project, """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>""");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "NuGet.Config"), """<configuration><packageSources><clear /></packageSources></configuration>""");
+            await File.WriteAllTextAsync(source, "#warning diagnostic-success-probe\nSystem.Console.WriteLine(\"build-probe\");\n");
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"], StartupDirectory: scratch,
+                FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: false, LifecycleMode: "all-stop"),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = scratch, ["MCP_PROJECT_ROOT"] = null }),
+                startupTimeout: TimeSpan.FromSeconds(10));
+            var owner = new JsonObject { ["muxSessionId"] = "build-diagnostics-owner" };
+            try
+            {
+                var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+                {
+                    ["program"] = output,
+                    ["pre_build"] = true,
+                    ["build_project"] = project,
+                    ["build_configuration"] = "Debug",
+                    ["stop_at_entry"] = true,
+                }, owner, TimeSpan.FromSeconds(90));
+                Assert.True(started["data"]?["success"]?.GetValue<bool>());
+                Assert.True(File.Exists(output));
+
+                var full = await LegacyConsoleCallAsync(driver, "get_build_diagnostics", new JsonObject(), owner);
+                Assert.Null(full["error"]);
+                var success = Assert.IsType<JsonObject>(full["data"]);
+                Assert.True(success["success"]?.GetValue<bool>());
+                Assert.Equal("ready", success["state"]?.GetValue<string>());
+                Assert.Equal("build", success["command"]?.GetValue<string>());
+                Assert.Equal(project, success["projectPath"]?.GetValue<string>());
+                Assert.Equal("Debug", success["configuration"]?.GetValue<string>());
+                Assert.Equal(0, success["exitCode"]?.GetValue<int>());
+                Assert.Equal(0, success["errorCount"]?.GetValue<int>());
+                var warningCount = Assert.IsType<int>(success["warningCount"]?.GetValue<int>());
+                Assert.True(warningCount > 0);
+                Assert.Contains(Assert.IsType<JsonArray>(success["diagnostics"]), item =>
+                    item?["severity"]?.GetValue<string>() == "warning" && item?["code"]?.GetValue<string>() == "CS1030");
+
+                var filtered = await LegacyConsoleCallAsync(driver, "get_build_diagnostics", new JsonObject { ["include_warnings"] = false }, owner);
+                Assert.Null(filtered["error"]);
+                var filteredData = Assert.IsType<JsonObject>(filtered["data"]);
+                Assert.Equal(warningCount, filteredData["warningCount"]?.GetValue<int>());
+                Assert.False(filteredData.ContainsKey("diagnostics"));
+                Assert.NotNull(filteredData["warningHint"]);
+                Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+
+                await File.WriteAllTextAsync(source, "#error diagnostic-failure-probe\nSystem.Console.WriteLine(\"build-probe\");\n");
+                var failed = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+                {
+                    ["program"] = output,
+                    ["pre_build"] = true,
+                    ["build_project"] = project,
+                    ["build_configuration"] = "Release",
+                    ["stop_at_entry"] = true,
+                }, owner, TimeSpan.FromSeconds(90));
+                Assert.NotNull(failed["error"]);
+                var latest = await LegacyConsoleCallAsync(driver, "get_build_diagnostics", new JsonObject(), owner);
+                Assert.Null(latest["error"]);
+                var failure = Assert.IsType<JsonObject>(latest["data"]);
+                Assert.False(failure["success"]?.GetValue<bool>() ?? true);
+                Assert.Equal("failed", failure["state"]?.GetValue<string>());
+                Assert.Equal("build", failure["command"]?.GetValue<string>());
+                Assert.Equal(project, failure["projectPath"]?.GetValue<string>());
+                Assert.Equal("Release", failure["configuration"]?.GetValue<string>());
+                Assert.NotEqual(0, Assert.IsType<int>(failure["exitCode"]?.GetValue<int>()));
+                Assert.True(failure["errorCount"]?.GetValue<int>() > 0);
+                Assert.Equal(0, failure["warningCount"]?.GetValue<int>());
+                var diagnostics = Assert.IsType<JsonArray>(failure["diagnostics"]);
+                Assert.Contains(diagnostics, item => item?["severity"]?.GetValue<string>() == "error"
+                    && item?["code"]?.GetValue<string>() == "CS1029" && item?["file"]?.GetValue<string>() == source
+                    && item?["line"]?.GetValue<int>() == 1);
+                Assert.DoesNotContain(diagnostics, item => item?["code"]?.GetValue<string>() == "CS1030");
+            }
+            finally
+            {
+                await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner, TimeSpan.FromSeconds(15)));
+            }
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_BuildDiagnostics_OversizedWarningsReturnErrorWithoutPartialData()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var project = Path.Combine(scratch, "BuildProbe.csproj");
+            var output = Path.Combine(scratch, "bin", "Debug", "net8.0", "BuildProbe.dll");
+            await File.WriteAllTextAsync(project, """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>""");
+            await File.WriteAllTextAsync(Path.Combine(scratch, "NuGet.Config"), """<configuration><packageSources><clear /></packageSources></configuration>""");
+            var warningText = new string('w', 256);
+            await File.WriteAllTextAsync(Path.Combine(scratch, "Program.cs"),
+                string.Concat(Enumerable.Range(0, 1500).Select(index => $"#warning {index:D4}-{warningText}\n"))
+                + "System.Console.WriteLine(\"build-probe\");\n");
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"], StartupDirectory: scratch,
+                FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: false, LifecycleMode: "all-stop"),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_PROJECT_ROOT"] = scratch, ["MCP_PROJECT_ROOT"] = null }),
+                startupTimeout: TimeSpan.FromSeconds(10));
+            var owner = new JsonObject { ["muxSessionId"] = "build-diagnostics-size-owner" };
+            try
+            {
+                var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+                {
+                    ["program"] = output,
+                    ["pre_build"] = true,
+                    ["build_project"] = project,
+                    ["build_configuration"] = "Debug",
+                    ["stop_at_entry"] = true,
+                }, owner, TimeSpan.FromSeconds(90));
+                Assert.True(started["data"]?["success"]?.GetValue<bool>());
+                Assert.True(File.Exists(output));
+                var result = await LegacyConsoleCallAsync(driver, "get_build_diagnostics", new JsonObject(), owner, TimeSpan.FromSeconds(30));
+                Assert.False(string.IsNullOrWhiteSpace(result["error"]?.GetValue<string>()));
+                Assert.False(result.ContainsKey("data"));
+            }
+            finally
+            {
+                await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner, TimeSpan.FromSeconds(15)));
+            }
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_RestartWithoutRebuild_PreservesSavedPreBuildAndRefusesCompilerFailure()
     {
         var scratch = ModernMcpScratchDirectory.Create();

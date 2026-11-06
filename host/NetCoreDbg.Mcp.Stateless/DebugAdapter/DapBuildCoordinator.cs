@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Buffers;
 using System.Text;
 
@@ -5,13 +6,13 @@ namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
 internal sealed record DapBuildCommandResult(int ExitCode, string Stdout, string Stderr);
 internal sealed record DapBuildPlan(string ProjectRoot, string ProjectPath, string Configuration);
-internal sealed record DapBuildResult(string Stage, DapBuildCommandResult Command);
+internal sealed record DapBuildResult(string Stage, DapBuildCommandResult Command, string[] CommandLine, string WorkingDirectory, double DurationMs);
 
 internal sealed class DapBuildCleanupException(string message, Exception innerException) : Exception(message, innerException) { }
 
 internal static class DapBuildOutput
 {
-    private const int MaximumRetainedCharacters = 5_000_000;
+    internal const int MaximumRetainedCharacters = 5_000_000;
     private const int ReadBufferSize = 8192;
 
     internal static async Task<string> ReadAsync(Stream stream)
@@ -125,21 +126,28 @@ internal static class DapBuildCoordinator
         }
     }
 
-    internal static async Task<DapBuildResult> BuildAsync(DapBuildPlan plan, CancellationToken cancellationToken)
+    internal static async Task<DapBuildResult> BuildAsync(DapBuildPlan plan, CancellationToken cancellationToken, Action<string>? stageStarted = null)
     {
         var dotnet = DapLaunchEnvironment.FindExecutable("dotnet")
             ?? throw new FileNotFoundException("The dotnet host is unavailable.");
-        var restore = await RunAsync(dotnet, ["restore", plan.ProjectPath, "--interactive", "false", "--disable-build-servers", "-p:UseSharedCompilation=false"], plan.ProjectRoot, cancellationToken).ConfigureAwait(false);
-        if (restore.ExitCode != 0) return new DapBuildResult("restore", restore);
+        var stage = "restore";
+        string[] args = ["restore", plan.ProjectPath, "--interactive", "false", "--disable-build-servers", "-p:UseSharedCompilation=false"];
+        var timer = Stopwatch.StartNew();
+        stageStarted?.Invoke(stage);
+        var result = await RunAsync(dotnet, args, plan.ProjectRoot, cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0) return new DapBuildResult(stage, result, [dotnet, .. args], plan.ProjectRoot, timer.Elapsed.TotalMilliseconds);
 
-        DapBuildCommandResult build;
+        stage = "build";
+        args = ["build", plan.ProjectPath, "-c", plan.Configuration, "--disable-build-servers", "-p:UseSharedCompilation=false"];
+        timer.Restart();
+        stageStarted?.Invoke(stage);
         for (var attempt = 0; ; attempt++)
         {
-            build = await RunAsync(dotnet, ["build", plan.ProjectPath, "-c", plan.Configuration, "--disable-build-servers", "-p:UseSharedCompilation=false"], plan.ProjectRoot, cancellationToken).ConfigureAwait(false);
-            if (build.ExitCode == 0 || attempt >= 2 || !IsFileLockFailure(build)) break;
+            result = await RunAsync(dotnet, args, plan.ProjectRoot, cancellationToken).ConfigureAwait(false);
+            if (result.ExitCode == 0 || attempt >= 2 || !IsFileLockFailure(result)) break;
             await Task.Delay(TimeSpan.FromSeconds(attempt + 1), cancellationToken).ConfigureAwait(false);
         }
-        return new DapBuildResult("build", build);
+        return new DapBuildResult(stage, result, [dotnet, .. args], plan.ProjectRoot, timer.Elapsed.TotalMilliseconds);
     }
 
     private static Task<DapBuildCommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string root, CancellationToken cancellationToken) =>

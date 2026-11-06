@@ -295,6 +295,7 @@ internal static class Program
         private const string GetLocations = "get_locations";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
+        private const string GetBuildDiagnostics = "get_build_diagnostics";
         private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
         private const string StepInto = "step_into";
@@ -338,6 +339,8 @@ internal static class Program
         private bool _shutdownRequested;
         private bool _buildActive;
         private bool _buildCleanupUnconfirmed;
+        private LegacyBuildSnapshot? _legacyBuildSnapshot;
+        private string? _legacyBuildUnavailable;
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _stepOverRequests = new();
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _uiInvokeRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
@@ -744,7 +747,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or SearchOutput or "output_checkpoint" or "output_assert_since"
+                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -1129,6 +1132,14 @@ internal static class Program
                         return LegacyError("Invalid stop_at_entry.");
                     if (!arguments.ContainsKey("pre_build")) arguments["pre_build"] = JsonSerializer.SerializeToElement(true);
                     if (!arguments.ContainsKey("stop_at_entry")) arguments["stop_at_entry"] = JsonSerializer.SerializeToElement(false);
+                    if (arguments["pre_build"].ValueKind == JsonValueKind.True)
+                    {
+                        lock (_lifetimeGate)
+                        {
+                            _legacyBuildSnapshot = null;
+                            _legacyBuildUnavailable = "The latest build attempt has not completed.";
+                        }
+                    }
                     var launchConfig = new Dictionary<string, JsonElement>(arguments, StringComparer.Ordinal);
                     arguments["justMyCode"] = JsonSerializer.SerializeToElement(false);
                     arguments["breakpoints"] = JsonSerializer.SerializeToElement(_legacyBreakpoints.Select(static breakpoint => new { file = breakpoint.File, line = breakpoint.Line }).ToArray());
@@ -1161,6 +1172,9 @@ internal static class Program
                         await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                         gateHeld = true;
                         _legacyStarting = false;
+                        lock (_lifetimeGate)
+                            if (_legacyBuildSnapshot is null && _legacyBuildUnavailable == "The latest build attempt has not completed.")
+                                _legacyBuildUnavailable = "No build result is available for the latest attempt.";
                         if (!startCompleted && adapterStartAttempted) _legacyOutputEvidence.InvalidateForUnpublishedStart();
                         if (!startCompleted && generation is not null) _legacyResources.Discard(generation);
                         if (!startCompleted) { _legacyHasOwner = false; _legacyOwner = null; }
@@ -1208,6 +1222,46 @@ internal static class Program
                     _legacyLaunchConfig = launchConfig;
                     _legacyResolvedLaunch = resolvedLaunch;
                     return LegacyResponse(new { success = true, program = program.GetString() });
+                }
+                if (name == GetBuildDiagnostics)
+                {
+                    if (arguments.TryGetValue("include_warnings", out var include) && include.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        return LegacyError("Invalid include_warnings.");
+                    LegacyBuildSnapshot? buildSnapshot;
+                    string? unavailable;
+                    lock (_lifetimeGate) { buildSnapshot = _legacyBuildSnapshot; unavailable = _legacyBuildUnavailable; }
+                    if (buildSnapshot is null) return LegacyResponse(new { message = unavailable ?? "No build has been performed yet." });
+                    var includeWarnings = !arguments.TryGetValue("include_warnings", out include) || include.ValueKind == JsonValueKind.True;
+                    var capturedGeneration = _legacySessionGeneration;
+                    var capturedState = LegacySnapshot().State;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    var parsed = await Task.Run(() =>
+                    {
+                        try
+                        {
+                            var data = buildSnapshot.ToData(includeWarnings, MaximumSerializedInspectionBytes, cancellationToken, out var message);
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var serialized = JsonSerializer.Serialize(new { state = capturedState, next_actions = LegacyActions(capturedState), message, data });
+                            if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                                return LegacyError("Build diagnostics exceed the native 256 KiB response limit.", capturedState);
+                            cancellationToken.ThrowIfCancellationRequested();
+                            return SerializedResult(serialized, false);
+                        }
+                        catch (LegacyBuildDiagnosticsException exception)
+                        {
+                            return LegacyError(exception.Message, capturedState);
+                        }
+                    }, cancellationToken).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    gateHeld = true;
+                    lock (_lifetimeGate)
+                        if (!ReferenceEquals(buildSnapshot, _legacyBuildSnapshot))
+                            return LegacyError("Build result changed before diagnostics completed.");
+                    if (capturedGeneration != _legacySessionGeneration || capturedState != LegacySnapshot().State)
+                        return LegacyError("Debug session changed before diagnostics completed.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return parsed;
                 }
                 if (name == GetDebugState)
                 {
@@ -2043,6 +2097,7 @@ internal static class Program
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
                     GetOutputTail => key is not ("lines" or "category"),
+                    GetBuildDiagnostics => key != "include_warnings",
                     SearchOutput => key is not ("pattern" or "context_lines" or "category"),
                     "output_checkpoint" => key != "name",
                     "output_assert_since" => key is not ("checkpoint" or "required" or "forbidden" or "regex" or "max_matches"),
@@ -2873,9 +2928,24 @@ internal static class Program
                     if (!DapBuildCoordinator.TryCreatePlan(projectRoot, preBuild.Project, preBuild.Configuration, out var plan))
                         return Error("start_debug_build_project_invalid", "START_DEBUG_BUILD_PROJECT_INVALID");
                     DapBuildResult build;
+                    string? buildStage = null;
+                    var buildTimer = Stopwatch.StartNew();
+                    void CaptureInterruptedBuild(string interruption)
+                    {
+                        if (argumentsOverride is null || buildStage is null) return;
+                        lock (_lifetimeGate)
+                            _legacyBuildSnapshot = new LegacyBuildSnapshot(plan!, null, buildStage, interruption, buildTimer.Elapsed.TotalMilliseconds);
+                    }
                     try
                     {
-                        build = await DapBuildCoordinator.BuildAsync(plan!, startupCancellation.Token).ConfigureAwait(false);
+                        build = await DapBuildCoordinator.BuildAsync(plan!, startupCancellation.Token, stage => { buildStage = stage; buildTimer.Restart(); }).ConfigureAwait(false);
+                        if (argumentsOverride is not null)
+                            lock (_lifetimeGate) _legacyBuildSnapshot = new LegacyBuildSnapshot(plan!, build, build.Stage, null, build.DurationMs);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        CaptureInterruptedBuild("cancelled");
+                        throw;
                     }
                     catch (Exception exception) when (exception is DapBuildCleanupException or AggregateException)
                     {
@@ -2885,6 +2955,7 @@ internal static class Program
                     }
                     catch (TimeoutException)
                     {
+                        CaptureInterruptedBuild("timeout");
                         return Error("start_debug_build_timeout", "START_DEBUG_BUILD_TIMEOUT");
                     }
                     catch (FileNotFoundException)
@@ -6673,6 +6744,7 @@ internal static class Program
                 Tool("pause_execution", "Request pause; acknowledgement does not itself prove a stopped event.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_output", "Read captured output. Clearing the whole buffer requires mux ownership; filtered reads do not clear it.", """{"type":"object","properties":{"clear":{"type":"boolean"},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("get_output_tail", "Read the tail of captured output.", """{"type":"object","properties":{"lines":{"type":"integer","minimum":-9223372036854775808,"maximum":9223372036854775807},"category":{"type":["string","null"]}},"additionalProperties":false}"""),
+                Tool("get_build_diagnostics", "Read the latest legacy pre-build result. Output retention and interrupted attempts can make diagnostic counts unavailable.", """{"type":"object","properties":{"include_warnings":{"type":"boolean","default":true}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 Tool("search_output", "Search shared retained output with case-insensitive culture-invariant .NET regex; not Python regex parity. Counts all lines and returns at most 50 matches; bounded failures return errors.", """{"type":"object","properties":{"pattern":{"type":"string"},"context_lines":{"type":"integer","default":2},"category":{"type":["string","null"]}},"required":["pattern"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true }),
                 Tool("output_checkpoint", "Create an owner-guarded output checkpoint, including before start; successful stop clears it.", """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}""", new ToolAnnotations { IdempotentHint = true }),
                 Tool("output_assert_since", "Assert required and forbidden patterns since an owner-guarded checkpoint. Regex uses case-sensitive .NET semantics. Discarded output fails; bounded work returns errors.", """{"type":"object","properties":{"checkpoint":{"type":"string"},"required":{"type":["array","null"],"items":{"type":"string"}},"forbidden":{"type":["array","null"],"items":{"type":"string"}},"regex":{"type":"boolean","default":true},"max_matches":{"type":"integer","default":20}},"required":["checkpoint"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true }),
