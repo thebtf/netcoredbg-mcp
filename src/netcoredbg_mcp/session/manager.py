@@ -135,6 +135,7 @@ class SessionManager:
         self._breakpoint_revision = 0
         self._pending_breakpoint_mutations = 0
         self._breakpoint_sync_unknown: set[str] = set()
+        self._breakpoint_sync_pending: dict[str, int] = {}
         self._execution_revision = 0
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
@@ -1125,11 +1126,14 @@ class SessionManager:
             or os.path.normcase(os.path.basename(path))
             == os.path.normcase(os.path.basename(source))
             for bp in breakpoints
-            if bp.user_owned and top.line in (bp.line, bp.dap_line)
+            if (bp.user_owned or bp.group_owners) and top.line in (bp.line, bp.dap_line)
         ]
         has_user_breakpoint = bool(self._breakpoints.get_function_breakpoints())
         for path, bp in candidates:
             if has_user_breakpoint:
+                break
+            if bp.group_owners:
+                has_user_breakpoint = True
                 break
             if (
                 normalize(path) != trace_file
@@ -1471,7 +1475,9 @@ class SessionManager:
             for file_path, bps in self.breakpoints.get_all().items():
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
-                        if bp.tracepoint_owners:
+                        if (bp.tracepoint_owners or bp.group_owners
+                                or file_path in self._breakpoint_sync_pending
+                                or file_path in self._breakpoint_sync_unknown):
                             manager = self._tracepoint_manager
                             if manager is not None:
                                 for tp in manager.tracepoints.values():
@@ -2408,6 +2414,11 @@ class SessionManager:
                 lifecycle_stop_result = stop_lifecycle_runs(reason="debug session stopped")
                 if isinstance(lifecycle_stop_result, Awaitable):
                     await lifecycle_stop_result
+            self._breakpoint_sync_unknown.clear()
+            for group_name in list(self._runtime_smoke.instrumentation_groups):
+                result = await self.instrumentation.clear_group(group_name)
+                if result.to_dict()["status"] != "PASS":
+                    raise RuntimeError("Instrumentation group cleanup failed after adapter stop")
             self._runtime_smoke.reset()
             self._state = self._create_session_state()
             self._output_bytes = 0
@@ -2543,6 +2554,9 @@ class SessionManager:
         state = self._state
         generation = self._active_dap_run
         client = self._client
+        self._breakpoint_sync_pending[normalized] = (
+            self._breakpoint_sync_pending.get(normalized, 0) + 1
+        )
         try:
             response = await client.set_breakpoints(
                 file_path, [bp.to_dap() for bp in breakpoints]
@@ -2558,6 +2572,12 @@ class SessionManager:
                 self._breakpoint_sync_unknown.add(normalized)
                 self._breakpoint_revision += 1
             raise
+        finally:
+            remaining = self._breakpoint_sync_pending[normalized] - 1
+            if remaining:
+                self._breakpoint_sync_pending[normalized] = remaining
+            else:
+                del self._breakpoint_sync_pending[normalized]
         self._breakpoints.update_from_dap(file_path, response.body.get("breakpoints", []))
         self._breakpoint_revision += 1
         manager = self._tracepoint_manager
@@ -2580,6 +2600,7 @@ class SessionManager:
         hit_condition: str | None = None,
         *,
         tracepoint_id: str | None = None,
+        group_id: str | None = None,
     ) -> Breakpoint:
         """Add a user or tracepoint owner of a source breakpoint."""
         self._pending_breakpoint_mutations += 1
@@ -2594,6 +2615,7 @@ class SessionManager:
                             file=file, line=line, condition=condition, hit_condition=hit_condition
                         ),
                         tracepoint_id=tracepoint_id,
+                        group_id=group_id,
                     )
                     if self.is_active:
                         await self._sync_file_breakpoints(file)
@@ -2604,7 +2626,8 @@ class SessionManager:
             self._pending_breakpoint_mutations -= 1
 
     async def remove_breakpoint(
-        self, file: str, line: int, *, tracepoint_id: str | None = None
+        self, file: str, line: int, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
     ) -> bool:
         """Remove one exact owner only after its physical sync is confirmed."""
         self._pending_breakpoint_mutations += 1
@@ -2616,7 +2639,9 @@ class SessionManager:
                 snapshot = self._breakpoints.snapshot_for_file(file)
                 state, generation, client = self._state, self._active_dap_run, self._client
                 try:
-                    removed = self._breakpoints.remove(file, line, tracepoint_id=tracepoint_id)
+                    removed = self._breakpoints.remove(
+                        file, line, tracepoint_id=tracepoint_id, group_id=group_id
+                    )
                     if removed and self.is_active:
                         try:
                             await self._sync_file_breakpoints(file)

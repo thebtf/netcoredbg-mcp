@@ -143,6 +143,21 @@ class TestBreakpointRegistry:
         assert len(breakpoints) == 1
         assert breakpoints[0].condition == "x > 5"
 
+    def test_group_owner_snapshot_restores_independent_conditions(self):
+        registry = BreakpointRegistry()
+        registry.add(Breakpoint(file="test.cs", line=10, condition="user"))
+        registry.add(Breakpoint(file="test.cs", line=10, condition="group", hit_condition="5"),
+                     group_id="group")
+        snapshot = registry.snapshot_for_file("test.cs")
+        assert registry.remove("test.cs", 10, group_id="group")
+        assert snapshot[0].group_owners == {"group": ("group", "5")}
+        registry.restore_for_file("test.cs", snapshot)
+        bp = registry.get_for_file("test.cs")[0]
+        assert bp.user_owned and bp.condition == "user"
+        assert bp.to_dap() == {"line": 10}
+        assert registry.remove("test.cs", 10)
+        assert bp.to_dap() == {"line": 10, "condition": "group", "hitCondition": "5"}
+
     def test_remove_breakpoint(self):
         """Test removing a breakpoint."""
         registry = BreakpointRegistry()

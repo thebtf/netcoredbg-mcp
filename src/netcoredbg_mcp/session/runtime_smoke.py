@@ -61,7 +61,7 @@ class RuntimeSmokeSession:
         self._cleanup_callbacks[name] = callback
 
     def reset(self) -> tuple[CleanupFailure, ...]:
-        """Run cleanup callbacks and clear all runtime smoke state."""
+        """Clear local state without discarding asynchronously owned instrumentation."""
         failures: list[CleanupFailure] = []
         failed_names: set[str] = set()
         for name, callback in list(self._cleanup_callbacks.items()):
@@ -72,7 +72,11 @@ class RuntimeSmokeSession:
                 failures.append({"name": name, "error": str(exc)})
                 failed_names.add(name)
 
-        self.instrumentation_groups.clear()
+        if self.instrumentation_groups:
+            failures.append({
+                "name": "instrumentation_groups",
+                "error": "instrumentation groups require asynchronous cleanup",
+            })
         self.output_checkpoints.clear()
         self.freshness_evidence.clear()
         self.ui_snapshots.clear()

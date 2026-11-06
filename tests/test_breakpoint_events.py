@@ -121,6 +121,22 @@ class TestBreakpointEvents:
         bps = manager.breakpoints.get_for_file("test.cs")
         assert len(bps) == 0
 
+    def test_removed_event_retains_group_and_user_intent_unverified(self, manager):
+        manager.breakpoints.add(Breakpoint(file="test.cs", line=10, condition="value > 0",
+                                           verified=True, id=42, dap_line=11))
+        manager.breakpoints.add(Breakpoint(file="test.cs", line=10, condition="value < 10"),
+                                group_id="group-owner")
+
+        manager._on_breakpoint(DAPEvent(
+            seq=1, event="breakpoint", body={"reason": "removed", "breakpoint": {"id": 42}}
+        ))
+
+        bp = manager.breakpoints.get_for_file("test.cs")[0]
+        assert bp.user_owned and bp.condition == "value > 0"
+        assert bp.group_owners == {"group-owner": ("value < 10", None)}
+        assert not bp.verified
+        assert bp.id is None and bp.dap_line is None
+
     def test_breakpoint_unknown_id_ignored(self, manager):
         """Changed event for unknown breakpoint ID is ignored."""
         event = DAPEvent(
