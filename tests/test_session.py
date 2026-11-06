@@ -1474,6 +1474,21 @@ class TestExecutionControl:
     """Tests for execution control operations."""
 
     @pytest.mark.asyncio
+    async def test_exit_snapshot_does_not_report_running_before_transport_finalizes(
+        self,
+    ):
+        manager = SessionManager(netcoredbg_path="/path")
+        manager._state.state = DebugState.RUNNING
+        manager._on_exited(DAPEvent(seq=1, event="exited", body={"exitCode": 0}))
+
+        snapshot = await manager.wait_for_stopped(timeout=1)
+
+        assert snapshot.state == DebugState.TERMINATED
+        assert snapshot.exit_code == 0
+        assert snapshot.process_alive is False
+        assert manager.state.state == DebugState.RUNNING
+
+    @pytest.mark.asyncio
     async def test_continue_execution(self):
         """Test continue execution."""
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:

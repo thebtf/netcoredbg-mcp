@@ -196,6 +196,34 @@ class TestExecuteAndWaitProgress:
         assert "Waiting for stop event" in source
         assert "Still waiting" in source
 
+    @pytest.mark.asyncio
+    async def test_unknown_continue_outcome_is_not_reported_as_a_stop(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from netcoredbg_mcp.server import create_server
+        from netcoredbg_mcp.session import DebugState, SessionManager
+        from netcoredbg_mcp.session.state import StoppedSnapshot
+
+        manager = SessionManager(netcoredbg_path="/path")
+        manager.continue_execution = AsyncMock(return_value={"success": True})
+        manager.wait_for_stopped = AsyncMock(return_value=StoppedSnapshot(
+            state=DebugState.RUNNING, outcome_unknown=True, process_alive=None
+        ))
+        ctx = SimpleNamespace(report_progress=AsyncMock())
+        with patch("netcoredbg_mcp.server.get_session", return_value=manager):
+            mcp = create_server()
+            response = await mcp._tool_manager.call_tool(
+                "continue_execution", {"thread_id": 1}, context=ctx, convert_result=False
+            )
+
+        assert response["state"] == "unknown"
+        assert response["outcome_unknown"] is True
+        assert "may have executed" in response["message"]
+        assert ctx.report_progress.await_args_list[-1].kwargs["message"] == (
+            "Tracepoint operation outcome is unknown"
+        )
+
 
 class TestCallbackPlumbing:
     """Tests for output_callback forwarding through the chain."""

@@ -43,6 +43,8 @@ class FakeInstrumentationSession:
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
     ) -> Breakpoint:
         self._next_breakpoint_id += 1
         bp = Breakpoint(
@@ -54,13 +56,14 @@ class FakeInstrumentationSession:
             id=self._next_breakpoint_id,
             dap_line=line + 1,
         )
-        self.breakpoints.add(bp)
-        return bp
+        return self.breakpoints.add(bp, tracepoint_id=tracepoint_id)
 
-    async def remove_breakpoint(self, file: str, line: int) -> bool:
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool:
         if self.leak_breakpoint_removal:
             return False
-        return self.breakpoints.remove(file, line)
+        return self.breakpoints.remove(file, line, tracepoint_id=tracepoint_id)
 
     def validate_path(self, file: str, must_exist: bool = True) -> str:
         if self.validation_failure:
@@ -79,10 +82,14 @@ class FailingAddInstrumentationSession(FakeInstrumentationSession):
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
     ) -> Breakpoint:
         if line == self.failing_line:
             raise RuntimeError("breakpoint setup failed")
-        return await super().add_breakpoint(file, line, condition, hit_condition)
+        return await super().add_breakpoint(
+            file, line, condition, hit_condition, tracepoint_id=tracepoint_id
+        )
 
 
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
@@ -166,6 +173,25 @@ async def test_clear_group_reports_leaked_group_owned_breakpoints() -> None:
     ]
     assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leak", [False, True])
+async def test_group_tracepoint_cleanup_preserves_user_and_detects_leak(
+    leak: bool,
+) -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    await session.add_breakpoint(source, 10)
+    await service.create_group(
+        "flow", tracepoints=[{"file": source, "line": 10, "expression": "i"}]
+    )
+    session.leak_breakpoint_removal = leak
+
+    cleared = (await service.clear_group("flow")).to_dict()
+
+    assert cleared["status"] == ("FAIL" if leak else "PASS")
+    assert session.breakpoints.get_for_file(source)[0].user_owned
 
 @pytest.mark.asyncio
 async def test_unknown_group_clear_fails_without_mutating_other_groups() -> None:

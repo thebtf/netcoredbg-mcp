@@ -183,7 +183,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """Build a rich response from a StoppedSnapshot for execution tools."""
         state_value = snapshot.state.value
 
-        if snapshot.timed_out:
+        if snapshot.outcome_unknown:
+            state_value = "unknown"
+            next_actions = ["get_debug_state", "stop_debug"]
+            message = "Tracepoint operation may have executed; do not retry it automatically."
+        elif snapshot.timed_out:
             next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
             message = (
                 "Program is still running after timeout. Breakpoint may not have been reached."
@@ -204,6 +208,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
             next_actions = ["get_output", "stop_debug"]
             exit_code = snapshot.exit_code
             message = f"Program terminated (exit code: {exit_code})."
+        elif state_value == "running":
+            next_actions = ["get_debug_state", "pause_execution", "stop_debug"]
+            message = "Program resumed; no subsequent stop has been observed."
         else:
             next_actions = ["get_debug_state", "stop_debug"]
             message = f"Unexpected state: {state_value}."
@@ -216,6 +223,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
             "message": message,
             "next_actions": next_actions,
         }
+        if snapshot.outcome_unknown:
+            result["outcome_unknown"] = True
 
         if snapshot.exit_code is not None:
             result["exit_code"] = snapshot.exit_code
@@ -270,7 +279,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
             # Phase 3: Report result
             try:
-                if snapshot.timed_out:
+                if snapshot.outcome_unknown:
+                    msg = "Tracepoint operation outcome is unknown"
+                elif snapshot.timed_out:
                     msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
                 elif snapshot.state == DebugState.TERMINATED:
                     msg = f"Program terminated (exit code: {snapshot.exit_code})"
@@ -284,7 +295,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
             response = _build_stopped_response(snapshot, action_name)
 
             # Add source context if stopped at a known location
-            if snapshot.state == DebugState.STOPPED and snapshot.thread_id:
+            if (
+                not snapshot.outcome_unknown
+                and snapshot.state == DebugState.STOPPED
+                and snapshot.thread_id
+            ):
                 try:
                     frames = await session.get_stack_trace(snapshot.thread_id, 0, 1)
                     if frames:

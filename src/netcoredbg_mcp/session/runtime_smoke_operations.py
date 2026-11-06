@@ -1293,6 +1293,12 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 "file": file,
                 "line": line,
             }
+        require_sync = getattr(session, "_require_confirmed_breakpoint_sync", None)
+        if callable(require_sync):
+            try:
+                require_sync(file)
+            except RuntimeError as exc:
+                return _adapter_blocked("debug.tracepoint", str(exc))
         manager = _session_tracepoint_manager(session, create=True)
         if manager is None:
             return _adapter_blocked(
@@ -1332,8 +1338,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             if not had_live_breakpoint:
                 await _arm_tracepoint_breakpoint(session, tracepoint, file=file, line=line)
         except Exception as exc:
-            should_rollback = created_tracepoint or not had_live_breakpoint
-            if should_rollback:
+            retained = _tracepoint_has_live_breakpoint(session, tracepoint)
+            if (created_tracepoint or not had_live_breakpoint) and not retained:
                 manager.remove(tracepoint.id)
             return {
                 **_adapter_blocked(
@@ -1342,6 +1348,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 ),
                 "file": file,
                 "line": line,
+                "tracepoint_id": tracepoint.id,
+                "retained": retained,
             }
 
         logs = [
@@ -1371,18 +1379,18 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         tracepoint_id = str(args.get("tracepoint_id") or "")
         file = str(args.get("file") or "")
         line = _int_or_none(args.get("line"))
-        tracepoint = manager.remove(tracepoint_id)
+        tracepoint = manager.tracepoints.get(tracepoint_id)
         if tracepoint is None and file and line is not None:
             candidate = manager.find_tracepoint_for_location(file, line)
             if candidate is not None:
-                tracepoint = manager.remove(candidate.id)
+                tracepoint = candidate
         if tracepoint is None and ":" in tracepoint_id:
             raw_file, raw_line = tracepoint_id.rsplit(":", 1)
             parsed_line = _int_or_none(raw_line)
             if parsed_line is not None:
                 candidate = manager.find_tracepoint_for_location(raw_file, parsed_line)
                 if candidate is not None:
-                    tracepoint = manager.remove(candidate.id)
+                    tracepoint = candidate
         if tracepoint is None:
             return {
                 "status": "PASS",
@@ -1391,8 +1399,14 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             }
 
         remove_breakpoint = getattr(session, "remove_breakpoint", None)
-        if callable(remove_breakpoint):
-            await remove_breakpoint(tracepoint.file, int(tracepoint.line))
+        if not callable(remove_breakpoint):
+            return _adapter_blocked(
+                "debug.tracepoint.remove", "breakpoint removal service unavailable"
+            )
+        await remove_breakpoint(
+            tracepoint.file, int(tracepoint.line), tracepoint_id=tracepoint.id
+        )
+        manager.remove(tracepoint.id)
         return {
             "status": "PASS",
             "removed": True,
@@ -1442,7 +1456,7 @@ async def _arm_tracepoint_breakpoint(
     add_breakpoint = getattr(session, "add_breakpoint", None)
     if not callable(add_breakpoint):
         raise RuntimeError("debug breakpoint arming service unavailable")
-    bp = await add_breakpoint(file, line)
+    bp = await add_breakpoint(file, line, tracepoint_id=tracepoint.id)
     tracepoint.breakpoint_id = getattr(bp, "id", None)
     tracepoint.dap_line = getattr(bp, "dap_line", None)
 
@@ -1472,7 +1486,10 @@ def _tracepoint_has_live_breakpoint(session: Any, tracepoint: Any) -> bool:
             )
             if line is not None
         }
-        if tracepoint_lines & breakpoint_lines:
+        if (
+            tracepoint_lines & breakpoint_lines
+            and tracepoint.id in getattr(bp, "tracepoint_owners", set())
+        ):
             return True
     return False
 

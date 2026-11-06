@@ -536,21 +536,22 @@ def register_inspection_tools(
     # ── Tracepoint tools (FR-3) ──────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def add_tracepoint(ctx: Context, file: str, line: int, expression: str) -> dict:
-        """Set a non-stopping tracepoint that logs expression values.
+    async def add_tracepoint(
+        ctx: Context, file: str, line: int, expression: str
+    ) -> dict:
+        """Set a tracepoint that logs expression values at a source location.
 
-        State: Works in any state. The tracepoint fires automatically on each hit.
+        Trace-only hits normally resume automatically. A coincident user breakpoint
+        keeps its own intent and stops when its condition matches. If attribution
+        is ambiguous, a hit condition is present, or any function breakpoint is
+        active, the debuggee remains stopped rather than risking an unwanted resume.
+        A same-location condition is evaluated in the stopped frame when the shared
+        DAP breakpoint is hit. A rejected or non-boolean condition keeps the stop;
+        an unconfirmed dispatched evaluation reports unknown and is not retried.
 
-        The tracepoint evaluates the expression each time the line is hit,
-        without visibly pausing the program. Results are stored in a trace
-        buffer accessible via get_trace_log.
-
-        Async state machines: when the target line is inside an `async` method, the
-        C# compiler moves the first executable instruction to the line after the
-        `await`. netcoredbg reports the adjusted line via DAP, and netcoredbg-mcp
-        tracks both the user-requested and adjusted lines — tracepoint matching
-        works for both. No user action required; `get_trace_log` will contain entries
-        and the program will NOT pause.
+        The debugger may adjust a requested line in an async state machine. Both
+        requested and adjusted lines are tracked for matching. Trace entries are
+        available through get_trace_log.
 
         Args:
             file: Source file path
@@ -589,13 +590,21 @@ def register_inspection_tools(
 
             # Set a real DAP breakpoint on this line
             try:
-                bp_result = await session.add_breakpoint(norm_file, line)
+                bp_result = await session.add_breakpoint(norm_file, line, tracepoint_id=tp.id)
                 if bp_result and hasattr(bp_result, "id"):
                     tp.breakpoint_id = bp_result.id
                     if getattr(bp_result, "dap_line", None) is not None:
                         mgr.set_dap_line(tp.id, bp_result.dap_line)
             except Exception as e:
-                logger.warning("Failed to set DAP breakpoint for tracepoint %s: %s", tp.id, e)
+                retained = any(
+                    tp.id in bp.tracepoint_owners
+                    for bp in session.breakpoints.get_for_file(norm_file)
+                )
+                if not retained:
+                    mgr.remove(tp.id)
+                response = build_error_response(str(e), state=session.state.state)
+                response["data"] = {"tracepoint_id": tp.id, "retained": retained}
+                return response
 
             return build_response(
                 data={
@@ -625,23 +634,33 @@ def register_inspection_tools(
 
             mgr = getattr(session, "_tracepoint_manager", None)
             if mgr is None:
-                return build_error_response("No tracepoints configured.", state=session.state.state)
+                return build_error_response(
+                    "No tracepoints configured.", state=session.state.state
+                )
 
-            tp = mgr.remove(tracepoint_id)
+            tp = mgr.tracepoints.get(tracepoint_id)
             if tp is None:
                 return build_error_response(
                     f"Tracepoint '{tracepoint_id}' not found.",
                     state=session.state.state,
                 )
 
-            # Remove the underlying DAP breakpoint so it no longer stops execution
-            try:
-                await session.remove_breakpoint(tp.file, tp.line)
-            except Exception as e:
-                logger.warning("Failed to remove DAP breakpoint for tracepoint %s: %s", tp.id, e)
+            removed = await session.remove_breakpoint(tp.file, tp.line, tracepoint_id=tp.id)
+            if not removed and any(
+                tp.id in bp.tracepoint_owners for bp in session.breakpoints.get_for_file(tp.file)
+            ):
+                return build_error_response(
+                    f"Tracepoint '{tp.id}' has no confirmed breakpoint owner.",
+                    state=session.state.state,
+                )
+            mgr.remove(tp.id)
 
             return build_response(
-                data={"removed": tracepoint_id, "was_active": tp.active, "hit_count": tp.hit_count},
+                data={
+                    "removed": tracepoint_id,
+                    "was_active": tp.active,
+                    "hit_count": tp.hit_count,
+                },
                 state=session.state.state,
             )
         except Exception as e:

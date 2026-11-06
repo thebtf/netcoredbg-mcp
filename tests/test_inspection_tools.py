@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import asyncio
+import json
+import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from netcoredbg_mcp.dap.protocol import DAPResponse
+from netcoredbg_mcp.dap.protocol import DAPEvent, DAPResponse
 from netcoredbg_mcp.session import SessionManager
-from netcoredbg_mcp.session.state import LoadedSource, TraceEntry
+from netcoredbg_mcp.session.state import DebugState, LoadedSource, TraceEntry
 from netcoredbg_mcp.session.tracepoints import TracepointManager
 
 
@@ -323,3 +327,620 @@ async def test_trace_delta_tool_returns_bounded_entries_and_continuation_cursor(
     assert data["dropped_count"] == 0
     assert data["next_cursor"]["after_timestamp"] == 3.0
     assert data["next_cursor"]["tracepoint_id"] == "tp-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_first", [True, False])
+@pytest.mark.parametrize("adjusted", [True, False])
+async def test_coincident_tracepoint_does_not_resume_user_breakpoint(
+    user_first, adjusted
+):
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    if user_first:
+        await manager.add_breakpoint(source, 10)
+    response = await tools["add_tracepoint"](None, source, 10, "value")
+    if not user_first:
+        await manager.add_breakpoint(source, 10)
+
+    breakpoint = manager.breakpoints.get_for_file(source)[0]
+    tracepoint = manager._tracepoint_manager.tracepoints[response["data"]["id"]]
+    if adjusted:
+        breakpoint.dap_line = 11
+        tracepoint.dap_line = 11
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=11 if adjusted else 10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(
+        return_value=make_response(body={"result": "1"})
+    )
+    manager.client.continue_execution = AsyncMock()
+
+    await manager._check_tracepoint_inner(1)
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.state.value == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_user", [True, False])
+async def test_removing_coincident_owner_keeps_the_other_breakpoint(remove_user):
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    response = await tools["add_tracepoint"](None, source, 10, "value")
+
+    if remove_user:
+        assert await manager.remove_breakpoint(source, 10)
+    else:
+        await tools["remove_tracepoint"](None, response["data"]["id"])
+
+    remaining = manager.breakpoints.get_for_file(source)
+    assert len(remaining) == 1
+    if not remove_user:
+        assert remaining[0].condition == "value > 0"
+    else:
+        assert response["data"]["id"] in manager._tracepoint_manager.tracepoints
+
+
+@pytest.mark.asyncio
+async def test_removing_one_tracepoint_keeps_another_at_the_same_location():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    first = await tools["add_tracepoint"](None, source, 10, "value")
+    second = await tools["add_tracepoint"](None, source, 10, "other")
+
+    await tools["remove_tracepoint"](None, first["data"]["id"])
+
+    assert len(manager.breakpoints.get_for_file(source)) == 1
+    assert second["data"]["id"] in manager._tracepoint_manager.tracepoints
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("condition_value", "should_continue"), [("true", False), ("false", True)]
+)
+async def test_coincident_conditional_breakpoint_preserves_condition(
+    condition_value, should_continue
+):
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        result = condition_value if expression == "value > 0" else "42"
+        return make_response(
+            body={
+                "result": result,
+                "type": "bool" if expression == "value > 0" else "int",
+            }
+        )
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock(return_value=make_response())
+    await manager._check_tracepoint_inner(1)
+
+    assert manager.client.continue_execution.await_count == int(should_continue)
+    assert manager.breakpoints.get_for_file(source)[0].condition == "value > 0"
+
+
+@pytest.mark.asyncio
+async def test_old_tracepoint_evaluation_does_not_resume_a_new_stop():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        entered.set()
+        await release.wait()
+        return make_response(body={"result": "42"})
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock()
+    pending = asyncio.create_task(manager._check_tracepoint_inner(1))
+    await entered.wait()
+    manager._on_continued(DAPEvent(1, "continued", {"threadId": 1}))
+    manager._on_stopped(DAPEvent(2, "stopped", {"reason": "step", "threadId": 1}))
+    release.set()
+    await pending
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.stop_reason == "step"
+
+
+@pytest.mark.asyncio
+async def test_new_breakpoint_during_trace_evaluation_prevents_auto_continue():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    writes = []
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        entered.set()
+        await release.wait()
+        return make_response(body={"result": "42"})
+
+    async def continue_if_admitted(thread_id, *, admission):
+        if not admission():
+            raise RuntimeError("stale")
+        writes.append(thread_id)
+        return make_response()
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock(side_effect=continue_if_admitted)
+    pending = asyncio.create_task(manager._check_tracepoint(1))
+    await entered.wait()
+    await manager.add_breakpoint(source, 10)
+    release.set()
+    await pending
+
+    assert writes == []
+    assert manager.state.state.value == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_tracepoint_does_not_resume_an_ambiguous_function_breakpoint():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.add_function_breakpoint("Example.Method")
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(
+        return_value=make_response(body={"result": "42"})
+    )
+    manager.client.continue_execution = AsyncMock()
+
+    await manager._check_tracepoint_inner(1)
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.state.value == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_refused_tracepoint_continue_publishes_original_stop():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(return_value=make_response(body={"result": "42"}))
+
+    async def refuse(thread_id, *, admission):
+        assert admission()
+        return make_response(success=False, message="refused")
+
+    manager.client.continue_execution = AsyncMock(side_effect=refuse)
+    await manager._check_tracepoint(1)
+
+    assert manager.state.state == DebugState.STOPPED
+    assert manager._execution_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_refused_tracepoint_removal_retains_user_and_tracepoint():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    trace = await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.client.set_breakpoints = AsyncMock(
+        return_value=make_response(success=False, message="refused")
+    )
+
+    response = await tools["remove_tracepoint"](None, trace["data"]["id"])
+
+    assert "error" in response
+    assert trace["data"]["id"] in manager._tracepoint_manager.tracepoints
+    assert manager.breakpoints.get_for_file(source)[0].condition == "value > 0"
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.continue_execution = AsyncMock()
+    await manager._check_tracepoint(1)
+    manager.client.continue_execution.assert_not_awaited()
+    retry = await tools["remove_tracepoint"](None, trace["data"]["id"])
+    assert "error" in retry
+    manager.client.set_breakpoints.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_cleanup_does_not_remove_another_tracepoint_after_external_removal():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    first = (await manager.instrumentation.create_group(
+        "first", tracepoints=[{"file": source, "line": 10, "expression": "value"}]
+    )).to_dict()
+    second = (await manager.instrumentation.create_group(
+        "second", tracepoints=[{"file": source, "line": 10, "expression": "other"}]
+    )).to_dict()
+    await tools["remove_tracepoint"](None, first["tracepoints"][0]["id"])
+
+    await manager.instrumentation.clear_group("first")
+
+    assert second["tracepoints"][0]["id"] in manager._tracepoint_manager.tracepoints
+    assert len(manager.breakpoints.get_for_file(source)) == 1
+
+
+@pytest.mark.asyncio
+async def test_waiting_user_breakpoint_prevents_tracepoint_continue():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    entered, release, requested = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    writes = []
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        entered.set()
+        await release.wait()
+        return make_response(body={"result": "42"})
+
+    async def continue_if_admitted(thread_id, *, admission):
+        if admission():
+            writes.append(thread_id)
+        return make_response()
+
+    async def add_user():
+        requested.set()
+        await manager.add_breakpoint(source, 10)
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock(side_effect=continue_if_admitted)
+    manager.client.set_breakpoints = AsyncMock(return_value=make_response(body={"breakpoints": []}))
+    pending = asyncio.create_task(manager._check_tracepoint(1))
+    await entered.wait()
+    async with manager._breakpoint_lock:
+        user = asyncio.create_task(add_user())
+        await requested.wait()
+        release.set()
+        await pending
+    await user
+
+    assert writes == []
+    assert manager.state.state == DebugState.STOPPED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_uncertain_tracepoint_continue_is_visible_and_not_replayed(cancelled):
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(return_value=make_response(body={"result": "42"}))
+
+    async def uncertain(thread_id, *, admission):
+        assert admission()
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise BrokenPipeError("uncertain write")
+
+    manager.client.continue_execution = AsyncMock(side_effect=uncertain)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await manager._check_tracepoint_inner(1)
+    else:
+        await manager._check_tracepoint(1)
+
+    assert manager._execution_event.is_set()
+    snapshot = await manager.wait_for_stopped(timeout=1)
+    assert snapshot.outcome_unknown is True
+    assert manager.state.to_dict()["execState"] == "unknown"
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.continue_execution(1)
+    assert manager.client.continue_execution.await_count == 1
+    manager.client.set_variable = AsyncMock()
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await manager.set_variable(1, "value", "2")
+    manager.client.set_variable.assert_not_awaited()
+    manager._on_continued(DAPEvent(3, "continued", {"threadId": 1}))
+    assert manager.state.to_dict()["execState"] == "unknown"
+    await manager.stop()
+    assert manager.state.execution_outcome_unknown is False
+
+
+@pytest.mark.asyncio
+async def test_uncertain_tracepoint_continue_does_not_override_a_new_stop():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(return_value=make_response(body={"result": "42"}))
+
+    async def uncertain(thread_id, *, admission):
+        assert admission()
+        manager._on_continued(DAPEvent(1, "continued", {"threadId": 1}))
+        manager._on_stopped(DAPEvent(2, "stopped", {"reason": "step", "threadId": 1}))
+        raise BrokenPipeError("uncertain write")
+
+    manager.client.continue_execution = AsyncMock(side_effect=uncertain)
+    await manager._check_tracepoint(1)
+
+    assert manager.state.stop_reason == "step"
+    assert manager.state.state == DebugState.STOPPED
+    assert manager.state.execution_outcome_unknown is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("success", [True, False])
+async def test_old_breakpoint_sync_does_not_modify_new_session(success):
+    manager = make_manager()
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10)
+    manager._state.state = DebugState.RUNNING
+    manager._active_dap_run = object()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def sync(file, breakpoints):
+        entered.set()
+        await release.wait()
+        return make_response(success=success, body={"breakpoints": [{"id": 1, "verified": True}]})
+
+    manager.client.set_breakpoints = AsyncMock(side_effect=sync)
+    pending = asyncio.create_task(manager._sync_file_breakpoints(source))
+    await entered.wait()
+    manager._begin_debuggee_epoch(lifecycle_state=DebugState.INITIALIZING)
+    manager._active_dap_run = object()
+    manager.breakpoints.update_from_dap(source, [{"id": 99, "verified": True, "line": 10}])
+    release.set()
+
+    with pytest.raises(RuntimeError, match="session changed"):
+        await pending
+    assert manager.breakpoints.get_for_file(source)[0].id == 99
+    assert manager._breakpoint_sync_unknown == set()
+
+
+@pytest.mark.asyncio
+async def test_late_continue_error_does_not_override_confirmed_exit():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    manager.client.evaluate = AsyncMock(return_value=make_response(body={"result": "42"}))
+
+    async def fail_after_exit(thread_id, *, admission):
+        assert admission()
+        manager._on_exited(DAPEvent(1, "exited", {"exitCode": 0}))
+        raise BrokenPipeError("late failure")
+
+    manager.client.continue_execution = AsyncMock(side_effect=fail_after_exit)
+    await manager._check_tracepoint(1)
+
+    snapshot = await manager.wait_for_stopped(timeout=1)
+    assert snapshot.state == DebugState.TERMINATED
+    assert snapshot.exit_code == 0
+    assert snapshot.outcome_unknown is False
+
+
+@pytest.mark.asyncio
+async def test_tracepoint_removal_can_reconcile_after_session_change():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    first = (await tools["add_tracepoint"](None, source, 10, "value"))["data"]["id"]
+    second = (await tools["add_tracepoint"](None, source, 10, "other"))["data"]["id"]
+    manager._state.state = DebugState.RUNNING
+    manager._active_dap_run = object()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def sync(file, breakpoints):
+        entered.set()
+        await release.wait()
+        return make_response(body={"breakpoints": [{"id": 1, "verified": True}]})
+
+    manager.client.set_breakpoints = AsyncMock(side_effect=sync)
+    pending = asyncio.create_task(tools["remove_tracepoint"](None, first))
+    await entered.wait()
+    manager._begin_debuggee_epoch(lifecycle_state=DebugState.INITIALIZING)
+    manager._active_dap_run = object()
+    release.set()
+    first_result = await pending
+    assert "error" in first_result
+
+    retry = await tools["remove_tracepoint"](None, first)
+
+    assert retry["data"]["removed"] == first
+    assert first not in manager._tracepoint_manager.tracepoints
+    assert second in manager._tracepoint_manager.tracepoints
+    assert second in manager.breakpoints.get_for_file(source)[0].tracepoint_owners
+
+
+@pytest.mark.asyncio
+async def test_stale_tracepoint_evaluation_is_not_written_to_dap():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    client = manager.client
+    stdin = SimpleNamespace(write=MagicMock(), drain=AsyncMock())
+    client._process = SimpleNamespace(pid=1, stdin=stdin, returncode=None)
+    run = client._run_for_direct_reader()
+    loop = asyncio.get_running_loop()
+
+    def reply(data):
+        request = json.loads(data.split(b"\r\n\r\n", 1)[1])
+        loop.call_soon(client._handle_message, {
+            "seq": 1, "type": "response", "request_seq": request["seq"],
+            "success": True, "command": request["command"], "body": {"result": "42"},
+        }, run)
+
+    stdin.write.side_effect = reply
+    entered = asyncio.Event()
+    evaluate = client.evaluate
+
+    async def marked_evaluate(expression, frame_id, **kwargs):
+        entered.set()
+        return await evaluate(expression, frame_id, **kwargs)
+
+    client.evaluate = AsyncMock(side_effect=marked_evaluate)
+    async with client._request_lock:
+        pending = asyncio.create_task(manager._check_tracepoint(1))
+        await entered.wait()
+        manager._on_continued(DAPEvent(1, "continued", {"threadId": 1}))
+        manager._on_stopped(DAPEvent(2, "stopped", {"reason": "step", "threadId": 1}))
+    await asyncio.wait_for(pending, timeout=1)
+
+    stdin.write.assert_not_called()
+    assert manager.state.stop_reason == "step"
+
+
+@pytest.mark.asyncio
+async def test_timed_out_trace_evaluation_does_not_auto_continue():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        raise asyncio.TimeoutError()
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock()
+
+    await manager._check_tracepoint(1)
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.execution_outcome_unknown is True
+    assert manager._tracepoint_manager.get_log()[0].value == "<timeout>"
+
+
+@pytest.mark.asyncio
+async def test_timed_out_shared_condition_reports_unknown_without_resuming():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await manager.add_breakpoint(source, 10, condition="value > 0")
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        raise asyncio.TimeoutError()
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock()
+    await manager._check_tracepoint(1)
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.execution_outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_timed_out_trace_after_owner_change_remains_unknown():
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def evaluate(expression, frame_id, *, admission):
+        assert admission()
+        entered.set()
+        await release.wait()
+        raise asyncio.TimeoutError()
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.set_breakpoints = AsyncMock(
+        return_value=make_response(body={"breakpoints": [{"id": 1, "verified": True}]})
+    )
+    manager.client.continue_execution = AsyncMock()
+    pending = asyncio.create_task(manager._check_tracepoint(1))
+    await entered.wait()
+    await manager.add_breakpoint(source, 10)
+    release.set()
+    await pending
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.execution_outcome_unknown is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatched", [False, True])
+async def test_cancelled_trace_evaluation_retains_its_dispatch_outcome(dispatched):
+    manager = make_manager()
+    tools = register_tools(manager)
+    source = os.path.realpath(__file__)
+    await tools["add_tracepoint"](None, source, 10, "value")
+    manager._state.state = DebugState.RUNNING
+    manager.get_stack_trace = AsyncMock(
+        return_value=[SimpleNamespace(source=source, line=10, id=1)]
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def evaluate(expression, frame_id, *, admission):
+        if dispatched:
+            assert admission()
+        entered.set()
+        await release.wait()
+        return make_response(body={"result": "42"})
+
+    manager.client.evaluate = AsyncMock(side_effect=evaluate)
+    manager.client.continue_execution = AsyncMock()
+    pending = asyncio.create_task(manager._check_tracepoint(1))
+    await entered.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    manager.client.continue_execution.assert_not_awaited()
+    assert manager.state.execution_outcome_unknown is dispatched
+    if not dispatched:
+        assert manager.state.state == DebugState.STOPPED
