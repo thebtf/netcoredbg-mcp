@@ -74,7 +74,8 @@ observed: unpublished output may have been lost. Pre-adapter validation failures
 do not invalidate them. Unconfirmed cleanup rejects idle checkpoint operations.
 Assertions support literal and case-sensitive .NET regex matching. Unlike the
 Python implementation, forbidden matches still fail when `max_matches` is zero
-or negative. Evidence limits do not change assertion truth. Native assertions
+or negative. `forbidden_count` reports all matched pattern/line pairs even when
+evidence is capped; evidence limits do not change assertion truth. Native assertions
 limit checkpoints to 1024, patterns to 256 of up to 4096 UTF-16 code units,
 captured text to 2 Mi UTF-16 code units, evidence per list to 256 matches and
 serialized responses to 256 KiB; time and size limits return errors. Regex and

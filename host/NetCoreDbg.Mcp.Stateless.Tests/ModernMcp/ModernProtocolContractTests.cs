@@ -1291,6 +1291,7 @@ public sealed class ModernProtocolContractTests
                 ["max_matches"] = 0,
             }, owner);
             Assert.Equal("FAIL", capped["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(1, capped["data"]?["summary"]?["forbidden_count"]?.GetValue<int>());
             Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
             active = false;
             Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "output_assert_since", new JsonObject { ["checkpoint"] = "before" }, owner))["data"]?["status"]?.GetValue<string>());
