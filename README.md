@@ -70,6 +70,9 @@ most one non-terminating disconnect. An adapter acknowledgement does not prove
 CLR detach or target survival, so stop reports an unconfirmed outcome. Cleanup
 and host shutdown can remain pending until protocol work settles and the target
 exits. Safety after an unexpected host or adapter exit is not established.
+When `terminate_debug` falls back to disconnect for an attached process, it uses
+the same retained owner and unconfirmed-detach reporting. `configurationDone` is
+sent during attach only when the adapter advertises that capability.
 
 `debuggee_activity` observes reader-received DAP events and legacy trace entries
 over 1–30,000 ms (default 1,000) from an initially running session. It does not

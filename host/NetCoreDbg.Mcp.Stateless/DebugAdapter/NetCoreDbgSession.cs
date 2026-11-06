@@ -762,14 +762,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _attachStreamUncertain = false;
         try
         {
-            _attachStreamUncertain = true;
-            var configuration = await BeginRequestAsync("configurationDone", null, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
-            _attachStreamUncertain = false;
-            DapResponse configurationResponse;
-            try { configurationResponse = await configuration.Completion.Task.ConfigureAwait(false); }
-            catch { _attachStreamUncertain = true; throw; }
-            finally { RemovePending(configuration); }
-            if (!configurationResponse.Success) throw new InvalidDataException("The debugger refused configurationDone.");
+            if (_supportsConfigurationDone)
+            {
+                _attachStreamUncertain = true;
+                var configuration = await BeginRequestAsync("configurationDone", null, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+                _attachStreamUncertain = false;
+                DapResponse configurationResponse;
+                try { configurationResponse = await configuration.Completion.Task.ConfigureAwait(false); }
+                catch { _attachStreamUncertain = true; throw; }
+                finally { RemovePending(configuration); }
+                if (!configurationResponse.Success) throw new InvalidDataException("The debugger refused configurationDone.");
+            }
             DapResponse attachResponse;
             try { attachResponse = await attach.Completion.Task.ConfigureAwait(false); }
             catch { _attachStreamUncertain = true; throw; }

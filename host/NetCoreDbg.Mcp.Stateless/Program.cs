@@ -2105,57 +2105,6 @@ internal static class Program
                     return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
-                if (name == StopDebug && _legacyAttachSession is not null && _legacyAttachSlot is { } attachedSlot)
-                {
-                    _legacyAttachClosing = true;
-                    _legacySessionGeneration++;
-                    _legacyInspectionSessionId = null;
-                    _legacyInspectionContextId = null;
-                    _legacyInspectionMuxId = null;
-                    _legacyCurrentFrameId = null;
-                    _legacyInspectionRevision++;
-                    var retiredAttachResources = _legacyResources.Retire();
-                    var close = attachedSlot.CloseAndDrainAsync();
-                    _legacyGate.Release();
-                    gateHeld = false;
-                    try { await Task.WhenAny(close, Task.Delay(StopTimeout)).ConfigureAwait(false); }
-                    finally
-                    {
-                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-                        gateHeld = true;
-                    }
-                    if (close.IsCompletedSuccessfully && _legacySessionId == sessionId)
-                    {
-                        OutputLifetime? retiringOutput;
-                        lock (_lifetimeGate) _outputs.Remove(sessionId, out retiringOutput);
-                        _legacyOutputEvidence.Clear();
-                        if (_legacyBreakpointObserverSession is { } breakpointSession)
-                            breakpointSession.WithLegacyBreakpointLock(() =>
-                            {
-                                ReconcileLegacyBreakpointObservations(breakpointSession);
-                                _legacyBreakpointObservationsIncomplete = LegacyHasStoppingBreakpoints() && !breakpointSession.LegacyBreakpointEventsComplete;
-                                return true;
-                            });
-                        ClearLegacyGroupsAfterConfirmedStop();
-                        foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
-                            _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
-                        _legacySessionId = null;
-                        _legacyAttachSession = null;
-                        _legacyAttachSlot = null;
-                        _legacyAttachClosing = false;
-                        _legacyBreakpointObserverSession = null;
-                        _legacyHasOwner = false;
-                        _legacyOwner = null;
-                        var idleGeneration = _legacyResources.Begin();
-                        if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
-                        idleGeneration.Observe("thread");
-                        _legacyResources.Publish(idleGeneration);
-                        return LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
-                    }
-                    else if (close.IsFaulted) _ = close.Exception;
-                    _legacyResources.Restore(retiredAttachResources);
-                    return LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
-                }
                 if (name == QuickEvaluate)
                 {
                     if (!arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
@@ -2263,6 +2212,57 @@ internal static class Program
                         var message = outcome == "timeout" ? "Terminate sent but program did not exit within 10s." : "Program terminated gracefully.";
                         return LegacyResponseWithMessage(new { state = observed }, observed, message);
                     }
+                }
+                if (name == StopDebug && _legacyAttachSession is not null && _legacyAttachSlot is { } attachedSlot)
+                {
+                    _legacyAttachClosing = true;
+                    _legacySessionGeneration++;
+                    _legacyInspectionSessionId = null;
+                    _legacyInspectionContextId = null;
+                    _legacyInspectionMuxId = null;
+                    _legacyCurrentFrameId = null;
+                    _legacyInspectionRevision++;
+                    var retiredAttachResources = _legacyResources.Retire();
+                    var close = attachedSlot.CloseAndDrainAsync();
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    try { await Task.WhenAny(close, Task.Delay(StopTimeout)).ConfigureAwait(false); }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                    }
+                    if (close.IsCompletedSuccessfully && _legacySessionId == sessionId)
+                    {
+                        OutputLifetime? retiringOutput;
+                        lock (_lifetimeGate) _outputs.Remove(sessionId, out retiringOutput);
+                        _legacyOutputEvidence.Clear();
+                        if (_legacyBreakpointObserverSession is { } breakpointSession)
+                            breakpointSession.WithLegacyBreakpointLock(() =>
+                            {
+                                ReconcileLegacyBreakpointObservations(breakpointSession);
+                                _legacyBreakpointObservationsIncomplete = LegacyHasStoppingBreakpoints() && !breakpointSession.LegacyBreakpointEventsComplete;
+                                return true;
+                            });
+                        ClearLegacyGroupsAfterConfirmedStop();
+                        foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
+                            _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
+                        _legacySessionId = null;
+                        _legacyAttachSession = null;
+                        _legacyAttachSlot = null;
+                        _legacyAttachClosing = false;
+                        _legacyBreakpointObserverSession = null;
+                        _legacyHasOwner = false;
+                        _legacyOwner = null;
+                        var idleGeneration = _legacyResources.Begin();
+                        if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
+                        idleGeneration.Observe("thread");
+                        _legacyResources.Publish(idleGeneration);
+                        return LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
+                    }
+                    else if (close.IsFaulted) _ = close.Exception;
+                    _legacyResources.Restore(retiredAttachResources);
+                    return LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
                 }
                 var targetedStep = false;
                 if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)

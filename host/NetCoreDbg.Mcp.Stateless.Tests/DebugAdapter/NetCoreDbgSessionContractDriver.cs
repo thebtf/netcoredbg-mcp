@@ -1340,10 +1340,10 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         var slotConstructor = slotType.GetConstructor(
             BindingFlags.Instance | BindingFlags.NonPublic,
             binder: null,
-            types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)],
+            types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action), typeof(Func<Task>)],
             modifiers: null);
         Assert.NotNull(slotConstructor);
-        slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
+        slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove, null]);
         Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
         Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 

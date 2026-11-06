@@ -80,6 +80,73 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_Attach_TerminateFallbackRetainsOwnerUntilOwnedTargetExits()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: false, SuppressLifecycleEvents: true)));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-fallback-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "attach-fallback-other" };
+        try
+        {
+            var attached = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var fallback = await LegacyConsoleCallAsync(driver, "terminate_debug", new JsonObject(), owner, TimeSpan.FromSeconds(15));
+            Assert.Contains("unconfirmed", fallback["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.False(target.HasExited);
+            var denied = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static item => item.Kind == "request").ToArray();
+            Assert.DoesNotContain(actions, static item => item.Command == "terminate");
+            var disconnects = actions.Where(static item => item.Command == "disconnect").ToArray();
+            Assert.True(disconnects.Length <= 1);
+            if (disconnects.Length == 1)
+                Assert.False(JsonNode.Parse(disconnects[0].Detail!)?["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            _ = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_Attach_WithoutConfigurationDoneCapabilitySkipsRequest(bool omitInitializeBody)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsConfigurationDone: false, OmitInitializeResponseBody: omitInitializeBody, SuppressLifecycleEvents: true)));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-no-config-owner" };
+        try
+        {
+            var attached = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            Assert.Equal(target.Id, attached["data"]?["processId"]?.GetValue<int>());
+            var actions = (await driver.ReadNativeActionsAsync()).Where(static item => item.Kind == "request").ToArray();
+            Assert.Single(actions, static item => item.Command == "attach");
+            Assert.DoesNotContain(actions, static item => item.Command == "configurationDone");
+            Assert.False(target.HasExited);
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
     public async Task LegacyCompat_AttachRefused_DoesNotPublishOrTerminateTarget()
     {
         if (!OperatingSystem.IsWindows()) return;

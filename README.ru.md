@@ -62,6 +62,12 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
 
+The source-built `attach_debug` route is Windows-only. It retains the target
+handle, sends at most one non-terminating disconnect and reports CLR detach as
+unconfirmed. Cleanup can wait for the target to exit; safety after an unexpected
+host or adapter exit is not established. An unsupported `terminate_debug`
+uses the same retained owner and unconfirmed-detach reporting.
+
 `debuggee_activity` считает полученные DAP-события за окно от 1 до 30 000 мс
 (по умолчанию 1000 мс). В начале сессия должна быть в состоянии running.
 Счётчик выполненных инструкций недоступен. Native host пока не поддерживает
