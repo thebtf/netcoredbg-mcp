@@ -2533,6 +2533,524 @@ public sealed class ModernProtocolContractTests
         }
     }
 
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_ReportHitsAndClearOnlyRequestedGroup()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "group-journey-owner" };
+        var created = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "flow",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+            ["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" }),
+        }, owner);
+        Assert.Equal("PASS", created["data"]?["status"]?.GetValue<string>());
+        var traceId = Assert.IsType<string>(created["data"]?["tracepoints"]?[0]?["id"]?.GetValue<string>());
+        var other = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "other",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 6 }),
+        }, owner);
+        Assert.Equal("PASS", other["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            JsonObject inspected;
+            while (true)
+            {
+                inspected = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect",
+                    new JsonObject { ["name"] = "flow" }, owner))["data"]);
+                if (inspected["status"]?.GetValue<string>() == "FAIL")
+                {
+                    Assert.False(inspected["hit_counts_complete"]?.GetValue<bool>() ?? true);
+                    Assert.Equal("acknowledged", inspected["application"]?.GetValue<string>());
+                    await Task.Delay(25, deadline.Token);
+                    continue;
+                }
+                Assert.Equal("PASS", inspected["status"]?.GetValue<string>());
+                if ((inspected["summary"]?["hit_count"]?.GetValue<int>() ?? 0) > 0 &&
+                    (inspected["summary"]?["trace_log_count"]?.GetValue<int>() ?? 0) > 0) break;
+                await Task.Delay(25, deadline.Token);
+            }
+            Assert.Equal(1, inspected["summary"]?["breakpoint_count"]?.GetValue<int>());
+            Assert.Equal(1, inspected["summary"]?["tracepoint_count"]?.GetValue<int>());
+            Assert.True(inspected["breakpoints"]?[0]?["hit_count"]?.GetValue<int>() > 0);
+            var trace = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(inspected["tracepoints"])));
+            Assert.True(trace["hit_count"]?.GetValue<int>() > 0);
+            var log = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(trace["logs"])));
+            Assert.Equal(traceId, log["tracepoint_id"]?.GetValue<string>());
+            Assert.Equal(2, log["line"]?.GetValue<int>());
+            Assert.Equal("6 * 7", log["expression"]?.GetValue<string>());
+            Assert.Equal("42", log["value"]?.GetValue<string>());
+
+            var cleared = await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "flow" }, owner);
+            Assert.Equal("PASS", cleared["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "flow" }, owner))["data"]?["status"]?.GetValue<string>());
+            var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "other" }, owner);
+            Assert.Equal("PASS", retained["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(6, retained["data"]?["breakpoints"]?[0]?["line"]?.GetValue<int>());
+            AssertBreakpointRequest((await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints"), source, [6]);
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_InvalidRequestsDoNotMutateExistingGroup()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var owner = new JsonObject { ["muxSessionId"] = "group-invalid-owner" };
+        JsonObject Create(string name, int line) => new()
+        {
+            ["name"] = name,
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = line })
+        };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", Create("keep", 2), owner))["data"]?["status"]?.GetValue<string>());
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        foreach (var (tool, args) in new (string, JsonObject)[]
+        {
+            ("instrumentation_group_create", Create("keep", 6)),
+            ("instrumentation_group_create", Create("bad group name", 6)),
+            ("instrumentation_group_create", new JsonObject { ["name"] = "empty", ["breakpoints"] = new JsonArray(), ["tracepoints"] = new JsonArray() }),
+            ("instrumentation_group_create", new JsonObject { ["name"] = "invalid", ["breakpoints"] = new JsonArray(new JsonObject { ["line"] = 6 }) }),
+            ("instrumentation_group_inspect", new JsonObject { ["name"] = "missing" }),
+            ("instrumentation_group_clear", new JsonObject { ["name"] = "missing" }),
+        })
+        {
+            var rejected = await LegacyConsoleCallAsync(driver, tool, args, owner);
+            Assert.Equal("FAIL", rejected["data"]?["status"]?.GetValue<string>());
+            var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "keep" }, owner);
+            Assert.Equal("PASS", retained["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(retained["data"]?["breakpoints"]))?["line"]?.GetValue<int>());
+        }
+        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+        var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+        Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(listed["data"]?[source]))?["line"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_ClearPreservesCoincidentUserBreakpoint()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "group-shared-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject
+        { ["file"] = source, ["line"] = 2, ["condition"] = "value > 0" }, owner))["data"]);
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "trace",
+            ["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" }),
+        }, owner))["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "trace" }, owner))["data"]?["status"]?.GetValue<string>());
+            var latest = (await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(latest, source, [2]);
+            var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal("value > 0", Assert.Single(Assert.IsType<JsonArray>(list["data"]?[source]))?["condition"]?.GetValue<string>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "remove_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]?["removed"]?.GetValue<bool>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_RefusedClearRetainsGroupForRecovery()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SetBreakpointsResponseMode: "refuse-first-runtime")));
+        var owner = new JsonObject { ["muxSessionId"] = "group-refusal-owner" };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "recover",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+        }, owner))["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var refused = await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "recover" }, owner);
+            Assert.True(refused["error"] is not null || refused["data"]?["status"]?.GetValue<string>() == "FAIL");
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            AssertBreakpointRequest(Assert.Single(writes), source, []);
+            var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "recover" }, owner);
+            Assert.Equal("FAIL", retained["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(retained["data"]?["breakpoints"]))?["line"]?.GetValue<int>());
+            var repeat = await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "recover" }, owner);
+            Assert.True(repeat["error"] is not null || repeat["data"]?["status"]?.GetValue<string>() == "FAIL");
+            var blockedCreate = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+            {
+                ["name"] = "another",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 6 }),
+            }, owner);
+            Assert.True(blockedCreate["error"] is not null || blockedCreate["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "recover" }, owner))["data"]?["status"]?.GetValue<string>());
+            var afterCleanup = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+            {
+                ["name"] = "another",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 6 }),
+            }, owner);
+            Assert.Equal("PASS", afterCleanup["data"]?["status"]?.GetValue<string>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Theory]
+    [InlineData("add_breakpoint")]
+    [InlineData("remove_breakpoint")]
+    [InlineData("clear_breakpoints")]
+    [InlineData("add_tracepoint")]
+    [InlineData("remove_tracepoint")]
+    public async Task LegacyCompat_InstrumentationGroups_RefusedClearQuarantinesDirectSourceMutations(string mutation)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var unrelated = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs"));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, SetBreakpointsResponseMode: "refuse-first-runtime")));
+        var owner = new JsonObject { ["muxSessionId"] = "group-quarantine-direct-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 6 }, owner))["data"]);
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject { ["file"] = source, ["line"] = 8, ["expression"] = "6 * 7" }, owner);
+        var traceId = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var created = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "recover",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+        }, owner);
+        Assert.Equal("PASS", created["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var refused = await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "recover" }, owner);
+            Assert.True(refused["error"] is not null || refused["data"]?["status"]?.GetValue<string>() == "FAIL");
+            var failedSet = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(failedSet, source, [6, 8]);
+            var arguments = mutation switch
+            {
+                "add_breakpoint" => new JsonObject { ["file"] = source, ["line"] = 10 },
+                "remove_breakpoint" => new JsonObject { ["file"] = source, ["line"] = 6 },
+                "clear_breakpoints" => new JsonObject { ["file"] = source },
+                "add_tracepoint" => new JsonObject { ["file"] = source, ["line"] = 10, ["expression"] = "6 * 7" },
+                _ => new JsonObject { ["tracepoint_id"] = traceId },
+            };
+            var rejected = await LegacyConsoleCallAsync(driver, mutation, arguments, owner);
+            Assert.NotNull(rejected["error"]);
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "recover" }, owner);
+            Assert.Equal("FAIL", retained["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(retained["data"]?["breakpoints"]))?["line"]?.GetValue<int>());
+            var other = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = unrelated, ["line"] = 2 }, owner);
+            Assert.True(other["data"]?["verified"]?.GetValue<bool>());
+            var replacements = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.Equal(2, replacements.Length);
+            AssertBreakpointRequest(replacements[1], unrelated, [2]);
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_QuarantineUsesNormalizedSourceNotBasename()
+    {
+        var source = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs"));
+        var otherSource = Path.GetFullPath(Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless/Program.cs"));
+        var alias = Path.Combine(Path.GetDirectoryName(source)!, ".", Path.GetFileName(source));
+        Assert.Equal(Path.GetFileName(source), Path.GetFileName(otherSource));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, SetBreakpointsResponseMode: "refuse-first-runtime")));
+        var owner = new JsonObject { ["muxSessionId"] = "group-same-basename-owner" };
+        Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "uncertain",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+        }, owner))["data"]?["status"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var refused = await LegacyConsoleCallAsync(driver, "instrumentation_group_clear", new JsonObject { ["name"] = "uncertain" }, owner);
+            Assert.True(refused["error"] is not null || refused["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = alias, ["line"] = 6 }, owner))["error"]);
+            var aliasGroup = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+            {
+                ["name"] = "alias",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = alias, ["line"] = 4 }),
+            }, owner);
+            Assert.True(aliasGroup["error"] is not null || aliasGroup["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            var otherGroup = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+            {
+                ["name"] = "other",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = otherSource, ["line"] = 4 }),
+            }, owner);
+            Assert.Equal("PASS", otherGroup["data"]?["status"]?.GetValue<string>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = otherSource, ["line"] = 6 }, owner))["data"]?["verified"]?.GetValue<bool>());
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.Equal(3, writes.Length);
+            AssertBreakpointRequest(writes[0], source, []);
+            AssertBreakpointRequest(writes[1], otherSource, [4]);
+            AssertBreakpointRequest(writes[2], otherSource, [6, 4]);
+            var stillUnknown = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "uncertain" }, owner);
+            Assert.Equal("FAIL", stillUnknown["data"]?["status"]?.GetValue<string>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_InstrumentationGroups_RejectedOverlapDoesNotInterruptInFlightTrace()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "group-rejected-trace-owner" };
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "fixture:hold",
+        }, owner);
+        var traceId = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var rejected = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+            {
+                ["name"] = "conflict",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2, ["condition"] = "false" }),
+            }, owner);
+            Assert.True(rejected["error"] is not null || rejected["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            driver.ReleaseStackTraceResponse();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-written", deadline.Token);
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = traceId }, owner);
+                if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0)
+                {
+                    var entry = Assert.Single(entries)!;
+                    Assert.Equal(traceId, entry["tracepoint_id"]?.GetValue<string>());
+                    Assert.Equal("private controlled evaluation payload", entry["value"]?.GetValue<string>());
+                    break;
+                }
+                await Task.Delay(25, deadline.Token);
+            }
+            while (!(await driver.ReadNativeActionsAsync()).Any(static action => action.Command == "continue"))
+                await Task.Delay(25, deadline.Token);
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_InstrumentationGroups_SharedConditionalBreakpointIsPreservedOrRefused(bool secondIsTracepoint)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "group-conditional-owner" };
+        JsonObject Point() => new() { ["file"] = source, ["line"] = 2, ["condition"] = "false" };
+        var first = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "first",
+            ["breakpoints"] = new JsonArray(Point()),
+        }, owner);
+        Assert.Equal("PASS", first["data"]?["status"]?.GetValue<string>());
+        var secondArgs = new JsonObject { ["name"] = "second" };
+        if (secondIsTracepoint)
+            secondArgs["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" });
+        else secondArgs["breakpoints"] = new JsonArray(Point());
+        var second = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", secondArgs, owner);
+        var accepted = second["data"]?["status"]?.GetValue<string>() == "PASS";
+        if (secondIsTracepoint) Assert.False(accepted);
+        if (!accepted)
+        {
+            Assert.True(second["error"] is not null || second["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "second" }, owner))["data"]?["status"]?.GetValue<string>());
+        }
+        var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "first" }, owner);
+        Assert.Equal("PASS", retained["data"]?["status"]?.GetValue<string>());
+        Assert.Equal("false", retained["data"]?["breakpoints"]?[0]?["condition"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var startup = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(startup, source, [2]);
+            var physical = Assert.Single(Assert.IsType<JsonArray>(JsonNode.Parse(startup.Detail!)?["arguments"]?["breakpoints"]));
+            Assert.Equal("false", physical?["condition"]?.GetValue<string>());
+            if (accepted)
+            {
+                var other = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "second" }, owner);
+                Assert.Equal("PASS", other["data"]?["status"]?.GetValue<string>());
+            }
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Theory]
+    [InlineData("group", "direct")]
+    [InlineData("direct", "group")]
+    [InlineData("group", "trace")]
+    [InlineData("trace", "group")]
+    public async Task LegacyCompat_InstrumentationGroups_IncompatibleOwnerAdmissionPreservesFirst(string first, string second)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "group-admission-owner" };
+        JsonObject Group(string condition) => new()
+        {
+            ["name"] = "conditional",
+            ["breakpoints"] = new JsonArray(
+            new JsonObject { ["file"] = source, ["line"] = 2, ["condition"] = condition })
+        };
+        JsonObject Direct(string condition) => new() { ["file"] = source, ["line"] = 2, ["condition"] = condition };
+        JsonObject Trace() => new() { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var initial = first switch
+            {
+                "group" => await LegacyConsoleCallAsync(driver, "instrumentation_group_create", Group("false"), owner),
+                "direct" => await LegacyConsoleCallAsync(driver, "add_breakpoint", Direct("false"), owner),
+                _ => await LegacyConsoleCallAsync(driver, "add_tracepoint", Trace(), owner),
+            };
+            if (first == "group") Assert.Equal("PASS", initial["data"]?["status"]?.GetValue<string>());
+            else Assert.NotNull(initial["data"]);
+            var traceId = first == "trace" ? Assert.IsType<string>(initial["data"]?["id"]?.GetValue<string>()) : null;
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var rejected = second switch
+            {
+                "group" => await LegacyConsoleCallAsync(driver, "instrumentation_group_create", Group(first == "direct" ? "true" : "false"), owner),
+                "direct" => await LegacyConsoleCallAsync(driver, "add_breakpoint", Direct("true"), owner),
+                _ => await LegacyConsoleCallAsync(driver, "add_tracepoint", Trace(), owner),
+            };
+            Assert.True(rejected["error"] is not null || rejected["data"]?["status"]?.GetValue<string>() == "FAIL");
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            if (first == "group")
+            {
+                var retained = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "conditional" }, owner);
+                Assert.Equal("PASS", retained["data"]?["status"]?.GetValue<string>());
+                Assert.Equal("false", retained["data"]?["breakpoints"]?[0]?["condition"]?.GetValue<string>());
+            }
+            else if (first == "direct")
+            {
+                var retained = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                Assert.Equal("false", Assert.Single(Assert.IsType<JsonArray>(retained["data"]?[source]))?["condition"]?.GetValue<string>());
+            }
+            else Assert.Equal(traceId, (await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = traceId }, owner))["data"]?["removed"]?.GetValue<string>());
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Theory]
+    [InlineData("idle")]
+    [InlineData("stop")]
+    [InlineData("restart")]
+    public async Task LegacyCompat_InstrumentationGroups_ConfirmedStopOrRestartClearsOnlyGroupOwners(string mode)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var owner = new JsonObject { ["muxSessionId"] = "group-lifecycle-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var independent = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 6,
+            ["expression"] = "6 * 7",
+        }, owner);
+        var independentId = Assert.IsType<string>(independent["data"]?["id"]?.GetValue<string>());
+        var group = await LegacyConsoleCallAsync(driver, "instrumentation_group_create", new JsonObject
+        {
+            ["name"] = "lifecycle",
+            ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 8 }),
+            ["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" }),
+        }, owner);
+        Assert.Equal("PASS", group["data"]?["status"]?.GetValue<string>());
+        var groupTraceId = Assert.IsType<string>(group["data"]?["tracepoints"]?[0]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            if (mode != "idle")
+            {
+                Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+                { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+                active = true;
+            }
+            var stopped = mode == "restart"
+                ? await LegacyConsoleCallAsync(driver, "restart_debug", new JsonObject { ["rebuild"] = false }, owner)
+                : await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.True(stopped["data"]?["success"]?.GetValue<bool>());
+            active = mode == "restart";
+            var inspected = await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "lifecycle" }, owner);
+            Assert.Equal("FAIL", inspected["data"]?["status"]?.GetValue<string>());
+            var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal(2, Assert.Single(Assert.IsType<JsonArray>(listed["data"]?[source]))?["line"]?.GetValue<int>());
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = groupTraceId }, owner))["error"]);
+            Assert.Equal(independentId, (await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = independentId }, owner))["data"]?["removed"]?.GetValue<string>());
+        }
+        finally { if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
     [Theory]
     [InlineData(true, true)]
     [InlineData(true, false)]
