@@ -313,6 +313,8 @@ internal static class Program
         private const string RemoveTracepoint = "remove_tracepoint";
         private const string GetTraceLog = "get_trace_log";
         private const string ClearTraceLog = "clear_trace_log";
+        private const string MarkTraceCursor = "mark_trace_cursor";
+        private const string GetTraceDelta = "get_trace_delta";
         private const string ConfigureExceptions = "configure_exceptions";
         private const string UiInvoke = "ui_invoke";
         private const string UiInvokeObserved = "ui_invoke_observed";
@@ -381,6 +383,8 @@ internal static class Program
         private readonly Queue<LegacyTraceEntry> _legacyTraceLog = new();
         private long _legacyTraceCounter;
         private long _legacyTraceAppendCount;
+        private long _legacyTraceDropCount;
+        private bool _legacyTraceManagerCreated;
         private long _legacyTraceRevision;
         private string? _legacyTraceLastContext;
         private bool _legacyTracePauseVeto;
@@ -779,7 +783,7 @@ internal static class Program
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
-                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GetTraceLog or ClearTraceLog or GetScopes or GetVariables or EvaluateExpression
+                or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or AddTracepoint or RemoveTracepoint or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
@@ -882,6 +886,8 @@ internal static class Program
                 }
                 if (name is AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or AddTracepoint or RemoveTracepoint)
                     _legacyTraceRevision++;
+                if (name is MarkTraceCursor or GetTraceDelta)
+                    return LegacyTraceCursorOperation(name, arguments);
                 if (name == GetTraceLog)
                 {
                     double? since = null;
@@ -900,6 +906,7 @@ internal static class Program
                 if (name == ClearTraceLog)
                 {
                     var cleared = _legacyTraceLog.Count;
+                    _legacyTraceDropCount += cleared;
                     _legacyTraceLog.Clear();
                     return LegacyResponse(new { cleared });
                 }
@@ -908,6 +915,7 @@ internal static class Program
                     LegacyTracepoint point;
                     if (name == AddTracepoint)
                     {
+                        _legacyTraceManagerCreated = true;
                         if (!breakpointSourceValid || !arguments.TryGetValue("line", out var traceLine)
                             || !TryReadOutputLineCount(traceLine, out var lineNumber) || lineNumber is < 1 or > int.MaxValue
                             || !arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
@@ -2299,7 +2307,7 @@ internal static class Program
                     }
                     foreach (var entry in entries)
                     {
-                        if (_legacyTraceLog.Count == 1000) _legacyTraceLog.Dequeue();
+                        if (_legacyTraceLog.Count == 1000) { _legacyTraceLog.Dequeue(); _legacyTraceDropCount++; }
                         _legacyTraceLog.Enqueue(entry);
                         _legacyTraceAppendCount++;
                     }
@@ -2490,6 +2498,214 @@ internal static class Program
             return -1;
         }
 
+        private CallToolResult LegacyTraceCursorOperation(string name, Dictionary<string, JsonElement> arguments)
+        {
+            if (!TryReadOptionalLegacyBreakpointOption(arguments, "tracepoint_id", out var overrideFilter))
+                return LegacyError("Invalid tracepoint ID.");
+            var all = _legacyTraceLog.ToArray();
+            if (name == MarkTraceCursor)
+            {
+                var filtered = overrideFilter is null ? all : all.Where(entry => entry.tracepoint_id == overrideFilter).ToArray();
+                object cursor = _legacyTraceManagerCreated ? BuildLegacyTraceCursor(filtered, overrideFilter, all)
+                    : new { after_timestamp = (double?)null, tracepoint_id = overrideFilter, buffer_start_timestamp = (double?)null, buffer_size = 0 };
+                if (JsonSerializer.SerializeToUtf8Bytes(cursor).Length > 16 * 1024) return LegacyError("Trace cursor exceeds 16 KiB.");
+                return LegacyBoundedUtilityResponse(new { cursor, buffer_size = filtered.Length, tracepoint_id = overrideFilter }, LegacySnapshot().State);
+            }
+
+            if (!arguments.TryGetValue("cursor", out var original)
+                || original.ValueKind is not (JsonValueKind.Object or JsonValueKind.Number or JsonValueKind.Null)
+                || (original.ValueKind == JsonValueKind.Object && Encoding.UTF8.GetByteCount(original.GetRawText()) > 16 * 1024))
+                return LegacyError("Invalid trace cursor.");
+            long? limit = null;
+            if (arguments.TryGetValue("limit", out var limitValue) && limitValue.ValueKind != JsonValueKind.Null)
+            {
+                if (!TryReadOutputLineCount(limitValue, out var count)) return LegacyError("Invalid trace limit.");
+                limit = count;
+            }
+            if (!_legacyTraceManagerCreated)
+            {
+                object next;
+                if (original.ValueKind == JsonValueKind.Object)
+                {
+                    var copied = JsonNode.Parse(original.GetRawText())!.AsObject();
+                    if (overrideFilter is not null) copied["tracepoint_id"] = overrideFilter;
+                    next = copied;
+                }
+                else next = new { after_timestamp = original, tracepoint_id = overrideFilter, buffer_start_timestamp = (double?)null, buffer_size = 0 };
+                if (JsonSerializer.SerializeToUtf8Bytes(next).Length > 16 * 1024) return LegacyError("Trace cursor exceeds 16 KiB.");
+                return LegacyBoundedUtilityResponse(new
+                {
+                    entries = Array.Empty<LegacyTraceEntry>(),
+                    available = 0,
+                    total = 0,
+                    limit,
+                    limited = false,
+                    truncated = false,
+                    stale = false,
+                    dropped_count = 0,
+                    cursor = original,
+                    next_cursor = next
+                }, LegacySnapshot().State);
+            }
+
+            double? after = null;
+            long ordinal = 0;
+            long dropGeneration = 0;
+            string? cursorFilter = null;
+            var markedEmpty = false;
+            var useGlobal = false;
+            if (original.ValueKind == JsonValueKind.Number)
+            {
+                if (!original.TryGetDouble(out var timestamp) || !double.IsFinite(timestamp)) return LegacyError("Invalid trace cursor.");
+                after = timestamp;
+            }
+            else if (original.ValueKind == JsonValueKind.Object)
+            {
+                if (original.TryGetProperty("tracepoint_id", out var filterValue) && filterValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (filterValue.ValueKind != JsonValueKind.String) return LegacyError("Invalid trace cursor.");
+                    cursorFilter = filterValue.GetString();
+                }
+                useGlobal = overrideFilter is not null && cursorFilter != overrideFilter;
+                var timeKey = useGlobal && original.TryGetProperty("global_after_timestamp", out _) ? "global_after_timestamp" : "after_timestamp";
+                var ordinalKey = useGlobal && original.TryGetProperty("global_after_ordinal", out _) ? "global_after_ordinal" : "after_ordinal";
+                if (!TryReadTraceTimestamp(original, timeKey, out after)
+                    || !TryReadTraceInteger(original, ordinalKey, out ordinal)
+                    || !TryReadTraceInteger(original, "drop_generation", out dropGeneration)) return LegacyError("Invalid trace cursor.");
+                markedEmpty = (!original.TryGetProperty("after_timestamp", out var originalTime) || originalTime.ValueKind == JsonValueKind.Null)
+                    && (!original.TryGetProperty("buffer_start_timestamp", out var start) || start.ValueKind == JsonValueKind.Null)
+                    && original.TryGetProperty("buffer_size", out var size) && size.ValueKind == JsonValueKind.Number
+                    && size.TryGetInt64(out var sizeValue) && sizeValue == 0;
+            }
+
+            var filter = overrideFilter ?? cursorFilter;
+            if (useGlobal && after is { } globalTime && ordinal > 0)
+            {
+                long globalSeen = 0;
+                long filteredSeen = 0;
+                foreach (var entry in all)
+                {
+                    if (entry.timestamp != globalTime) continue;
+                    globalSeen++;
+                    if (entry.tracepoint_id == filter) filteredSeen++;
+                    if (globalSeen >= ordinal) break;
+                }
+                ordinal = filteredSeen;
+            }
+            var retained = filter is null ? all : all.Where(entry => entry.tracepoint_id == filter).ToArray();
+            var oldest = retained.Length == 0 ? (double?)null : retained[0].timestamp;
+            bool stale;
+            if (after is { } boundary)
+            {
+                if (oldest is null || oldest > boundary)
+                    stale = original.ValueKind == JsonValueKind.Object ? _legacyTraceDropCount > dropGeneration : true;
+                else
+                    stale = oldest == boundary && ((original.ValueKind == JsonValueKind.Object && _legacyTraceDropCount > dropGeneration)
+                        || retained.LongCount(entry => entry.timestamp == boundary) < ordinal);
+            }
+            else stale = original.ValueKind == JsonValueKind.Object && markedEmpty && _legacyTraceDropCount > dropGeneration;
+
+            var availableEntries = new List<LegacyTraceEntry>(retained.Length);
+            long sameTimestamp = 0;
+            foreach (var entry in retained)
+            {
+                if (after is null || entry.timestamp > after || (entry.timestamp == after && ++sameTimestamp > ordinal))
+                    availableEntries.Add(entry);
+            }
+            var available = availableEntries.Count;
+            var pageCount = limit is null ? available : (int)Math.Min(available, Math.Max(limit.Value, 0));
+            var page = availableEntries.Take(pageCount).ToArray();
+            object nextCursor;
+            if (limit is <= 0 && available > 0)
+            {
+                if (after is { } unadvanced)
+                    nextCursor = BuildLegacyTraceBoundary(unadvanced, ordinal, filter, retained);
+                else if (original.ValueKind == JsonValueKind.Object)
+                {
+                    if (!TryReadTraceInteger(original, "after_ordinal", out var originalOrdinal)) return LegacyError("Invalid trace cursor.");
+                    var copied = JsonNode.Parse(original.GetRawText())!.AsObject();
+                    copied["after_ordinal"] = originalOrdinal;
+                    copied["tracepoint_id"] = filter;
+                    nextCursor = copied;
+                }
+                else nextCursor = BuildLegacyTraceCursor([], filter);
+            }
+            else if (page.Length > 0)
+            {
+                var last = page[^1];
+                long boundaryOrdinal = 0;
+                foreach (var entry in retained)
+                {
+                    if (entry.timestamp == last.timestamp) boundaryOrdinal++;
+                    if (ReferenceEquals(entry, last)) break;
+                }
+                nextCursor = BuildLegacyTraceBoundary(last.timestamp, boundaryOrdinal, filter, retained);
+            }
+            else if (after is { } unchanged) nextCursor = BuildLegacyTraceBoundary(unchanged, ordinal, filter, retained);
+            else nextCursor = BuildLegacyTraceCursor(retained, filter);
+            if (JsonSerializer.SerializeToUtf8Bytes(nextCursor).Length > 16 * 1024) return LegacyError("Trace cursor exceeds 16 KiB.");
+
+
+            return LegacyBoundedUtilityResponse(new
+            {
+                entries = page,
+                available,
+                total = page.Length,
+                limit,
+                limited = limit is not null && available > Math.Max(limit.Value, 0),
+                truncated = all.Length >= 1000,
+                stale,
+                dropped_count = stale ? (long?)null : 0,
+                cursor = original,
+                next_cursor = nextCursor
+            }, LegacySnapshot().State);
+        }
+
+        private static bool TryReadTraceTimestamp(JsonElement cursor, string key, out double? result)
+        {
+            result = null;
+            if (!cursor.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Null) return true;
+            if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var number) || !double.IsFinite(number)) return false;
+            result = number;
+            return true;
+        }
+
+        private static bool TryReadTraceInteger(JsonElement cursor, string key, out long result)
+        {
+            result = 0;
+            return !cursor.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Null || TryReadOutputLineCount(value, out result);
+        }
+
+        private Dictionary<string, object?> BuildLegacyTraceCursor(LegacyTraceEntry[] entries, string? filter, LegacyTraceEntry[]? global = null)
+        {
+            global ??= entries;
+            var last = entries.Length == 0 ? null : entries[^1];
+            var globalLast = global.Length == 0 ? null : global[^1];
+            return new Dictionary<string, object?>
+            {
+                ["after_timestamp"] = last?.timestamp,
+                ["after_ordinal"] = last is null ? 0 : entries.Count(entry => entry.timestamp == last.timestamp),
+                ["global_after_timestamp"] = globalLast?.timestamp,
+                ["global_after_ordinal"] = globalLast is null ? 0 : global.Count(entry => entry.timestamp == globalLast.timestamp),
+                ["tracepoint_id"] = filter,
+                ["buffer_start_timestamp"] = entries.Length == 0 ? null : entries[0].timestamp,
+                ["buffer_size"] = entries.Length,
+                ["append_generation"] = _legacyTraceAppendCount,
+                ["drop_generation"] = _legacyTraceDropCount,
+            };
+        }
+
+        private Dictionary<string, object?> BuildLegacyTraceBoundary(double timestamp, long ordinal, string? filter, LegacyTraceEntry[] retained) => new()
+        {
+            ["after_timestamp"] = timestamp,
+            ["after_ordinal"] = ordinal,
+            ["tracepoint_id"] = filter,
+            ["buffer_start_timestamp"] = retained.Length == 0 ? null : retained[0].timestamp,
+            ["buffer_size"] = retained.Length,
+            ["append_generation"] = _legacyTraceAppendCount,
+            ["drop_generation"] = _legacyTraceDropCount,
+        };
+
         private CallToolResult LegacyOutputOperation(string name, Dictionary<string, JsonElement> arguments, DapOutputBuffer? buffer, CancellationToken cancellationToken)
         {
             static bool ReadPatterns(Dictionary<string, JsonElement> args, string key, out string[] patterns)
@@ -2574,6 +2790,8 @@ internal static class Program
                     RemoveTracepoint => key != "tracepoint_id",
                     GetTraceLog => key is not ("since" or "tracepoint_id"),
                     ClearTraceLog => true,
+                    MarkTraceCursor => key != "tracepoint_id",
+                    GetTraceDelta => key is not ("cursor" or "limit" or "tracepoint_id"),
                     ListBreakpoints or ClearBreakpoints => key != "file",
                     GetScopes => key != "frame_id",
                     GetStepInTargets => key != "frame_id",
@@ -7221,6 +7439,8 @@ internal static class Program
                 Tool("add_tracepoint", "Add an owner-guarded source tracepoint; ambiguous hits remain stopped and uncertain evaluations are not retried.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647},"expression":{"type":"string"}},"required":["file","line","expression"],"additionalProperties":false}"""),
                 Tool("remove_tracepoint", "Remove a tracepoint while preserving a coincident user breakpoint.", """{"type":"object","properties":{"tracepoint_id":{"type":"string"}},"required":["tracepoint_id"],"additionalProperties":false}"""),
                 Tool("get_trace_log", "Read bounded process-local trace entries; entries are retained across stop.", """{"type":"object","properties":{"since":{"type":["number","null"]},"tracepoint_id":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("mark_trace_cursor", "Mark a process-local trace-log boundary, optionally filtered by tracepoint.", """{"type":"object","properties":{"tracepoint_id":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("get_trace_delta", "Read entries after a trace cursor or monotonic timestamp; stale marks report lost retention.", """{"type":"object","properties":{"cursor":{"type":["object","number","null"]},"limit":{"type":["integer","null"]},"tracepoint_id":{"type":["string","null"]}},"required":["cursor"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("clear_trace_log", "Clear retained trace entries with owner permission.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("clear_breakpoints", "Clear source breakpoints for one file, or all source and function breakpoints. Uncertain writes are not retried.", """{"type":"object","properties":{"file":{"type":["string","null"]}},"additionalProperties":false}"""),
                 Tool("get_scopes", "Get scopes for the current stopped stack frame, or an explicit frame ID. Select a fresh stack after execution.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),

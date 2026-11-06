@@ -2930,6 +2930,128 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_TraceCursor_RejectsOversizedFilterAtMark()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var result = await LegacyConsoleCallAsync(driver, "mark_trace_cursor",
+            new JsonObject { ["tracepoint_id"] = new string('x', 20 * 1024) }, new JsonObject());
+        Assert.False(string.IsNullOrWhiteSpace(result["error"]?.GetValue<string>()));
+        Assert.Null(result["data"]?["cursor"]);
+        var mark = await LegacyConsoleCallAsync(driver, "mark_trace_cursor", new JsonObject(), new JsonObject());
+        var cursor = Assert.IsType<JsonObject>(mark["data"]?["cursor"]);
+        var delta = await LegacyConsoleCallAsync(driver, "get_trace_delta", new JsonObject
+        {
+            ["cursor"] = cursor.DeepClone(),
+            ["tracepoint_id"] = new string('x', 20 * 1024)
+        }, new JsonObject());
+        Assert.NotNull(delta["error"]);
+        Assert.Null(delta["data"]?["next_cursor"]);
+    }
+
+    [Fact]
+    public async Task LegacyCompat_TraceCursor_EmptyMarkPaginationFilterOverrideAndClear()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "trace-cursor-owner" };
+        var ids = new List<string>();
+        foreach (var expression in new[] { "6 * 7", "tupleVar", "6 * 7" })
+        {
+            var point = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+            {
+                ["file"] = source,
+                ["line"] = 2,
+                ["expression"] = expression
+            }, owner);
+            ids.Add(Assert.IsType<string>(point["data"]?["id"]?.GetValue<string>()));
+        }
+
+        var mark = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "mark_trace_cursor", new JsonObject(), owner))["data"]);
+        Assert.Equal(0, mark["buffer_size"]?.GetValue<int>());
+        var cursor = Assert.IsType<JsonObject>(mark["cursor"]);
+        Assert.Null(cursor["after_timestamp"]);
+        var empty = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+            new JsonObject { ["cursor"] = cursor.DeepClone() }, owner))["data"]);
+        Assert.Empty(Assert.IsType<JsonArray>(empty["entries"]));
+        Assert.False(empty["stale"]?.GetValue<bool>());
+
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            JsonArray entries;
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject(), owner);
+                entries = Assert.IsType<JsonArray>(log["data"]?["entries"]);
+                if (entries.Count >= ids.Count) break;
+                await Task.Delay(25, deadline.Token);
+            }
+            Assert.Equal(ids, entries.Select(entry => entry!["tracepoint_id"]!.GetValue<string>()));
+
+            var zero = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+                new JsonObject { ["cursor"] = cursor.DeepClone(), ["limit"] = 0 }, owner))["data"]);
+            Assert.Empty(Assert.IsType<JsonArray>(zero["entries"]));
+            Assert.Equal(3, zero["available"]?.GetValue<int>());
+            Assert.Equal(0, zero["total"]?.GetValue<int>());
+            Assert.True(zero["limited"]?.GetValue<bool>());
+            Assert.False(zero["stale"]?.GetValue<bool>());
+
+            var next = Assert.IsType<JsonObject>(zero["next_cursor"]).DeepClone();
+            var seen = new List<string>();
+            for (var remaining = ids.Count; remaining > 0; remaining--)
+            {
+                var page = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+                    new JsonObject { ["cursor"] = next, ["limit"] = 1 }, owner))["data"]);
+                Assert.Equal(remaining, page["available"]?.GetValue<int>());
+                Assert.Equal(1, page["total"]?.GetValue<int>());
+                Assert.Equal(remaining > 1, page["limited"]?.GetValue<bool>());
+                Assert.False(page["stale"]?.GetValue<bool>());
+                seen.Add(Assert.Single(Assert.IsType<JsonArray>(page["entries"]))!["tracepoint_id"]!.GetValue<string>());
+                next = Assert.IsType<JsonObject>(page["next_cursor"]).DeepClone();
+            }
+            Assert.Equal(ids, seen);
+            var exhausted = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+                new JsonObject { ["cursor"] = next }, owner))["data"]);
+            Assert.Empty(Assert.IsType<JsonArray>(exhausted["entries"]));
+            Assert.Equal(0, exhausted["available"]?.GetValue<int>());
+
+            var filteredMark = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "mark_trace_cursor",
+                new JsonObject { ["tracepoint_id"] = "no-such-tracepoint" }, owner))["data"]?["cursor"]);
+            Assert.Null(filteredMark["after_timestamp"]);
+            Assert.NotNull(filteredMark["global_after_timestamp"]);
+            var overridden = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+                new JsonObject { ["cursor"] = filteredMark.DeepClone(), ["tracepoint_id"] = ids[0] }, owner))["data"]);
+            Assert.Empty(Assert.IsType<JsonArray>(overridden["entries"]));
+            Assert.Equal(0, overridden["available"]?.GetValue<int>());
+
+            var retainedMark = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "mark_trace_cursor", new JsonObject(), owner))["data"]?["cursor"]);
+            Assert.Equal(3, (await LegacyConsoleCallAsync(driver, "clear_trace_log", new JsonObject(), owner))["data"]?["cleared"]?.GetValue<int>());
+            var stale = Assert.IsType<JsonObject>((await LegacyConsoleCallAsync(driver, "get_trace_delta",
+                new JsonObject { ["cursor"] = retainedMark.DeepClone() }, owner))["data"]);
+            Assert.Empty(Assert.IsType<JsonArray>(stale["entries"]));
+            Assert.True(stale["stale"]?.GetValue<bool>());
+            Assert.Null(stale["dropped_count"]);
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
     public async Task LegacyCompat_Tracepoint_RecordsEvaluationResumesAndRemoves()
     {
         var source = Path.GetFullPath(BreakpointSourcePath);
