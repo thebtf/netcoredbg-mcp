@@ -33,6 +33,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private const int MaximumBreakpointCount = 256;
     private static readonly TimeSpan ContinueTimeout = TimeSpan.FromSeconds(30);
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
+    private static readonly DapSessionState LegacyLaunchRunningState = new("continued", null, null);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
@@ -91,6 +92,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly byte[] _headerByte = new byte[1];
 
     private DapSessionState _state = new(null, null, null);
+    private bool _legacyLaunchRunning;
     private string? _stopDescription;
     private string? _stopText;
     private DapThread[]? _legacyThreads;
@@ -98,6 +100,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private string? _legacyProcessName;
     private double? _legacyLastStopAt;
     private double? _legacyLastResumeAt;
+    private long _activityContinued, _activityStopped, _activityStepStops, _activityOutput;
+    private long _activityModuleNew, _activityModuleChanged, _activityModuleRemoved;
     private JsonElement? _legacyInvalidation;
     private JsonElement? _legacyMemoryEvent;
     private bool _legacyEventDetailsIncomplete;
@@ -188,6 +192,26 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
+
+    // Python's legacy state treats a successful launch as running until a lifecycle event arrives.
+    // This projection is not a DAP continued event or evidence of executed instructions.
+    private DapSessionState LegacyStateUnderLock() =>
+        _legacyLaunchRunning && _state.Event is null && !_inspectionClosed ? LegacyLaunchRunningState : _state;
+
+    internal DapSessionState LegacyState
+    {
+        get { lock (_stateGate) return LegacyStateUnderLock(); }
+    }
+
+    internal (DapSessionState State, int? ProcessId, double CapturedAt, long Continued, long Stopped,
+        long StepStops, long Output, long ModuleNew, long ModuleChanged, long ModuleRemoved) CaptureLegacyActivity()
+    {
+        lock (_stateGate)
+            return (LegacyStateUnderLock(), _legacyProcessId, (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency,
+                _activityContinued, _activityStopped, _activityStepStops, _activityOutput,
+                _activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
+    }
+
     internal (DapSessionState State, IReadOnlyDictionary<string, DapLoadedSource>? Sources, bool Complete) GetStateWithSources()
     {
         lock (_stateGate)
@@ -203,7 +227,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_stateGate)
         {
-            return (_state, _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
+            return (LegacyStateUnderLock(), _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
                 static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete,
                 _legacyThreads, _legacyProcessId, _legacyProcessName, _stopDescription, _stopText,
                 _legacyLastStopAt, _legacyLastResumeAt, _legacyInvalidation, _legacyMemoryEvent, _legacyExceptionInfo, !_legacyEventDetailsIncomplete);
@@ -3113,6 +3137,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
         }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.Command == "launch")
+        {
+            var changed = false;
+            lock (_stateGate)
+            {
+                if (_state.Event is null && !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing)
+                    changed = _legacyLaunchRunning = true;
+            }
+            if (changed) { try { _resourceEventObserver("state"); } catch (Exception) { } }
+        }
         if (success.ValueKind == JsonValueKind.True && request.Command == "loadedSources")
         {
             RefreshLoadedSources(body);
@@ -3363,6 +3397,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 HandleLoadedSourceEvent(body);
                 break;
             case "module":
+                lock (_stateGate)
+                {
+                    switch (TryGetString(body, "reason"))
+                    {
+                        case "new": _activityModuleNew++; break;
+                        case "changed": _activityModuleChanged++; break;
+                        case "removed": _activityModuleRemoved++; break;
+                    }
+                }
+                HandleRuntimeInventoryEvent(eventName, body);
+                break;
             case "progressStart":
             case "progressUpdate":
             case "progressEnd":
@@ -3748,6 +3793,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return false;
         }
 
+        lock (_stateGate) _activityOutput++;
         return _outputBuffer.Append(text, category);
     }
 
@@ -4043,6 +4089,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
+                _activityStopped++;
+                if (reason == "step") _activityStepStops++;
                 if (_activeContinue is { Finalized: false } continued)
                 {
                     if (RequireInt32(message, "seq") <= 0
@@ -4107,6 +4156,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
+                _activityContinued++;
                 _activeContinue?.ObserveContinued();
                 _state = _state with { Event = "continued", CurrentThreadId = null };
                 _legacyLastResumeAt = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
@@ -4144,6 +4195,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
                 if (_activeStepOver is not null && RequireInt32(message, "seq") <= 0)
                 {
                     throw new InvalidDataException("DAP step terminal event sequence must be positive.");

@@ -48,7 +48,7 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 
 В собранном из исходников stateful host доступен экспериментальный режим
 `--legacy-compat` для **одной console-сессии в процессе**. Он предоставляет
-только `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
+только `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
@@ -61,6 +61,15 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+`debuggee_activity` считает полученные DAP-события за окно от 1 до 30 000 мс
+(по умолчанию 1000 мс). В начале сессия должна быть в состоянии running.
+Счётчик выполненных инструкций недоступен. Native host пока не поддерживает
+tracepoint-инструменты, поэтому `traceEntries` равен нулю; это не доказывает
+отсутствие других способов трассировки debuggee. В legacy-режиме успешный запуск
+считается состоянием running до первого события жизненного цикла, как в Python;
+это не наблюдённое событие DAP `continued`. Неподтверждённые состояния, в том
+числе остановка без ID потока, приводят к ошибке.
 
 `get_build_diagnostics(include_warnings=true)` возвращает результат последней
 принятой legacy pre-build и сохраняет его после stop. Новая pre-build очищает
