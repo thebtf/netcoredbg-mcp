@@ -80,6 +80,73 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_Attach_TerminateFallbackRetainsOwnerUntilOwnedTargetExits()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: false, SuppressLifecycleEvents: true)));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-fallback-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "attach-fallback-other" };
+        try
+        {
+            var attached = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var fallback = await LegacyConsoleCallAsync(driver, "terminate_debug", new JsonObject(), owner, TimeSpan.FromSeconds(15));
+            Assert.Contains("unconfirmed", fallback["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.False(target.HasExited);
+            var denied = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static item => item.Kind == "request").ToArray();
+            Assert.DoesNotContain(actions, static item => item.Command == "terminate");
+            var disconnects = actions.Where(static item => item.Command == "disconnect").ToArray();
+            Assert.True(disconnects.Length <= 1);
+            if (disconnects.Length == 1)
+                Assert.False(JsonNode.Parse(disconnects[0].Detail!)?["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            _ = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_Attach_WithoutConfigurationDoneCapabilitySkipsRequest(bool omitInitializeBody)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsConfigurationDone: false, OmitInitializeResponseBody: omitInitializeBody, SuppressLifecycleEvents: true)));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-no-config-owner" };
+        try
+        {
+            var attached = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            Assert.Equal(target.Id, attached["data"]?["processId"]?.GetValue<int>());
+            var actions = (await driver.ReadNativeActionsAsync()).Where(static item => item.Kind == "request").ToArray();
+            Assert.Single(actions, static item => item.Command == "attach");
+            Assert.DoesNotContain(actions, static item => item.Command == "configurationDone");
+            Assert.False(target.HasExited);
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
     public async Task LegacyCompat_AttachRefused_DoesNotPublishOrTerminateTarget()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -4764,6 +4831,221 @@ public sealed class ModernProtocolContractTests
             driver.ReleaseNextResponse();
             if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
             if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    private static ModernMcpStartOptions MemoryWriteOptions(bool? supported, string? mode = null, bool expireOwner = false)
+    {
+        var capabilities = new JsonObject();
+        if (supported is { } value) capabilities["supportsWriteMemoryRequest"] = value;
+        var script = new JsonObject { ["breakpointCapabilities"] = capabilities, ["memoryWriteMode"] = mode };
+        var environment = new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() };
+        if (expireOwner) environment["NETCOREDBG_SESSION_TIMEOUT"] = "0";
+        return new ModernMcpStartOptions(ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: environment);
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_CatalogDeclaresLegacySchemaAndDestructiveHint()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true));
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/list", new JsonObject(), new RequestId("write-memory-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == "write_memory");
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        var required = Assert.IsType<JsonArray>(schema["required"]).Select(static item => item?.GetValue<string>()).ToArray();
+        Assert.Equal(["data", "memory_reference"], required.Order());
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(["allow_partial", "data", "memory_reference", "offset"], properties.Select(static item => item.Key).Order());
+        Assert.Equal("string", properties["memory_reference"]?["type"]?.GetValue<string>());
+        Assert.Equal("string", properties["data"]?["type"]?.GetValue<string>());
+        Assert.Equal("integer", properties["offset"]?["type"]?.GetValue<string>());
+        Assert.Equal("boolean", properties["allow_partial"]?["type"]?.GetValue<string>());
+        Assert.True(tool["annotations"]?["destructiveHint"]?.GetValue<bool>());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public async Task LegacyCompat_WriteMemory_UnsupportedCapabilityDoesNotWrite(bool? supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(supported));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-unsupported" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID" }, owner);
+            Assert.Contains("supportsWriteMemoryRequest", result["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.False(result.ContainsKey("data"));
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_InvalidInputAndForeignOwnerDoNotWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-owner" };
+        var foreign = new JsonObject { ["muxSessionId"] = "write-memory-other" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            foreach (var arguments in new[]
+            {
+                new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "!!!" },
+                new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID=" },
+                new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AAAA====" },
+                new JsonObject { ["memory_reference"] = "", ["data"] = "AQID" },
+            })
+                Assert.NotNull((await LegacyConsoleCallAsync(driver, "write_memory", arguments, owner))["error"]);
+            var denied = await LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID" }, foreign);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("AQ==")]
+    [InlineData("AQI=")]
+    public async Task LegacyCompat_WriteMemory_ValidBase64IsDispatched(string data)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-valid" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = data }, owner);
+            Assert.Null(result["error"]);
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_NegativeResponseWarnsOfPossibleMutation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true, "refused"));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-refused" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID", ["allow_partial"] = true }, owner);
+            var error = Assert.IsType<string>(result["error"]?.GetValue<string>());
+            Assert.Contains("may have changed", error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("do not retry", error, StringComparison.OrdinalIgnoreCase);
+            Assert.False(result.ContainsKey("data"));
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_PartialRequestMapsResponseOnce()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-partial" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var result = await LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID", ["offset"] = 4, ["allow_partial"] = true }, owner);
+            Assert.Equal(2, result["data"]?["bytes_written"]?.GetValue<int>());
+            Assert.Equal(7, result["data"]?["offset"]?.GetValue<int>());
+            var write = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["memoryReference"] = "0x1234", ["data"] = "AQID", ["offset"] = 4, ["allowPartial"] = true }, JsonNode.Parse(write.Detail!)?["arguments"]));
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_InFlightWritePreventsOwnerExpiry()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true, "held", expireOwner: true));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-held-owner" };
+        var foreign = new JsonObject { ["muxSessionId"] = "write-memory-held-foreign" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        Task<JsonObject>? pending = null;
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            pending = LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID" }, owner);
+            await driver.WaitForFixtureRecordAsync("memory-write-response-gated", observation.Token);
+            var denied = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), foreign);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            driver.ReleaseStackTraceResponse();
+            Assert.Null((await pending.WaitAsync(TimeSpan.FromSeconds(10)))["error"]);
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+            var checkpoint = await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "after-write" }, foreign);
+            Assert.Equal("PASS", checkpoint["data"]?["status"]?.GetValue<string>());
+            var stopped = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.True(stopped["data"]?["success"]?.GetValue<bool>());
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_WriteMemory_ChangedStoppedEpochIsNotReportedOrReplayed()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(MemoryWriteOptions(true, "stale"));
+        var owner = new JsonObject { ["muxSessionId"] = "write-memory-stale" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        Task<JsonObject>? pending = null;
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            pending = LegacyConsoleCallAsync(driver, "write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID", ["offset"] = 4, ["allow_partial"] = true }, owner);
+            await driver.WaitForFixtureRecordAsync("memory-write-response-gated", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            driver.ReleaseStackTraceResponse();
+            var result = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+            var error = Assert.IsType<string>(result["error"]?.GetValue<string>());
+            Assert.True(error.Contains("unknown", StringComparison.OrdinalIgnoreCase)
+                || error.Contains("uncertain", StringComparison.OrdinalIgnoreCase)
+                || error.Contains("may have", StringComparison.OrdinalIgnoreCase));
+            Assert.False(result.ContainsKey("data"));
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "writeMemory");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
         }
     }
 

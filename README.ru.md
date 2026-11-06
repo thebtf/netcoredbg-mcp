@@ -48,11 +48,11 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 
 В собранном из исходников stateful host доступен экспериментальный режим
 `--legacy-compat` для **одной console-сессии в процессе**. Он предоставляет
-только `start_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
+в том числе `start_debug`, `attach_debug`, `get_debug_state`, `debuggee_activity`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
-`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `write_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`,
 `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
@@ -61,6 +61,16 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+The source-built `attach_debug` route is Windows-only. It retains the target
+handle, sends at most one non-terminating disconnect and reports CLR detach as
+unconfirmed. Cleanup can wait for the target to exit; safety after an unexpected
+host or adapter exit is not established. An unsupported `terminate_debug`
+uses the same retained owner and unconfirmed-detach reporting.
+
+`write_memory` is destructive and capability-gated. An uncertain write may
+have changed memory and must not be retried automatically; cleanup can close
+the session and terminate a launched debuggee.
 
 `debuggee_activity` считает полученные DAP-события за окно от 1 до 30 000 мс
 (по умолчанию 1000 мс). В начале сессия должна быть в состоянии running.
