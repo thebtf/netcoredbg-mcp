@@ -99,28 +99,156 @@ async def test_get_loaded_sources_manager_maps_and_tracks_state():
         name="Stale.cs",
         path="C:/src/Stale.cs",
     )
-    manager.client.loaded_sources = AsyncMock(
-        return_value=make_response(
-            body={
-                "sources": [
-                    {
-                        "name": "Program.cs",
-                        "path": "C:/src/Program.cs",
-                        "sourceReference": 7,
-                        "origin": "generated",
-                        "presentationHint": "normal",
-                        "adapterData": {"kind": "source"},
-                    }
-                ],
-            }
-        )
+    snapshot = make_response(
+        body={
+            "sources": [{
+                "name": "Program.cs",
+                "path": "C:/src/Program.cs",
+                "sourceReference": 7,
+                "origin": "generated",
+                "presentationHint": "normal",
+                "adapterData": {"kind": "source"},
+            }],
+        }
     )
+
+    async def request(*, on_response):
+        on_response(snapshot)
+        return snapshot
+
+    manager.client.loaded_sources = AsyncMock(side_effect=request)
 
     sources = await manager.get_loaded_sources()
 
     assert sources[0]["sourceReference"] == 7
     assert len(manager.state.loaded_sources) == 1
     assert all(source.path != "C:/src/Stale.cs" for source in manager.state.loaded_sources.values())
+
+@pytest.mark.asyncio
+async def test_loaded_source_event_after_snapshot_response_remains_in_live_state():
+    manager = make_manager()
+    client = manager.client
+    client._capabilities = {"supportsLoadedSourcesRequest": True}
+    client._process = SimpleNamespace(pid=123, returncode=None)
+    run = client._run_for_direct_reader()
+    manager._register_event_handlers()
+
+    async def send(request):
+        client._handle_message({
+            "seq": 1, "type": "response", "request_seq": request.seq,
+            "command": "loadedSources", "success": True,
+            "body": {"sources": [{"path": "snapshot.cs"}]},
+        }, run)
+        client._handle_message({
+            "seq": 2, "type": "event", "event": "loadedSource",
+            "body": {"reason": "new", "source": {"path": "later.cs"}},
+        }, run)
+
+    client._send = send
+    response = await register_tools(manager)["get_loaded_sources"]()
+
+    assert [source["path"] for source in response["data"]["sources"]] == ["snapshot.cs"]
+    assert {source.path for source in manager.state.loaded_sources.values()} == {
+        "snapshot.cs", "later.cs",
+    }
+
+
+@pytest.mark.asyncio
+async def test_loaded_sources_rejects_mismatched_response_command():
+    manager = make_manager()
+    client = manager.client
+    client._capabilities = {"supportsLoadedSourcesRequest": True}
+    client._process = SimpleNamespace(pid=123, returncode=None)
+    run = client._run_for_direct_reader()
+    manager.state.loaded_sources["existing"] = LoadedSource(path="existing.cs")
+
+    async def send(request):
+        client._handle_message({
+            "seq": 1, "type": "response", "request_seq": request.seq,
+            "command": "threads", "success": True,
+            "body": {"sources": [{"path": "unrelated.cs"}]},
+        }, run)
+
+    client._send = send
+    result = await register_tools(manager)["get_loaded_sources"]()
+    assert "response command mismatch" in result["error"]
+    assert {source.path for source in manager.state.loaded_sources.values()} == {"existing.cs"}
+    assert run.pending == {} and run.response_observers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failure", "replaced_run", "replaced_generation"])
+async def test_loaded_source_snapshot_respects_reader_order_and_generation(outcome):
+    manager = make_manager()
+    client = manager.client
+    client._process = SimpleNamespace(pid=123, returncode=None)
+    run = client._run_for_direct_reader()
+    manager._register_event_handlers()
+
+    async def send(request):
+        client._handle_message({
+            "seq": 1, "type": "event", "event": "loadedSource",
+            "body": {"reason": "new", "source": {"path": "earlier.cs"}},
+        }, run)
+        if outcome == "replaced_run":
+            client._process = SimpleNamespace(pid=124, returncode=None)
+            client._run_for_direct_reader()
+        elif outcome == "replaced_generation":
+            manager._active_dap_run = "replacement"
+        client._handle_message({
+            "seq": 2, "type": "response", "request_seq": request.seq,
+            "command": "loadedSources", "success": outcome != "failure",
+            "message": "rejected" if outcome == "failure" else None,
+            "body": {"sources": [{"path": "snapshot.cs"}]},
+        }, run)
+
+    client._send = send
+    if outcome == "failure":
+        with pytest.raises(RuntimeError, match="rejected"):
+            await manager.get_loaded_sources()
+    else:
+        snapshot = await manager.get_loaded_sources()
+        assert [source["path"] for source in snapshot] == ["snapshot.cs"]
+    expected = "snapshot.cs" if outcome == "success" else "earlier.cs"
+    assert {source.path for source in manager.state.loaded_sources.values()} == {expected}
+    assert run.response_observers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination", ["cancel", "timeout"])
+async def test_loaded_source_late_response_cannot_apply_after_request_ends(termination):
+    manager = make_manager()
+    client = manager.client
+    client._process = SimpleNamespace(pid=123, returncode=None)
+    run = client._run_for_direct_reader()
+    sent = asyncio.Event()
+    requests = []
+    observer = MagicMock()
+
+    async def send(request):
+        requests.append(request)
+        sent.set()
+
+    client._send = send
+    task = asyncio.create_task(client._send_request(
+        "loadedSources", timeout=0.01 if termination == "timeout" else 30,
+        on_response=observer,
+    ))
+    await sent.wait()
+    if termination == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(TimeoutError):
+            await task
+    client._handle_message({
+        "seq": 2, "type": "response", "request_seq": requests[0].seq,
+        "command": "loadedSources", "success": True,
+        "body": {"sources": [{"path": "late.cs"}]},
+    }, run)
+    observer.assert_not_called()
+    assert run.pending == {} and run.response_observers == {}
 
 
 @pytest.mark.asyncio

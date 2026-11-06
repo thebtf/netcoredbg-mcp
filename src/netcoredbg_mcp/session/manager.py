@@ -3118,16 +3118,30 @@ class SessionManager:
 
     async def get_loaded_sources(self) -> list[dict[str, Any]]:
         """Get loaded sources from the adapter and refresh the live source view."""
-        response = await self._client.loaded_sources()
-        if response.success:
+        client = self._client
+        generation = self._active_dap_run
+        state = self._state
+
+        def parse_sources(response: DAPResponse) -> dict[str, LoadedSource]:
             loaded_by_key: dict[str, LoadedSource] = {}
             for raw_source in response.body.get("sources", []):
                 source = LoadedSource.from_source(raw_source)
                 loaded_by_key[self._loaded_source_key(source)] = source
-            if self._state.loaded_sources != loaded_by_key:
-                self._state.loaded_sources = loaded_by_key
+            return loaded_by_key
+
+        def apply_snapshot(response: DAPResponse) -> None:
+            if (not response.success or self._client is not client
+                    or self._active_dap_run != generation or self._state is not state
+                    or (generation is not None and client.active_generation != generation)):
+                return
+            loaded_by_key = parse_sources(response)
+            if state.loaded_sources != loaded_by_key:
+                state.loaded_sources = loaded_by_key
                 self._publish_resource_updates(STATE_URI)
-            return [source.to_dict() for source in loaded_by_key.values()]
+
+        response = await client.loaded_sources(on_response=apply_snapshot)
+        if response.success:
+            return [source.to_dict() for source in parse_sources(response).values()]
         raise RuntimeError(response.message or "Failed to get loaded sources")
 
     async def disassemble(

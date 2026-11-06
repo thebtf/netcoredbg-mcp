@@ -1178,6 +1178,10 @@ The published MCP catalog has 135 tools.
 The server also exposes four resources: `debug://state`, `debug://breakpoints`,
 `debug://output`, and `debug://threads`.
 
+In the unreleased Python source, `get_loaded_sources` refreshes `debug://state`
+in DAP reader order. Its returned list is the adapter snapshot; later source
+events can change the live state independently.
+
 Eight prompts provide guided workflows: `debug`, `debug-gui`,
 `debug-exception`, `debug-visual`, `debug-mistakes`, `investigate`,
 `debug-scenario`, and `dap-escape-hatch`.
