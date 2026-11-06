@@ -611,6 +611,7 @@ internal sealed class ControlledDapAdapter
     private bool _inspectionResponseHeld;
     private bool _inspectionStepped;
     private int _continueRequests;
+    private int _legacyBreakpointFrameRequests;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -1284,6 +1285,7 @@ internal sealed class ControlledDapAdapter
             "same-effective-line" => "success",
             "stable-id" => "success",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
+            "same-effective-line-refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
             "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
             "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
             "reader-failure-first-runtime" => runtimeOrdinal == 1 ? "reader-failure" : "success",
@@ -1337,7 +1339,7 @@ internal sealed class ControlledDapAdapter
             }
             if (_options.SetBreakpointsResponseMode == "crossed-lines")
                 breakpoint["line"] = index == 0 ? 3 : 2;
-            if (_options.SetBreakpointsResponseMode == "same-effective-line")
+            if (_options.SetBreakpointsResponseMode is "same-effective-line" or "same-effective-line-refuse-first-runtime")
                 breakpoint["line"] = 2;
             return breakpoint;
         }).ToList();
@@ -1543,6 +1545,13 @@ internal sealed class ControlledDapAdapter
                 await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
                 await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
                 await WriteStoppedEventAsync(threadId: 2, allThreadsStopped: true, cancellationToken, "admission-restopped-event", reason: "admission-restop");
+                return;
+
+            case "all-stop-threads-release-breakpoint-restop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await WaitForThreadsResponseReleaseAsync(cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "breakpoint-restopped-event", "breakpoint");
                 return;
 
             case "partial-stop":
@@ -1998,6 +2007,7 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "ack-before-stopped":
             case "ack-before-stopped-held":
+            case "ack-before-breakpoint-held":
                 await WritePauseAcknowledgementAsync(sequence, cancellationToken);
                 await RecordAsync(new { kind = "pause-stop-gated", sequence }, cancellationToken);
                 _heldPauseControls.Add(CompleteHeldPauseStopAsync(sequence, _lifecycleEventsCancellation.Token));
@@ -2079,7 +2089,7 @@ internal sealed class ControlledDapAdapter
     private async Task WritePauseStoppedEventAsync(int sequence, CancellationToken cancellationToken)
     {
         await WriteStoppedEventAsync(_options.PauseEventThreadId, _options.PauseAllThreadsStopped, cancellationToken,
-            reason: "pause");
+            reason: _options.PauseResponseMode == "ack-before-breakpoint-held" ? "breakpoint" : "pause");
         await RecordAsync(new { kind = "pause-stopped", sequence }, cancellationToken);
     }
 
@@ -2746,6 +2756,7 @@ internal sealed class ControlledDapAdapter
                 break;
             case "fixture:negative":
                 await WriteResponseAsync(sequence, "evaluate", new { message = privatePayload, result = privatePayload }, cancellationToken, success: false);
+                await RecordAsync(new { kind = "evaluate-response-written", sequence }, cancellationToken);
                 return;
             case "fixture:missing-result":
                 body = new { type = privatePayload, variablesReference = 0 };
@@ -2777,14 +2788,16 @@ internal sealed class ControlledDapAdapter
             case "fixture:hold":
             case "fixture:hold-then-invalidated":
             case "fixture:hold-then-continued-restop":
+            case "fixture:trace-restop":
                 if (expression == "fixture:hold-then-invalidated")
                 {
                     await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
                 }
-                else if (expression == "fixture:hold-then-continued-restop")
+                else if (expression is "fixture:hold-then-continued-restop" or "fixture:trace-restop")
                 {
                     await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
-                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "evaluate-restopped-event");
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "evaluate-restopped-event",
+                        reason: expression == "fixture:trace-restop" ? "pause" : null);
                 }
                 await RecordAsync(new { kind = "evaluate-response-gated", sequence }, cancellationToken);
                 _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "evaluate",
@@ -2940,6 +2953,7 @@ internal sealed class ControlledDapAdapter
     {
         await WaitForStackTraceResponseReleaseAsync(cancellationToken);
         await WriteResponseAsync(sequence, command, body, cancellationToken);
+        if (command == "evaluate") await RecordAsync(new { kind = "evaluate-response-written", sequence }, cancellationToken);
     }
 
     private async Task<bool> HandleStackTraceRequestAsync(int sequence, CancellationToken cancellationToken)
@@ -2952,6 +2966,12 @@ internal sealed class ControlledDapAdapter
                 var breakpointFrames = StackFrames(1, "frame", breakpointSource);
                 breakpointFrames[0]["line"] = 2;
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = breakpointFrames }, cancellationToken);
+                if (_options.LifecycleMode == "all-stop-threads-release-breakpoint-restop")
+                {
+                    var ordinal = ++_legacyBreakpointFrameRequests;
+                    if (ordinal <= 2)
+                        await RecordAsync(new { kind = ordinal == 1 ? "first-breakpoint-frame-response" : "second-breakpoint-frame-response", sequence }, cancellationToken);
+                }
                 return false;
             case "success":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame") }, cancellationToken);

@@ -156,6 +156,19 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         _ = await AwaitAsyncResult(method.Invoke(_session, [threadId, cancellationToken]), "ContinueAsync", CancellationToken.None);
     }
 
+    public async Task<(bool Admitted, string Outcome)> ContinueTracepointAsync(string context, CancellationToken cancellationToken)
+    {
+        var admitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var revision = (long)(RequireInternalProperty(_session.GetType(), "LegacyBreakpointRevision", typeof(long)).GetValue(_session)
+            ?? throw new InvalidOperationException("Breakpoint revision is unavailable."));
+        var method = RequireTaskMethod(_session.GetType(), "ContinueTracepointAsync", typeof(int), typeof(string),
+            typeof(TaskCompletionSource<bool>), typeof(long), typeof(CancellationToken));
+        var operation = method.Invoke(_session, [1, context, admitted, revision, cancellationToken]);
+        var result = await AwaitAsyncResult(operation, "ContinueTracepointAsync", cancellationToken);
+        Assert.NotNull(result);
+        return (await admitted.Task, result!.GetType().GetProperty("Outcome")!.GetValue(result)!.ToString()!);
+    }
+
     public async Task ContinueOptionalThreadAsync(CancellationToken cancellationToken)
     {
         var method = RequireTaskMethod(_session.GetType(), "ContinueForOptionalThreadAsync", typeof(int?), typeof(CancellationToken));

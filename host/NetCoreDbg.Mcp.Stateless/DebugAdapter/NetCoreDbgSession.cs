@@ -102,6 +102,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private double? _legacyLastResumeAt;
     private long _activityContinued, _activityStopped, _activityStepStops, _activityOutput;
     private long _activityModuleNew, _activityModuleChanged, _activityModuleRemoved;
+    private long _legacyBreakpointRevision;
     private JsonElement? _legacyInvalidation;
     private JsonElement? _legacyMemoryEvent;
     private bool _legacyEventDetailsIncomplete;
@@ -142,6 +143,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private ContinueRecord? _activeContinue;
     private PauseRecord? _activePause;
     private ExecutionAdmission _executionAdmission;
+    private TaskCompletionSource<bool>? _executionSettled;
     private BreakpointUpdate? _activeBreakpointUpdate;
     private int _requestedBreakpointCount;
     private bool _breakpointUpdatesClosed;
@@ -1121,14 +1123,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return new DapVariablesResult(false, response.InspectionContextId!, normalized);
     }
 
-    internal async Task<DapEvaluateResult> EvaluateExpressionAsync(
-        string inspectionContextId,
-        int frameId,
-        string expression,
-        CancellationToken cancellationToken)
+    internal Task<DapEvaluateResult> EvaluateExpressionAsync(
+        string inspectionContextId, int frameId, string expression, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken);
+
+    internal Task<DapEvaluateResult> EvaluateTracepointAsync(
+        string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool> admissionFinished,
+        long breakpointRevision, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, admissionFinished, breakpointRevision, cancellationToken);
+
+    private async Task<DapEvaluateResult> EvaluateExpressionCoreAsync(
+        string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool>? admissionFinished,
+        long? breakpointRevision, CancellationToken cancellationToken)
     {
         var response = await SendInspectionRequestAsync(
-            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken).ConfigureAwait(false);
+            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken, admissionFinished, breakpointRevision).ConfigureAwait(false);
         if (response is null)
         {
             return DapEvaluateResult.Refused;
@@ -1571,6 +1580,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     || closeAdmission || RequiresStepOverDrain()
                     ? ExecutionAdmission.Closing
                     : ExecutionAdmission.Available;
+                _executionSettled?.TrySetResult(true);
+                _executionSettled = null;
             }
 
             active?.Dispose();
@@ -1593,14 +1604,31 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    internal Task WaitForExecutionSettlementAsync()
+    {
+        lock (_stateGate)
+            return _executionAdmission == ExecutionAdmission.Active
+                ? (_executionSettled ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task
+                : Task.CompletedTask;
+    }
+
     internal Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken) =>
         ContinueForOptionalThreadAsync(threadId, cancellationToken);
 
-    internal async Task<DapContinueResult> ContinueForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken)
+    internal Task<DapContinueResult> ContinueForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken) =>
+        ContinueCoreAsync(threadId, cancellationToken, null, null, null);
+
+    internal Task<DapContinueResult> ContinueTracepointAsync(int threadId, string expectedContext,
+        TaskCompletionSource<bool> admissionFinished, long breakpointRevision, CancellationToken cancellationToken) =>
+        ContinueCoreAsync(threadId, cancellationToken, expectedContext, admissionFinished, breakpointRevision);
+
+    private async Task<DapContinueResult> ContinueCoreAsync(int? threadId, CancellationToken cancellationToken,
+        string? expectedContext, TaskCompletionSource<bool>? admissionFinished, long? breakpointRevision)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!TryAdmitExecution())
+        if (cancellationToken.IsCancellationRequested || !TryAdmitExecution())
         {
+            admissionFinished?.TrySetResult(false);
+            cancellationToken.ThrowIfCancellationRequested();
             return DapContinueResult.Refused;
         }
 
@@ -1616,6 +1644,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     var selected = threadId ?? _state.CurrentThreadId;
                     if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || (expectedContext is not null && (_state.Event != "stopped" || _state.CurrentThreadId != threadId
+                            || !StringComparer.Ordinal.Equals(_inspectionContextId, expectedContext)))
+                        || (breakpointRevision is not null && _legacyBreakpointRevision != breakpointRevision)
                         || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapContinueResult.Refused;
@@ -1639,6 +1670,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             finally
             {
                 _callStackAdmissionGate.Release();
+                admissionFinished?.TrySetResult(request is not null);
             }
 
             return await WaitForContinueOutcomeAsync(
@@ -1689,6 +1721,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         finally
         {
+            admissionFinished?.TrySetResult(false);
             if (request is not null)
             {
                 RemovePending(request);
@@ -1705,6 +1738,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     _executionAdmission = ExecutionAdmission.Available;
                 }
+                _executionSettled?.TrySetResult(true);
+                _executionSettled = null;
             }
 
             active?.Dispose();
@@ -1989,6 +2024,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void ObserveLegacyBreakpointResponse(string file, DapRequestedBreakpoint[] requested, JsonElement body)
     {
+        _legacyBreakpointRevision++;
         var results = RequireBreakpointResults(body, requested.Length);
         var next = new List<LegacyBreakpointObservation>(requested.Length);
         var index = 0;
@@ -2091,6 +2127,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         if (_legacyBreakpointEventsIncomplete) return;
         _legacyBreakpointEventsIncomplete = true;
+        _legacyBreakpointRevision++;
         SignalLegacyBreakpointChange();
     }
 
@@ -2121,6 +2158,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
     internal bool LegacyBreakpointEventsComplete { get { lock (_stateGate) return !_legacyBreakpointEventsIncomplete && _deferredLegacyBreakpointEvents.Count == 0; } }
+    internal long LegacyBreakpointRevision { get { lock (_stateGate) return _legacyBreakpointRevision; } }
 
     internal static bool TryNormalizeLegacyBreakpointSource(string file, out string normalized, bool requireExistingFile)
     {
@@ -2703,15 +2741,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string command,
         object arguments,
         string inspectionContextId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TaskCompletionSource<bool>? admissionFinished = null, long? breakpointRevision = null)
     {
-        PendingRequest request;
-        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        PendingRequest? request = null;
+        try
+        {
+            await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            admissionFinished?.TrySetResult(false);
+            throw;
+        }
         try
         {
             lock (_stateGate)
             {
-                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId)
+                    || (breakpointRevision is not null && _legacyBreakpointRevision != breakpointRevision))
                 {
                     return null;
                 }
@@ -2723,6 +2771,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         finally
         {
             _callStackAdmissionGate.Release();
+            admissionFinished?.TrySetResult(request is not null);
         }
 
         try
@@ -3391,7 +3440,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
                 break;
             case "breakpoint":
-                if (_resourceEventObserver is not null) ObserveLegacyBreakpointEvent(body);
+                if (_resourceEventObserver is not null)
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate) _legacyBreakpointRevision++;
+                        ObserveLegacyBreakpointEvent(body);
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
                 break;
             case "loadedSource":
                 HandleLoadedSourceEvent(body);

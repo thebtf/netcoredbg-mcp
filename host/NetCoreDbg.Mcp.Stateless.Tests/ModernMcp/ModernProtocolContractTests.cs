@@ -2482,6 +2482,570 @@ public sealed class ModernProtocolContractTests
         }
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task LegacyCompat_Tracepoint_CoincidentOwnerRemovalPreservesOther(bool userFirst, bool removeUser)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-shared-owner" };
+        async Task AddUserAsync() => Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint",
+            new JsonObject { ["file"] = source, ["line"] = 2, ["condition"] = "value > 0" }, owner))["data"]);
+        if (userFirst) await AddUserAsync();
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint",
+            new JsonObject { ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7" }, owner);
+        var id = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        if (!userFirst) await AddUserAsync();
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug",
+                new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var startup = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(startup, source, [2]);
+            if (removeUser)
+                Assert.True((await LegacyConsoleCallAsync(driver, "remove_breakpoint",
+                    new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]?["removed"]?.GetValue<bool>());
+            else
+                Assert.Equal(id, (await LegacyConsoleCallAsync(driver, "remove_tracepoint",
+                    new JsonObject { ["tracepoint_id"] = id }, owner))["data"]?["removed"]?.GetValue<string>());
+
+            var latest = (await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(latest, source, [2]);
+            var remaining = Assert.Single(Assert.IsType<JsonArray>(JsonNode.Parse(latest.Detail!)?["arguments"]?["breakpoints"]));
+            if (!removeUser) Assert.Equal("value > 0", remaining?["condition"]?.GetValue<string>());
+            else Assert.Null(remaining?["condition"]);
+
+            if (removeUser)
+                Assert.Equal(id, (await LegacyConsoleCallAsync(driver, "remove_tracepoint",
+                    new JsonObject { ["tracepoint_id"] = id }, owner))["data"]?["removed"]?.GetValue<string>());
+            else
+            {
+                var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                Assert.Equal("value > 0", Assert.Single(Assert.IsType<JsonArray>(list["data"]?[source]))?["condition"]?.GetValue<string>());
+                Assert.True((await LegacyConsoleCallAsync(driver, "remove_breakpoint",
+                    new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]?["removed"]?.GetValue<bool>());
+            }
+            var final = (await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(final, source, []);
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_RefusedUserRemovalDoesNotResumeLaterStop()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop-threads-release-breakpoint-restop",
+                StopReason: "breakpoint", StackTraceResponseMode: "legacy-breakpoint-frame",
+                NextResponseMode: "continue-ack-only", SetBreakpointsResponseMode: "refuse-first-runtime"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-refused-removal-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint",
+            new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "6 * 7"
+        }, owner);
+        var id = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0) break;
+                await Task.Delay(25, deadline.Token);
+            }
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+            var removal = await LegacyConsoleCallAsync(driver, "remove_breakpoint",
+                new JsonObject { ["file"] = source, ["line"] = 2 }, owner);
+            Assert.NotNull(removal["error"]);
+            var before = await driver.ReadNativeActionsAsync();
+            Assert.Equal(2, before.Count(static action => action.Command == "setBreakpoints"));
+            driver.ReleaseThreadsResponse();
+            await driver.WaitForFixtureRecordAsync("breakpoint-restopped-event", deadline.Token);
+            await driver.WaitForFixtureRecordAsync("second-breakpoint-frame-response", deadline.Token);
+            await Task.Delay(TimeSpan.FromSeconds(1), deadline.Token);
+            var later = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+            Assert.DoesNotContain(later, static action => action.Command is "evaluate" or "continue");
+        }
+        finally
+        {
+            driver.ReleaseThreadsResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_RefusedRelocatedUserRemovalDoesNotResumeLaterStop()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop-threads-release-breakpoint-restop",
+                StopReason: "breakpoint", StackTraceResponseMode: "legacy-breakpoint-frame",
+                NextResponseMode: "continue-ack-only", SetBreakpointsResponseMode: "same-effective-line-refuse-first-runtime"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-relocated-refusal-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint",
+            new JsonObject { ["file"] = source, ["line"] = 6 }, owner))["data"]);
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source, ["line"] = 2, ["expression"] = "6 * 7"
+        }, owner))["data"]?["id"]);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("first-breakpoint-frame-response", deadline.Token);
+            var startup = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(startup, source, [6, 2]);
+            var removal = await LegacyConsoleCallAsync(driver, "remove_breakpoint",
+                new JsonObject { ["file"] = source, ["line"] = 6 }, owner);
+            Assert.NotNull(removal["error"]);
+            var before = await driver.ReadNativeActionsAsync();
+            Assert.Equal(2, before.Count(static action => action.Command == "setBreakpoints"));
+            Assert.DoesNotContain(before, static action => action.Command == "continue");
+            driver.ReleaseThreadsResponse();
+            await driver.WaitForFixtureRecordAsync("breakpoint-restopped-event", deadline.Token);
+            await driver.WaitForFixtureRecordAsync("second-breakpoint-frame-response", deadline.Token);
+            await Task.Delay(TimeSpan.FromSeconds(1), deadline.Token);
+            var later = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+            Assert.DoesNotContain(later, static action => action.Command is "evaluate" or "continue");
+        }
+        finally
+        {
+            driver.ReleaseThreadsResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_BreakpointAddedDuringEvaluationPreventsContinue()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-mutation-owner" };
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "fixture:hold"
+        }, owner);
+        var id = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            var added = await LegacyConsoleCallAsync(driver, "add_breakpoint",
+                new JsonObject { ["file"] = source, ["line"] = 2 }, owner);
+            Assert.NotNull(added["data"]);
+            var latest = (await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(latest, source, [2]);
+            driver.ReleaseStackTraceResponse();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-written", deadline.Token);
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0)
+                {
+                    var entry = Assert.Single(entries)!;
+                    Assert.Equal(id, entry["tracepoint_id"]?.GetValue<string>());
+                    Assert.Equal("private controlled evaluation payload", entry["value"]?.GetValue<string>());
+                    break;
+                }
+                await Task.Delay(25, deadline.Token);
+            }
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+            var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Single(Assert.IsType<JsonArray>(list["data"]?[source]));
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_PauseBeforeBreakpointStopPreventsContinue()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-breakpoint-terminal",
+                PauseResponseMode: "ack-before-breakpoint-held"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-pause-before-stop-owner" };
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "fixture:hold"
+        }, owner);
+        var id = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var pause = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject { ["thread_id"] = 1 }, owner);
+            Assert.True(pause["data"]?["success"]?.GetValue<bool>());
+            await driver.WaitForFixtureRecordAsync("pause-stop-gated", deadline.Token);
+            Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "pause");
+            driver.ReleasePauseStoppedEvent();
+            await driver.WaitForFixtureRecordAsync("pause-stopped", deadline.Token);
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            driver.ReleaseStackTraceResponse();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-written", deadline.Token);
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0)
+                {
+                    var entry = Assert.Single(entries)!;
+                    Assert.Equal(id, entry["tracepoint_id"]?.GetValue<string>());
+                    Assert.Equal("private controlled evaluation payload", entry["value"]?.GetValue<string>());
+                    break;
+                }
+                await Task.Delay(25, deadline.Token);
+            }
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+            var resumed = await LegacyConsoleCallAsync(driver, "continue_execution", new JsonObject { ["thread_id"] = 1 }, owner);
+            Assert.Equal("stopped", resumed["state"]?.GetValue<string>());
+            Assert.Equal("breakpoint", resumed["reason"]?.GetValue<string>());
+            while ((await driver.ReadNativeActionsAsync()).Count(static action => action.Command == "continue") < 2)
+                await Task.Delay(25, deadline.Token);
+            Assert.Equal(2, (await driver.ReadNativeActionsAsync()).Count(static action => action.Command == "continue"));
+            while ((await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>() != "terminated")
+                await Task.Delay(25, deadline.Token);
+        }
+        finally
+        {
+            driver.ReleasePauseStoppedEvent();
+            driver.ReleaseStackTraceResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_PauseDuringEvaluationPreventsContinue()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only", PauseResponseMode: "ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-pause-owner" };
+        var trace = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "fixture:hold"
+        }, owner);
+        var id = Assert.IsType<string>(trace["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            var afterAdmission = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+            var pause = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject { ["thread_id"] = 1 }, owner);
+            Assert.True(pause["data"]?["success"]?.GetValue<bool>());
+            Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "pause");
+            driver.ReleaseStackTraceResponse();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-written", deadline.Token);
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0)
+                {
+                    var entry = Assert.Single(entries)!;
+                    Assert.Equal(id, entry["tracepoint_id"]?.GetValue<string>());
+                    Assert.Equal("private controlled evaluation payload", entry["value"]?.GetValue<string>());
+                    break;
+                }
+                await Task.Delay(25, deadline.Token);
+            }
+            var since = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id, ["since"] = afterAdmission }, owner);
+            Assert.Single(Assert.IsType<JsonArray>(since["data"]?["entries"]));
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_CrossedEffectiveLinesEvaluateOnlyMatchingTrace()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only",
+                SetBreakpointsResponseMode: "crossed-lines"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-crossed-lines-owner" };
+        var first = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "6 * 7"
+        }, owner);
+        var second = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 6,
+            ["expression"] = "tupleVar"
+        }, owner);
+        var firstId = Assert.IsType<string>(first["data"]?["id"]?.GetValue<string>());
+        var secondId = Assert.IsType<string>(second["data"]?["id"]?.GetValue<string>());
+        Assert.NotEqual(firstId, secondId);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true
+            }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var startup = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(startup, source, [2, 6]);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            JsonArray entries;
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject(), owner);
+                entries = Assert.IsType<JsonArray>(log["data"]?["entries"]);
+                if (entries.Count > 0) break;
+                await Task.Delay(25, deadline.Token);
+            }
+            var evaluation = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "evaluate");
+            Assert.Equal("tupleVar", JsonNode.Parse(evaluation.Detail!)?["arguments"]?["expression"]?.GetValue<string>());
+            var entry = Assert.Single(entries)!;
+            Assert.Equal(secondId, entry["tracepoint_id"]?.GetValue<string>());
+            Assert.Equal("(\"test\", 123)", entry["value"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_StaleEvaluationDoesNotResumeNewStop()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-stale-owner" };
+        var point = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "fixture:trace-restop"
+        }, owner);
+        Assert.NotNull(point["data"]?["id"]);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", deadline.Token);
+            await driver.WaitForFixtureRecordAsync("evaluate-restopped-event", deadline.Token);
+            driver.ReleaseStackTraceResponse();
+            await driver.WaitForFixtureRecordAsync("evaluate-response-written", deadline.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Tracepoint_RecordsEvaluationResumesAndRemoves()
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-journey-owner" };
+        var tracepoint = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = "6 * 7"
+        }, owner);
+        var id = Assert.IsType<string>(tracepoint["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var startupSet = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "setBreakpoints");
+            AssertBreakpointRequest(startupSet, source, [2]);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            JsonArray entries;
+            while (true)
+            {
+                var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                entries = Assert.IsType<JsonArray>(log["data"]?["entries"]);
+                if (entries.Count != 0) break;
+                await Task.Delay(25, deadline.Token);
+            }
+            var entry = Assert.Single(entries)!;
+            Assert.Equal("42", entry["value"]?.GetValue<string>());
+            Assert.Equal(id, entry["tracepoint_id"]?.GetValue<string>());
+            Assert.Equal(source, entry["file"]?.GetValue<string>());
+            var timestamp = entry["timestamp"]!.GetValue<double>();
+            var filtered = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["since"] = timestamp + 1 }, owner);
+            Assert.Empty(Assert.IsType<JsonArray>(filtered["data"]?["entries"]));
+            while (!(await driver.ReadNativeActionsAsync()).Any(static action => action.Command == "continue"))
+                await Task.Delay(25, deadline.Token);
+            Assert.Contains(await driver.ReadNativeActionsAsync(), static action => action.Command == "evaluate");
+            var removed = await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = id }, owner);
+            Assert.Equal(id, removed["data"]?["removed"]?.GetValue<string>());
+            var replacements = (await driver.ReadNativeActionsAsync()).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.Equal(2, replacements.Length);
+            AssertBreakpointRequest(replacements[1], source, []);
+            Assert.Equal(1, (await LegacyConsoleCallAsync(driver, "clear_trace_log", new JsonObject(), owner))["data"]?["cleared"]?.GetValue<int>());
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Theory]
+    [InlineData(true, "6 * 7")]
+    [InlineData(false, "fixture:negative")]
+    public async Task LegacyCompat_Tracepoint_UnsafeHitNeverAutomaticallyContinues(bool userBreakpoint, string expression)
+    {
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", StopReason: "breakpoint",
+                StackTraceResponseMode: "legacy-breakpoint-frame", NextResponseMode: "continue-ack-only"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_BREAKPOINT_SOURCE"] = source }));
+        var owner = new JsonObject { ["muxSessionId"] = "tracepoint-safety-owner" };
+        if (userBreakpoint)
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, owner))["data"]);
+        var tracepoint = await LegacyConsoleCallAsync(driver, "add_tracepoint", new JsonObject
+        {
+            ["file"] = source,
+            ["line"] = 2,
+            ["expression"] = expression
+        }, owner);
+        var id = Assert.IsType<string>(tracepoint["data"]?["id"]?.GetValue<string>());
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForStackTraceRequestAsync(deadline.Token);
+            if (!userBreakpoint)
+            {
+                while (true)
+                {
+                    var log = await LegacyConsoleCallAsync(driver, "get_trace_log", new JsonObject { ["tracepoint_id"] = id }, owner);
+                    if (log["data"]?["entries"] is JsonArray entries && entries.Count > 0) break;
+                    await Task.Delay(25, deadline.Token);
+                }
+            }
+            else
+            {
+                while (true)
+                {
+                    var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                    if (list["data"]?[source] is JsonArray entries && entries.Count == 1 && entries[0]?["hit_count"]?.GetValue<long>() == 1) break;
+                    await Task.Delay(25, deadline.Token);
+                }
+            }
+            var removed = await LegacyConsoleCallAsync(driver, "remove_tracepoint", new JsonObject { ["tracepoint_id"] = id }, owner);
+            Assert.Equal(id, removed["data"]?["removed"]?.GetValue<string>());
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command == "continue");
+            if (userBreakpoint)
+            {
+                var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+                Assert.Single(Assert.IsType<JsonArray>(list["data"]?[source]));
+            }
+        }
+        finally
+        {
+            if (active) await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
     [Fact]
     public async Task LegacyCompat_BreakpointInspection_ObservedHitResetsOnStop()
     {
