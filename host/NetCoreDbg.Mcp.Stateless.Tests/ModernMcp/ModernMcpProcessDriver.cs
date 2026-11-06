@@ -893,6 +893,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 if (IsComplete(request.Result, false)
                     && StringValue(payload?["error"]) is "Debug session is owned by another agent." or "No active debug session.")
                     continue;
+                if (active is null && request.StartedOrder > lastTransition && request.CompletedOrder > request.StartedOrder
+                    && LegacyStopped(request.Result))
+                {
+                    lastTransition = request.CompletedOrder;
+                    continue;
+                }
                 if (active is null || request.StartedOrder <= lastTransition || request.CompletedOrder == 0
                     || !JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])
                     || !LegacyStopped(request.Result)) return false;
