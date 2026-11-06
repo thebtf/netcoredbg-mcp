@@ -190,6 +190,7 @@ public sealed class SessionSlotContractTests
         var type when type == typeof(Func<CancellationToken, Task>) => stop,
         var type when type == typeof(Func<ValueTask>) => dispose,
         var type when type == typeof(Action) => remove,
+        var type when type == typeof(Func<Task>) && parameter.HasDefaultValue && parameter.DefaultValue is null => null,
         var type when type == typeof(TimeSpan) => TimeSpan.FromMilliseconds(100),
         var type when type == typeof(CancellationToken) => CancellationToken.None,
         var type when type == typeof(string) => "faulting-stop-token",

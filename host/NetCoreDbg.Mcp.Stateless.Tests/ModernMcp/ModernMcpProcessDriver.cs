@@ -57,6 +57,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
     internal string InertProgramPath { get; }
 
+    internal Process StartOwnedTarget() => _fixture.StartOwnedTarget();
+
     internal IReadOnlyList<ModernMcpRequestObservation> Requests
     {
         get
@@ -195,7 +197,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         JsonObject? meta = null,
         CancellationToken cancellationToken = default)
     {
-        if (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug")
+        if (name is "start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug")
         {
             throw new InvalidOperationException("Lifecycle tests must use CallToolRawAsync so cleanup can bind the actual request.");
         }
@@ -324,15 +326,15 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         lock (_gate)
         {
             var name = method == "tools/call" ? StringValue(parameters?["name"]) : null;
-            if (_disposed && !disposing && (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
+            if (_disposed && !disposing && (name is "start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
             {
                 throw new ObjectDisposedException(nameof(ModernMcpProcessDriver));
             }
-            if (name == "start_debug")
+            if (name is "start_debug" or "attach_debug")
             {
                 _fixture.MarkAdapterStartAttempted();
             }
-            if (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug") observation.StartedOrder = ++_lifecycleOrder;
+            if (name is "start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug") observation.StartedOrder = ++_lifecycleOrder;
             _requests.Add(observation);
         }
         return observation;
@@ -341,7 +343,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private void CompleteObservation(ModernMcpRequestObservation observation, JsonObject? result)
     {
         if (observation.Method != "tools/call"
-            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
+            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
         {
             return;
         }
@@ -726,7 +728,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         {
             history = _requests
                 .Where(static request => request.Method == "tools/call"
-                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
+                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
                 .Select(static request => new ModernMcpRequestObservation(
                     request.Id, request.Method, request.Parameters?.DeepClone())
                 {
@@ -765,6 +767,10 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 {
                     unconfirmed = true;
                 }
+            }
+            else if (name == "attach_debug")
+            {
+                if (!IsUnknownAttachToolResult(request.Result)) unconfirmed = true;
             }
             else if (name == "stop_debug")
             {
@@ -824,8 +830,10 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         {
             var name = StringValue(request.Parameters?["name"]);
             var payload = LegacyPayload(request.Result);
-            if (name == "start_debug")
+            if (name is "start_debug" or "attach_debug")
             {
+                if (name == "attach_debug" && IsUnknownAttachToolResult(request.Result))
+                    continue;
                 if (StringValue(payload?["error"]) == "A debug session is already active; stop it before starting another.")
                     continue;
                 if (request.CancellationCleanupConfirmed && active is null && request.StartedOrder > lastTransition && request.CompletedOrder > request.StartedOrder)
@@ -837,6 +845,13 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     return false;
                 if (IsComplete(request.Result, false) && payload?["data"]?["success"]?.GetValue<bool>() == true
                     && payload["error"] is null)
+                {
+                    active = request;
+                    lastTransition = request.CompletedOrder;
+                }
+                else if (name == "attach_debug" && IsComplete(request.Result, false)
+                    && StringValue(payload?["error"]) is { } attachError
+                    && attachError.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase))
                 {
                     active = request;
                     lastTransition = request.CompletedOrder;
@@ -893,6 +908,16 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 if (IsComplete(request.Result, false)
                     && StringValue(payload?["error"]) is "Debug session is owned by another agent." or "No active debug session.")
                     continue;
+                if (active is not null && StringValue(active.Parameters?["name"]) == "attach_debug"
+                    && IsComplete(request.Result, false) && request.StartedOrder > lastTransition
+                    && request.CompletedOrder > request.StartedOrder
+                    && JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])
+                    && StringValue(payload?["error"]) is { } stopError
+                    && stopError.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase))
+                {
+                    lastTransition = request.CompletedOrder;
+                    continue;
+                }
                 if (active is null && request.StartedOrder > lastTransition && request.CompletedOrder > request.StartedOrder
                     && LegacyStopped(request.Result))
                 {
@@ -912,8 +937,11 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private async Task<bool> StopKnownLegacySessionAsync(ModernMcpRequestObservation start, ModernMcpRequestObservation[] history)
     {
         var startPayload = LegacyPayload(start.Result);
-        var knownStarted = startPayload?["data"]?["success"]?.GetValue<bool>() == true
-            && startPayload["error"] is null;
+        var knownStarted = (startPayload?["data"]?["success"]?.GetValue<bool>() == true
+            && startPayload["error"] is null)
+            || (StringValue(start.Parameters?["name"]) == "attach_debug"
+                && StringValue(startPayload?["error"]) is { } attachError
+                && attachError.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase));
         var owner = start.Parameters?["_meta"]?.DeepClone();
         var stopped = history.Any(request => StringValue(request.Parameters?["name"]) == "stop_debug"
             && JsonNode.DeepEquals(owner, request.Parameters?["_meta"])
@@ -957,6 +985,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private static bool IsStopSuccess(JsonObject? result) =>
         IsComplete(result, false) && StringValue(result?["structuredContent"]?["kind"]) == "stop_debug_success"
         && result?["structuredContent"]?["state"] is JsonObject;
+    internal static bool IsUnknownAttachToolResult(JsonObject? result) =>
+        IsComplete(result, true) && result is not null && !result.ContainsKey("structuredContent")
+        && result["content"] is JsonArray { Count: 1 } content
+        && StringValue(content[0]?["type"]) == "text"
+        && StringValue(content[0]?["text"]) == "Unknown tool: attach_debug";
+
 
     internal static bool IsPreLaunchStartResult(JsonObject? result)
     {

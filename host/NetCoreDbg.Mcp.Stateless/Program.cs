@@ -273,6 +273,7 @@ internal static class Program
     private sealed class DebugSessionRegistry : IAsyncDisposable
     {
         private const string StartDebug = "start_debug";
+        private const string AttachDebug = "attach_debug";
         private const string GetDebugState = "get_debug_state";
         private const string DebuggeeActivity = "debuggee_activity";
         private const string StopDebug = "stop_debug";
@@ -432,6 +433,9 @@ internal static class Program
         private bool _legacyHasOwner;
         private int _legacyCompositeEvaluations;
         private string? _legacySessionId;
+        private NetCoreDbgSession? _legacyAttachSession;
+        private SessionSlot? _legacyAttachSlot;
+        private bool _legacyAttachClosing;
         private Dictionary<string, JsonElement>? _legacyLaunchConfig;
         private LegacyResolvedLaunch? _legacyResolvedLaunch;
         private sealed record LegacyResolvedLaunch(string ProjectRoot, string Program, DapLaunchProfileResult Profile);
@@ -808,7 +812,7 @@ internal static class Program
         internal async ValueTask<CallToolResult> CallLegacyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
         {
             var name = context.Params.Name;
-            if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
+            if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
@@ -820,7 +824,7 @@ internal static class Program
             string? breakpointFile = null;
             var breakpointSourceValid = false;
             long breakpointGeneration = 0;
-            if (name == StartDebug)
+            if (name is StartDebug or AttachDebug)
             {
                 await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
@@ -882,7 +886,7 @@ internal static class Program
             var traceResumeRevision = 0L;
             try
             {
-                if (name is StartDebug or StopDebug or RestartDebug or TerminateDebug)
+                if (name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug)
                 {
                     await _legacyLifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
                     lifecycleHeld = true;
@@ -894,7 +898,7 @@ internal static class Program
                 if (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && breakpointGeneration != _legacySessionGeneration)
                     return LegacyError("Debug session changed before breakpoint admission.", "unknown");
                 if (_legacyBreakpointSessionId is not null
-                    && (name is StartDebug or RestartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && _legacySessionId is null)))
+                    && (name is StartDebug or AttachDebug or RestartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint) && _legacySessionId is null)))
                     return LegacyError("A breakpoint update is still settling.");
                 var consumesOutput = name == GetOutput && arguments.TryGetValue("clear", out var clearOption)
                     && clearOption.ValueKind == JsonValueKind.True
@@ -903,7 +907,7 @@ internal static class Program
                 var compositeMayEvaluate = name == GetExceptionContext
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
-                var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
+                var mutation = name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
                     or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
@@ -911,20 +915,20 @@ internal static class Program
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
                     return LegacyError("Invalid muxSessionId.");
                 var muxId = mux?.GetValue<string>();
-                if (name == StartDebug && _legacySessionId is not null)
+                if (name is (StartDebug or AttachDebug) && _legacySessionId is not null)
                     return LegacyError("A debug session is already active; stop it before starting another.");
                 if (mutation && _legacyStarting)
                     return LegacyError("A debug session is starting.");
                 if (mutation && _legacyStopping)
                     return LegacyError("A debug session is stopping.");
-                if ((mutation || (name == DebuggeeActivity && muxId is not null)) && name != StartDebug && _legacySessionId is not null)
+                if ((mutation || (name == DebuggeeActivity && muxId is not null)) && name is not (StartDebug or AttachDebug) && _legacySessionId is not null)
                 {
                     var timeout = 60.0;
                     var configured = Environment.GetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT");
                     if (configured is not null && (!double.TryParse(configured, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out timeout) || !double.IsFinite(timeout) || timeout < 0))
                         return LegacyError("Invalid NETCOREDBG_SESSION_TIMEOUT.");
-                    if (_legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
+                    if (!_legacyAttachClosing && !(_legacyAttachSlot?.IsClosing ?? false) && _legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
                         && _legacyCompositeEvaluations == 0 && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
                     {
                         _legacyHasOwner = false;
@@ -936,6 +940,10 @@ internal static class Program
                     _legacyOwner = muxId;
                     if (muxId is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
                 }
+                if (_legacyAttachClosing && mutation && name != StopDebug)
+                    return LegacyError("Attach cleanup is unconfirmed; only owner stop can re-enter it.", "unknown");
+                if (_legacyAttachSession is not null && name == RestartDebug)
+                    return LegacyError("An attached session cannot be restarted as a launch.");
                 if (name == HygienePreflight)
                 {
                     foreach (var flag in new[] { "clear_breakpoints", "clear_trace_log", "clear_exception_filters" })
@@ -1574,6 +1582,175 @@ internal static class Program
                     arguments = restartArguments;
                     name = StartDebug;
                 }
+                if (name == AttachDebug)
+                {
+                    if (!OperatingSystem.IsWindows()) return LegacyError("Safe process-bound attach is supported only on Windows.");
+                    if (!arguments.TryGetValue("process_id", out var requestedPid) || requestedPid.ValueKind != JsonValueKind.Number
+                        || !requestedPid.TryGetInt32(out var processId) || processId <= 0) return LegacyError("Invalid process_id.");
+                    if (string.IsNullOrWhiteSpace(_debuggerPath)) return LegacyError("Debugger is unavailable.");
+                    var files = _legacyBreakpoints.Select(static point => point.File)
+                        .Concat(_legacyGroups.Values.SelectMany(static group => group.Breakpoints.Select(static point => point.File)))
+                        .Concat(_legacyTracepoints.Select(static point => point.File)).Distinct(_legacyBreakpointPathComparer);
+                    var requested = files.SelectMany(file => SnapshotLegacyBreakpointLines(file).Select(line => (File: file, Line: line))).ToArray();
+                    var points = requested.Select((point, index) => new DapSourceBreakpoint(index, point.File, point.Line.Line,
+                        point.Line.Incarnation, point.Line.Condition, point.Line.HitCondition, point.Line.Identity)).ToArray();
+                    if (!TryNormalizeBreakpointSources(points)) return LegacyError("Breakpoint source unavailable.");
+                    var functions = _legacyFunctionBreakpoints.ToArray();
+                    var attachToken = CreateToken();
+                    lock (_lifetimeGate)
+                    {
+                        if (_shutdownRequested || _buildActive || _buildCleanupUnconfirmed || _startCleanupFailure is not null)
+                            return LegacyError("Debug session cleanup is unconfirmed.");
+                        _starts++;
+                    }
+                    _legacyHasOwner = true;
+                    _legacyOwner = muxId;
+                    _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                    _legacySessionGeneration++;
+                    var attachGeneration = _legacySessionGeneration;
+                    _legacyTraceLastContext = null;
+                    _legacyTracePauseVeto = false;
+                    for (var index = 0; index < _legacyFunctionBreakpoints.Count; index++)
+                        _legacyFunctionBreakpoints[index] = _legacyFunctionBreakpoints[index] with { Verified = false };
+                    foreach (var point in _legacyTracepoints) { point.Verified = false; point.DapLine = null; point.BreakpointId = null; point.ObservedIncarnation = 0; }
+                    foreach (var point in _legacyGroups.Values.SelectMany(static group => group.Breakpoints))
+                    { point.Verified = false; point.DapLine = null; point.Id = null; point.ObservedIncarnation = 0; }
+                    _legacyStarting = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    NetCoreDbgSession? attached = null;
+                    NativeSceneSessionBinding? attachBinding = null;
+                    SessionSlot? attachSlot = null;
+                    SessionSlot.SessionLease? attachLease = null;
+                    LegacyResourceOwner.Generation? attachResources = null;
+                    var attachRegistered = false;
+                    var attachSucceeded = false;
+                    try
+                    {
+                        using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _startShutdown.Token);
+                        attachResources = _legacyResources.Begin();
+                        attached = await NetCoreDbgSession.PrepareAttachAsync(_debuggerPath, processId, InitializeTimeout, RequestTimeout,
+                            StopTimeout, startupCancellation.Token, eventName =>
+                            {
+                                attachResources!.Observe(eventName);
+                                if (eventName == "stopped") ScheduleLegacyTrace(attachGeneration);
+                            }).ConfigureAwait(false);
+                        attachBinding = new NativeSceneSessionBinding(attachToken, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
+                        attachBinding.AttachSession(attached);
+                        var attachOutput = new OutputLifetime(attached.OutputBuffer, attached);
+                        attachSlot = new SessionSlot(StopTimeout, attached.StopForOwnerAsync,
+                            () => DisposeSlotResourcesAsync(attached!, attachBinding!),
+                            () => RemoveSlot(attachToken, attached!, attachBinding!, attachSlot!, attachOutput),
+                            () => DrainAttachedSessionAsync(attached!));
+                        lock (_lifetimeGate)
+                        {
+                            if (_shutdownRequested) throw new InvalidOperationException("The debug-session registry is shutting down.");
+                            if (_outputs.ContainsKey(attachToken) || _ownedSlots.ContainsKey(attachToken))
+                                throw new InvalidOperationException("The debug-session token is already registered.");
+                            _outputs.Add(attachToken, attachOutput);
+                            _ownedSlots.Add(attachToken, (attachSlot, attachOutput));
+                            attachRegistered = true;
+                            attachLease = attachSlot.TryAcquire() ?? throw new InvalidOperationException("The attach owner is closing.");
+                        }
+                        startupCancellation.CancelAfter(RequestTimeout);
+                        await attached.AttachPreparedAsync(points, functions, startupCancellation.Token).ConfigureAwait(false);
+                        startupCancellation.Token.ThrowIfCancellationRequested();
+                        lock (_lifetimeGate)
+                        {
+                            if (_shutdownRequested || attached.IsRetirementRequested || !_isUsable(attached))
+                                throw new InvalidOperationException("The attach session cannot be published.");
+                            if (!_sessions.TryAdd(attachToken, attached) || !_slots.TryAdd(attachToken, attachSlot)
+                                || !_nativeSceneBindings.TryAdd(attachToken, attachBinding))
+                            {
+                                _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(attachToken, attached));
+                                _slots.TryRemove(new KeyValuePair<string, SessionSlot>(attachToken, attachSlot));
+                                _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(attachToken, attachBinding));
+                                throw new InvalidOperationException("The debug-session token is already registered.");
+                            }
+                            attached.RetirementRequested += retiring => OnRetirementRequested(attachToken, retiring);
+                            if (attached.IsRetirementRequested || !_isUsable(attached))
+                                throw new InvalidOperationException("The attach session retired before publication.");
+                            attachSucceeded = true;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        if (exception is DapStartupCleanupException) RecordStartCleanupFailure(exception);
+                    }
+                    finally
+                    {
+                        if (!attachSucceeded && attachRegistered)
+                        {
+                            try { _ = attached!.DisconnectAttachOnceAsync(CancellationToken.None); }
+                            catch (Exception) { }
+                        }
+                        attachLease?.Dispose();
+                        if (!attachSucceeded)
+                        {
+                            if (attachRegistered)
+                            {
+                                lock (_lifetimeGate)
+                                {
+                                    _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(attachToken, attached!));
+                                    _slots.TryRemove(new KeyValuePair<string, SessionSlot>(attachToken, attachSlot!));
+                                    _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(attachToken, attachBinding!));
+                                }
+                                _ = attachSlot!.CloseAndDrainAsync();
+                            }
+                            else
+                            {
+                                try { await DisposeUnpublishedResourcesAsync(attached, attachBinding, CancellationToken.None).ConfigureAwait(false); }
+                                catch (Exception cleanupFailure) { RecordStartCleanupFailure(cleanupFailure); }
+                            }
+                        }
+                        lock (_lifetimeGate) if (--_starts == 0) _startsDrained?.TrySetResult(true);
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStarting = false;
+                    }
+                    if (attachSucceeded)
+                    {
+                        lock (_lifetimeGate)
+                        {
+                            if (_shutdownRequested || cancellationToken.IsCancellationRequested || attachSlot!.IsClosing)
+                            {
+                                attachSucceeded = false;
+                                _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(attachToken, attached!));
+                                _slots.TryRemove(new KeyValuePair<string, SessionSlot>(attachToken, attachSlot!));
+                                _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(attachToken, attachBinding!));
+                                _ = attachSlot!.CloseAndDrainAsync();
+                            }
+                        }
+                    }
+                    if (attachRegistered)
+                    {
+                        _legacySessionId = attachToken;
+                        _legacyAttachSession = attached;
+                        _legacyAttachSlot = attachSlot;
+                        _legacyAttachClosing = !attachSucceeded;
+                    }
+                    if (!attachSucceeded)
+                    {
+                        if (attachResources is not null) _legacyResources.Discard(attachResources);
+                        if (!attachRegistered) { _legacyHasOwner = false; _legacyOwner = null; }
+                        return LegacyError(attachRegistered ? "Attach outcome and cleanup are unconfirmed; do not retry automatically." : "Attach preparation failed.", "unknown");
+                    }
+                    _legacyBreakpointObserverSession = attached;
+                    ReconcileLegacyFunctionBreakpoints();
+                    _legacyBreakpointObservationsIncomplete = false;
+                    _legacyUnconfirmedBreakpointFiles.Clear();
+                    _legacyUnconfirmedBreakpointOverflow = false;
+                    _legacyResources.Publish(attachResources!, attachToken);
+                    ScheduleLegacyTrace(attachGeneration);
+                    return Result(new
+                    {
+                        state = LegacySnapshot().State,
+                        next_actions = LegacyActions(LegacySnapshot().State),
+                        message = "Debug session state observed.",
+                        data = new { success = true, processId },
+                        warning = "ATTACH MODE HAS LIMITED FUNCTIONALITY. Stack traces may be incomplete due to netcoredbg limitation. For reliable debugging, use start_debug instead."
+                    }, false);
+                }
                 if (name == StartDebug)
                 {
                     if (!arguments.TryGetValue("program", out var program) || program.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(program.GetString()))
@@ -1928,6 +2105,57 @@ internal static class Program
                     return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                if (name == StopDebug && _legacyAttachSession is not null && _legacyAttachSlot is { } attachedSlot)
+                {
+                    _legacyAttachClosing = true;
+                    _legacySessionGeneration++;
+                    _legacyInspectionSessionId = null;
+                    _legacyInspectionContextId = null;
+                    _legacyInspectionMuxId = null;
+                    _legacyCurrentFrameId = null;
+                    _legacyInspectionRevision++;
+                    var retiredAttachResources = _legacyResources.Retire();
+                    var close = attachedSlot.CloseAndDrainAsync();
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    try { await Task.WhenAny(close, Task.Delay(StopTimeout)).ConfigureAwait(false); }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                    }
+                    if (close.IsCompletedSuccessfully && _legacySessionId == sessionId)
+                    {
+                        OutputLifetime? retiringOutput;
+                        lock (_lifetimeGate) _outputs.Remove(sessionId, out retiringOutput);
+                        _legacyOutputEvidence.Clear();
+                        if (_legacyBreakpointObserverSession is { } breakpointSession)
+                            breakpointSession.WithLegacyBreakpointLock(() =>
+                            {
+                                ReconcileLegacyBreakpointObservations(breakpointSession);
+                                _legacyBreakpointObservationsIncomplete = LegacyHasStoppingBreakpoints() && !breakpointSession.LegacyBreakpointEventsComplete;
+                                return true;
+                            });
+                        ClearLegacyGroupsAfterConfirmedStop();
+                        foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
+                            _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
+                        _legacySessionId = null;
+                        _legacyAttachSession = null;
+                        _legacyAttachSlot = null;
+                        _legacyAttachClosing = false;
+                        _legacyBreakpointObserverSession = null;
+                        _legacyHasOwner = false;
+                        _legacyOwner = null;
+                        var idleGeneration = _legacyResources.Begin();
+                        if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
+                        idleGeneration.Observe("thread");
+                        _legacyResources.Publish(idleGeneration);
+                        return LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
+                    }
+                    else if (close.IsFaulted) _ = close.Exception;
+                    _legacyResources.Restore(retiredAttachResources);
+                    return LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
+                }
                 if (name == QuickEvaluate)
                 {
                     if (!arguments.TryGetValue("expression", out var expression) || expression.ValueKind != JsonValueKind.String
@@ -3436,6 +3664,7 @@ internal static class Program
                 var invalid = name switch
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
+                    AttachDebug => key != "process_id",
                     RestartDebug => key != "rebuild",
                     GetCallStack => key is not ("thread_id" or "levels"),
                     AddBreakpoint => key is not ("file" or "line" or "condition" or "hit_condition"),
@@ -3847,12 +4076,15 @@ internal static class Program
 
         private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot()
         {
+            if (_legacyAttachClosing) return ("unknown", null, null, null);
             if (_legacySessionId is null) return (_legacyStarting ? "initializing" : "idle", null, null, null);
             return LegacySnapshot(_legacySessionId);
         }
 
         private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot(string sessionId)
         {
+            if (_legacySessionId == sessionId && (_legacyAttachClosing || (_legacyAttachSlot?.IsClosing ?? false)))
+                return ("unknown", null, null, null);
             if (_sessions.TryGetValue(sessionId, out var session)) return ProjectLegacyState(session.LegacyState);
             lock (_lifetimeGate)
             {
@@ -6494,10 +6726,15 @@ internal static class Program
                 {
                     // Starts admitted before shutdown finish their own unpublished cleanup.
                     await startsDrained.ConfigureAwait(false);
-                    var sessions = _sessions.ToArray();
-                    _sessions.Clear();
-                    var bindings = _nativeSceneBindings.ToArray();
-                    _nativeSceneBindings.Clear();
+                    KeyValuePair<string, NetCoreDbgSession>[] sessions;
+                    KeyValuePair<string, NativeSceneSessionBinding>[] bindings;
+                    lock (_lifetimeGate)
+                    {
+                        sessions = _sessions.Where(item => !_ownedSlots.ContainsKey(item.Key)).ToArray();
+                        bindings = _nativeSceneBindings.Where(item => !_ownedSlots.ContainsKey(item.Key)).ToArray();
+                        foreach (var item in sessions) _sessions.TryRemove(item);
+                        foreach (var item in bindings) _nativeSceneBindings.TryRemove(item);
+                    }
                     try
                     {
                         await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
@@ -6785,6 +7022,15 @@ internal static class Program
             }
         }
 
+        private static async Task DrainAttachedSessionAsync(NetCoreDbgSession session)
+        {
+            try { await session.DisconnectAttachOnceAsync(CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception) { }
+            if (session.AttachMayHaveDispatched)
+                await session.WaitForAttachTargetExitAsync().ConfigureAwait(false);
+            await session.StopForOwnerAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
         private sealed class SessionSlot
         {
             private readonly object _gate = new();
@@ -6792,6 +7038,7 @@ internal static class Program
             private readonly Func<CancellationToken, Task> _stop;
             private readonly Func<ValueTask> _dispose;
             private readonly Action _remove;
+            private readonly Func<Task>? _attachDrain;
             private readonly CancellationTokenSource _abort = new();
             private CancellationTokenRegistration? _cancellationRegistration;
             private CancellationToken _externalCloseCancellation;
@@ -6805,13 +7052,16 @@ internal static class Program
                 TimeSpan drainTimeout,
                 Func<CancellationToken, Task> stop,
                 Func<ValueTask> dispose,
-                Action remove)
+                Action remove, Func<Task>? attachDrain = null)
             {
                 _drainTimeout = drainTimeout;
                 _stop = stop;
                 _dispose = dispose;
                 _remove = remove;
+                _attachDrain = attachDrain;
             }
+
+            internal bool IsClosing { get { lock (_gate) return _closed; } }
 
             internal SessionLease? TryAcquire()
             {
@@ -6833,6 +7083,7 @@ internal static class Program
                 TaskCompletionSource<bool> completion;
                 lock (_gate)
                 {
+                    if (_attachDrain is not null && _closeTask is { IsFaulted: true }) _closeTask = null;
                     if (_closeTask is not null)
                     {
                         RegisterCancellation(cancellationToken);
@@ -6873,6 +7124,16 @@ internal static class Program
 
             private async Task CloseAndDrainCoreAsync(Task drained)
             {
+                if (_attachDrain is not null)
+                {
+                    await drained.ConfigureAwait(false);
+                    await _attachDrain().ConfigureAwait(false);
+                    await _dispose().ConfigureAwait(false);
+                    _remove();
+                    lock (_gate) _abortDisposed = true;
+                    _abort.Dispose();
+                    return;
+                }
                 try
                 {
                     _remove();
@@ -6921,6 +7182,7 @@ internal static class Program
 
             private void RegisterCancellation(CancellationToken cancellationToken)
             {
+                if (_attachDrain is not null) return;
                 if (!_abortDisposed && !_cancellationRegistration.HasValue && cancellationToken.CanBeCanceled)
                 {
                     _externalCloseCancellation = cancellationToken;
@@ -8084,6 +8346,7 @@ internal static class Program
             Tools =
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
+                Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),

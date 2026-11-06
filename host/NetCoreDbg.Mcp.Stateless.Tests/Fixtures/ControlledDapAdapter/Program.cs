@@ -931,10 +931,17 @@ internal sealed class ControlledDapAdapter
                     await CompleteLaunchAsync(cancellationToken);
                 }
                 return false;
+            case "attach":
+                _pendingLaunch = request.Detach();
+                await RecordAsync(new { kind = "attach-gated", sequence }, cancellationToken);
+                if (!_options.SupportsConfigurationDone) await CompleteLaunchAsync(cancellationToken);
+                return false;
             case "configurationDone":
-                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
+                var refuseConfiguration = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("configurationDoneRefused", out var configurationRefused) && configurationRefused.GetBoolean();
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: !refuseConfiguration);
                 await RecordAsync(new { kind = "configuration-done", sequence }, cancellationToken);
-                await CompleteLaunchAsync(cancellationToken);
+                if (!refuseConfiguration) await CompleteLaunchAsync(cancellationToken);
                 return false;
             case "terminate":
                 if (!_options.IgnoreGracefulShutdown)
@@ -1432,10 +1439,11 @@ internal sealed class ControlledDapAdapter
             await WriteOutputEntriesAsync(launchOutput, cancellationToken);
         }
 
+        var startupCommand = launch.Document.RootElement.GetProperty("command").GetString()!;
         var launchRefused = _outputScript.ValueKind == JsonValueKind.Object
-            && _outputScript.TryGetProperty("launchRefused", out var refusal) && refusal.GetBoolean();
+            && _outputScript.TryGetProperty(startupCommand == "attach" ? "attachRefused" : "launchRefused", out var refusal) && refusal.GetBoolean();
         _launchCompleted = !launchRefused;
-        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken, success: !launchRefused);
+        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), startupCommand, body: null, cancellationToken, success: !launchRefused);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
         if (_options.ExitAfterLaunchResponse)
         {

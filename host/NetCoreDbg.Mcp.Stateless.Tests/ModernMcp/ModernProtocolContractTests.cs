@@ -16,6 +16,99 @@ public sealed class ModernProtocolContractTests
 {
     private const string ValidProgram = "controlled-program.dll";
 
+    [Fact]
+    public async Task LegacyCompat_Attach_OrdersRequestsAndReportsUnconfirmedDetach()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true)));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "attach-other" };
+        try
+        {
+            var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(new JsonObject(), new RequestId("attach-catalog")));
+            var descriptor = Assert.Single(Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+                item => item["name"]?.GetValue<string>() == "attach_debug");
+            Assert.Contains("process_id", Assert.IsType<JsonArray>(descriptor["inputSchema"]?["required"]).Select(static item => item?.GetValue<string>()));
+            var source = Path.GetFullPath(BreakpointSourcePath);
+            JsonObject Group() => new()
+            {
+                ["name"] = "attach-lifecycle",
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+                ["tracepoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 6, ["expression"] = "1" }),
+            };
+            Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", Group(), owner))["data"]?["status"]?.GetValue<string>());
+            var attached = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            Assert.Equal(target.Id, attached["data"]?["processId"]?.GetValue<int>());
+            var denied = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), other);
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var stopped = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.Contains("unconfirmed", stopped["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var reentry = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.Contains("unconfirmed", reentry["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.False(target.HasExited);
+            var actions = (await driver.ReadNativeActionsAsync()).Where(static item => item.Kind == "request").ToArray();
+            var commands = actions.Select(static item => item.Command).ToArray();
+            Assert.Contains("initialize", commands);
+            Assert.Contains("setExceptionBreakpoints", commands);
+            Assert.Contains("attach", commands);
+            Assert.Contains("configurationDone", commands);
+            Assert.True(Array.IndexOf(commands, "initialize") < Array.IndexOf(commands, "setExceptionBreakpoints"));
+            Assert.True(Array.IndexOf(commands, "setExceptionBreakpoints") < Array.IndexOf(commands, "attach"));
+            Assert.True(Array.IndexOf(commands, "attach") < Array.IndexOf(commands, "configurationDone"));
+            Assert.DoesNotContain("terminate", commands);
+            var attach = JsonNode.Parse(Assert.Single(actions, static item => item.Command == "attach").Detail!)!;
+            Assert.Equal(target.Id, attach["arguments"]?["processId"]?.GetValue<int>());
+            Assert.False(attach["arguments"]?["justMyCode"]?.GetValue<bool>());
+            var disconnect = JsonNode.Parse(Assert.Single(actions, static item => item.Command == "disconnect").Detail!)!;
+            Assert.False(disconnect["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            var drained = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner);
+            Assert.Contains("unconfirmed", drained["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("FAIL", (await LegacyConsoleCallAsync(driver, "instrumentation_group_inspect", new JsonObject { ["name"] = "attach-lifecycle" }, owner))["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("PASS", (await LegacyConsoleCallAsync(driver, "instrumentation_group_create", Group(), owner))["data"]?["status"]?.GetValue<string>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_AttachRefused_DoesNotPublishOrTerminateTarget()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = "{\"attachRefused\":true}" }));
+        using var target = driver.StartOwnedTarget();
+        var owner = new JsonObject { ["muxSessionId"] = "attach-refusal-owner" };
+        try
+        {
+            var result = await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, owner);
+            Assert.False(string.IsNullOrWhiteSpace(result["error"]?.GetValue<string>()));
+            Assert.NotEqual("running", result["state"]?.GetValue<string>());
+            Assert.Null(result["data"]);
+            Assert.False(target.HasExited);
+            var actions = await driver.ReadNativeActionsAsync();
+            Assert.Contains(actions, static item => item.Command == "attach");
+            Assert.DoesNotContain(actions, static item => item.Command == "terminate");
+            var disconnect = JsonNode.Parse(Assert.Single(actions, static item => item.Command == "disconnect").Detail!)!;
+            Assert.False(disconnect["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
+        }
+    }
+
 #pragma warning disable MCP9005 // These tests exercise supported initialize-era roots.
     [Fact]
     public async Task LegacyCompat_ProjectSearch_UsesCurrentStateAndPythonEnvelope()
@@ -6560,6 +6653,35 @@ public sealed class ModernProtocolContractTests
             new RequestId("complete-envelope"));
 
         AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(raw));
+    }
+
+    [Fact]
+    public void AttachCleanup_OnlyClassifiesExactUnknownToolEnvelopeAsNoDispatch()
+    {
+        var unknown = new JsonObject
+        {
+            ["resultType"] = "complete",
+            ["isError"] = true,
+            ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = "Unknown tool: attach_debug" }),
+        };
+        Assert.True(ModernMcpProcessDriver.IsUnknownAttachToolResult(unknown));
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(null));
+
+        var missingCompletion = unknown.DeepClone().AsObject();
+        missingCompletion.Remove("resultType");
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(missingCompletion));
+        var notError = unknown.DeepClone().AsObject();
+        notError["isError"] = false;
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(notError));
+        var structured = unknown.DeepClone().AsObject();
+        structured["structuredContent"] = new JsonObject();
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(structured));
+        var otherTool = unknown.DeepClone().AsObject();
+        otherTool["content"]![0]!["text"] = "Unknown tool: start_debug";
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(otherTool));
+        var extraContent = unknown.DeepClone().AsObject();
+        extraContent["content"]!.AsArray().Add(new JsonObject { ["type"] = "text", ["text"] = "extra" });
+        Assert.False(ModernMcpProcessDriver.IsUnknownAttachToolResult(extraContent));
     }
 
     [Fact]
