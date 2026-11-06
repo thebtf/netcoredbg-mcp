@@ -1035,6 +1035,24 @@ internal sealed class ControlledDapAdapter
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
                 return false;
+            case "writeMemory":
+                var writeMode = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("memoryWriteMode", out var writeModeElement)
+                    ? writeModeElement.GetString() : null;
+                var writeBody = new { bytesWritten = 2, offset = 7 };
+                if (writeMode is "stale" or "held")
+                {
+                    if (writeMode == "stale")
+                    {
+                        await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                        await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "memory-write-restopped");
+                    }
+                    await RecordAsync(new { kind = "memory-write-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, writeBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                await WriteResponseAsync(sequence, command, writeBody, cancellationToken, success: writeMode != "refused");
+                return false;
             case "readMemory":
             case "disassemble":
             case "locations":

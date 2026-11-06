@@ -134,6 +134,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsStepInTargetsRequest;
     private bool _supportsLoadedSourcesRequest;
     private bool _supportsReadMemoryRequest;
+    private bool _supportsWriteMemoryRequest;
     private bool _supportsDisassembleRequest;
     private bool _supportsLocationsRequest;
     private bool _supportsSetVariable;
@@ -1188,6 +1189,42 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return ("success", response.Body, context);
         }
         catch (OperationCanceledException) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally { RemovePending(request); }
+    }
+
+    internal async Task<(string Status, JsonElement Body, string? Context)> WriteMemoryAsync(
+        object arguments, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            string context;
+            lock (_stateGate)
+            {
+                if (!_supportsWriteMemoryRequest) return ("unsupported", default, null);
+                if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing || IsRetirementRequested
+                    || LegacyStateUnderLock().Event is not ("stopped" or "continued"))
+                    return ("unavailable", default, null);
+                context = GetOrCreateInspectionContext();
+            }
+            request = await BeginRequestAsync("writeMemory", arguments, _requestTimeout, cancellationToken,
+                inspectionContextId: context).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent) return ("unknown", default, null);
+            if (!response.Success) return ("refused", default, response.InspectionContextId);
+            return ("success", response.Body, response.InspectionContextId);
+        }
+        catch (Exception) when (request.WriteStarted)
         {
             Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
             InvalidateInspectionContext(close: true);
@@ -3119,7 +3156,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         catch (Exception exception)
         {
             if (request.InspectionContextId is not null && request.WriteStarted
-                && (exception is OperationCanceledException || request.Command == "setVariable"))
+                && (exception is OperationCanceledException || request.Command is "setVariable" or "writeMemory"))
             {
                 Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
                 lock (_stateGate)
@@ -3235,7 +3272,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
             }
             else continueExecution?.MarkWriteStarted();
-            if (inspectionRequest is { Command: "setVariable" } mutation)
+            if (inspectionRequest is { Command: "setVariable" or "writeMemory" } mutation)
             {
                 lock (_stateGate)
                 {
@@ -3354,7 +3391,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (message.TryGetProperty("request_seq", out var requestSequence)
                     && requestSequence.TryGetInt32(out var sequence)
                     && _pending.TryGetValue(sequence, out var pending)
-                    && pending.Command == "setVariable")
+                    && pending.Command is "setVariable" or "writeMemory")
                 {
                     _callStackAdmissionGate.Wait();
                     try { HandleResponse(message); }
@@ -3693,6 +3730,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     throw;
                 }
             }
+            if (request.Command == "writeMemory")
+            {
+                _inspectionContextId = null;
+                if (!targetCurrent)
+                {
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                }
+                else
+                {
+                    responseContext = GetOrCreateInspectionContext();
+                }
+            }
             request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True,
                 targetCurrent, responseContext, serializedContent));
         }
@@ -3852,6 +3902,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     }
                 }
                 if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _) ||
+                    capabilities.TryGetProperty("supportsWriteMemoryRequest", out _) ||
                     capabilities.TryGetProperty("supportsDisassembleRequest", out _) ||
                     capabilities.TryGetProperty("supportsLocationsRequest", out _))
                 {
@@ -3861,6 +3912,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         lock (_stateGate)
                         {
                             if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _)) _supportsReadMemoryRequest = ReadOptionalBoolean(capabilities, "supportsReadMemoryRequest");
+                            if (capabilities.TryGetProperty("supportsWriteMemoryRequest", out _)) _supportsWriteMemoryRequest = ReadOptionalBoolean(capabilities, "supportsWriteMemoryRequest");
                             if (capabilities.TryGetProperty("supportsDisassembleRequest", out _)) _supportsDisassembleRequest = ReadOptionalBoolean(capabilities, "supportsDisassembleRequest");
                             if (capabilities.TryGetProperty("supportsLocationsRequest", out _)) _supportsLocationsRequest = ReadOptionalBoolean(capabilities, "supportsLocationsRequest");
                         }
@@ -4379,6 +4431,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _supportsStepInTargetsRequest = false;
                 _supportsLoadedSourcesRequest = false;
                 _supportsReadMemoryRequest = false;
+                _supportsWriteMemoryRequest = false;
                 _supportsDisassembleRequest = false;
                 _supportsLocationsRequest = false;
                 _supportsExceptionFilters = false;
@@ -4410,6 +4463,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _supportsStepInTargetsRequest = supportsStepInTargets;
             _supportsLoadedSourcesRequest = supportsLoadedSources;
             _supportsReadMemoryRequest = ReadOptionalBoolean(body, "supportsReadMemoryRequest");
+            _supportsWriteMemoryRequest = ReadOptionalBoolean(body, "supportsWriteMemoryRequest");
             _supportsDisassembleRequest = ReadOptionalBoolean(body, "supportsDisassembleRequest");
             _supportsLocationsRequest = ReadOptionalBoolean(body, "supportsLocationsRequest");
             _supportsExceptionFilters = supportsExceptionFilters;

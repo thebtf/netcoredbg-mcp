@@ -294,6 +294,7 @@ internal static class Program
         private const string GetProgress = "get_progress";
         private const string GetLoadedSources = "get_loaded_sources";
         private const string ReadMemory = "read_memory";
+        private const string WriteMemory = "write_memory";
         private const string Disassemble = "disassemble";
         private const string GetLocations = "get_locations";
         private const string GetOutput = "get_output";
@@ -815,7 +816,7 @@ internal static class Program
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
-                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
+                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
@@ -908,7 +909,7 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ConfigureExceptions or GetStepInTargets
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or WriteMemory or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
@@ -2410,7 +2411,7 @@ internal static class Program
                         ? LegacyResponseWithMessage(new { state = "idle" }, "idle", "Adapter does not support terminate; used disconnect instead.")
                         : LegacyResponse(new { success = true });
                 }
-                if (compositeMayEvaluate)
+                if (compositeMayEvaluate || name == WriteMemory)
                 {
                     _legacyCompositeEvaluations++;
                     compositeEvaluationHeld = true;
@@ -2425,9 +2426,11 @@ internal static class Program
                 }
                 _legacyGate.Release();
                 gateHeld = false;
-                if (name is ReadMemory or Disassemble or GetLocations)
+                if (name is ReadMemory or WriteMemory or Disassemble or GetLocations)
                 {
-                    var memory = await LegacyMemoryInspectionAsync(name, sessionId, arguments, cancellationToken).ConfigureAwait(false);
+                    var memory = name == WriteMemory
+                        ? await LegacyWriteMemoryAsync(sessionId, arguments, cancellationToken).ConfigureAwait(false)
+                        : await LegacyMemoryInspectionAsync(name, sessionId, arguments, cancellationToken).ConfigureAwait(false);
                     await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                     gateHeld = true;
                     if (!StringComparer.Ordinal.Equals(_legacySessionId, sessionId)) return LegacyInspectionChanged(name);
@@ -2435,7 +2438,10 @@ internal static class Program
                     if (memory.Context is not null && (!_sessions.TryGetValue(sessionId, out var current) ||
                         !ReferenceEquals(current, memory.Session) || current.CaptureInspectionState(memory.Context) is null))
                         return LegacyInspectionChanged(name);
-                    return memory.Error is not null ? LegacyError(memory.Error, state) : LegacyBoundedUtilityResponse(memory.Data!, state);
+                    if (memory.Error is not null) return LegacyError(memory.Error, state);
+                    return name == WriteMemory
+                        ? LegacyResponseWithMessage(memory.Data!, state, "Memory write completed. Debuggee state may have changed.")
+                        : LegacyBoundedUtilityResponse(memory.Data!, state);
                 }
                 var result = name switch
                 {
@@ -3686,6 +3692,7 @@ internal static class Program
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
                     EvaluateExpression or QuickEvaluate => key is not ("expression" or "frame_id"),
                     ReadMemory => key is not ("memory_reference" or "offset" or "count"),
+                    WriteMemory => key is not ("memory_reference" or "data" or "offset" or "allow_partial"),
                     Disassemble => key is not ("memory_reference" or "offset" or "instruction_offset" or "instruction_count" or "resolve_symbols"),
                     GetLocations => key != "location_reference",
                     SetVariable => key is not ("variables_reference" or "name" or "value"),
@@ -3734,6 +3741,97 @@ internal static class Program
             var result = LegacyResponse(data, state);
             return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
                 ? result : LegacyError("Inspection result exceeds 256 KiB.", state);
+        }
+
+        private async Task<(object? Data, string? Error, string? Context, NetCoreDbgSession? Session)> LegacyWriteMemoryAsync(
+            string sessionId, Dictionary<string, JsonElement> arguments, CancellationToken cancellationToken)
+        {
+            if (!arguments.TryGetValue("memory_reference", out var reference) || reference.ValueKind != JsonValueKind.String
+                || string.IsNullOrEmpty(reference.GetString()) || Encoding.UTF8.GetByteCount(reference.GetString()!) > MaximumSerializedInspectionBytes)
+                return (null, "memory_reference is required and must fit the inspection limit.", null, null);
+            if (!arguments.TryGetValue("data", out var encoded) || encoded.ValueKind != JsonValueKind.String
+                || encoded.GetString() is not { } data || data.Length > MaximumSerializedInspectionBytes || !IsStrictWriteBase64(data))
+                return (null, "data must be valid base64 and fit the inspection limit.", null, null);
+            var offset = 0;
+            if (arguments.TryGetValue("offset", out var suppliedOffset)
+                && (suppliedOffset.ValueKind != JsonValueKind.Number || !suppliedOffset.TryGetInt32(out offset)))
+                return (null, "Invalid offset.", null, null);
+            var allowPartial = false;
+            if (arguments.TryGetValue("allow_partial", out var partial))
+            {
+                if (partial.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return (null, "Invalid allow_partial.", null, null);
+                allowPartial = partial.GetBoolean();
+            }
+            if (!_sessions.TryGetValue(sessionId, out var session) || !_slots.TryGetValue(sessionId, out var slot))
+                return (null, "No active debug session.", null, null);
+            var lease = slot.TryAcquire();
+            if (lease is null) return (null, "No active debug session.", null, null);
+            var close = false;
+            try
+            {
+                if (!_isUsable(session)) { close = true; return (null, "No active debug session.", null, session); }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.WriteMemoryAsync(new { memoryReference = reference.GetString(), data, offset, allowPartial }, operation.Token).ConfigureAwait(false);
+                if (result.Status == "unsupported") return (null, "Adapter does not support writeMemory. This feature requires supportsWriteMemoryRequest: true.", null, session);
+                if (result.Status == "unavailable") return (null, "No confirmed running or stopped debug session.", null, session);
+                if (result.Status == "unknown") { close = session.RequiresInspectionDrain(); return (null, "Memory write outcome is unknown; it may have executed. Do not retry automatically.", null, session); }
+                if (result.Status == "refused") return (null, "Adapter reported writeMemory failure; memory may have changed. Do not retry automatically.", result.Context, session);
+                var body = result.Body;
+                if (body.ValueKind is not (JsonValueKind.Object or JsonValueKind.Undefined or JsonValueKind.Null))
+                    throw new InvalidDataException("Invalid writeMemory response.");
+                long bytesWritten = 0, resultOffset = offset;
+                if (body.ValueKind == JsonValueKind.Object)
+                {
+                    if (body.TryGetProperty("bytesWritten", out var bytes) && (bytes.ValueKind != JsonValueKind.Number || !bytes.TryGetInt64(out bytesWritten) || bytesWritten < 0 || bytesWritten > NetCoreDbgSession.MaximumSafeDapInteger))
+                        throw new InvalidDataException("Invalid writeMemory bytesWritten.");
+                    if (body.TryGetProperty("offset", out var returnedOffset) && (returnedOffset.ValueKind != JsonValueKind.Number || !returnedOffset.TryGetInt64(out resultOffset) || resultOffset < -NetCoreDbgSession.MaximumSafeDapInteger || resultOffset > NetCoreDbgSession.MaximumSafeDapInteger))
+                        throw new InvalidDataException("Invalid writeMemory offset.");
+                }
+                return (new { bytes_written = bytesWritten, offset = resultOffset }, null, result.Context, session);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                close = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                close = true;
+                return (null, "Memory write outcome is unknown; it may have executed. Do not retry automatically.", null, session);
+            }
+            finally
+            {
+                lease.Dispose();
+                if (close)
+                {
+                    var cleanup = slot.CloseAndDrainAsync();
+                    if (slot.IsAttached)
+                    {
+                        _ = cleanup.ContinueWith(static task => { _ = task.Exception; }, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                        await Task.WhenAny(cleanup, Task.Delay(StopTimeout)).ConfigureAwait(false);
+                        if (cleanup.IsFaulted) _ = cleanup.Exception;
+                    }
+                    else
+                    {
+                        try { await cleanup.ConfigureAwait(false); } catch (Exception) { }
+                    }
+                }
+            }
+        }
+
+        private static bool IsStrictWriteBase64(string text)
+        {
+            var symbols = 0;
+            var padding = 0;
+            foreach (var character in text)
+            {
+                if (character == '=') { padding++; continue; }
+                if (padding != 0 || !(character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '+' or '/')) return false;
+                symbols++;
+            }
+            if (symbols == 0) return padding == 0;
+            return (symbols % 4) switch { 0 => padding == 0, 2 => padding == 2, 3 => padding == 1, _ => false };
         }
 
         private async Task<(object? Data, string? Error, string? Context, NetCoreDbgSession? Session)> LegacyMemoryInspectionAsync(
@@ -4224,8 +4322,8 @@ internal static class Program
             Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}" }, false);
 
         private static CallToolResult LegacyInspectionChanged(string tool) => LegacyError(
-            tool is EvaluateExpression or SetVariable
-                ? $"{(tool == SetVariable ? "Variable mutation" : "Evaluation")} outcome is unknown; it may have executed. Do not retry automatically."
+            tool is EvaluateExpression or SetVariable or WriteMemory
+                ? $"{(tool == WriteMemory ? "Memory write" : tool == SetVariable ? "Variable mutation" : "Evaluation")} outcome is unknown; it may have executed. Do not retry automatically."
                 : "Stopped inspection context changed before the operation completed.", "unknown");
 
         private CallToolResult LegacyNativeError(CallToolResult result) => LegacyNativeError(result, LegacySnapshot().State);
@@ -7062,6 +7160,7 @@ internal static class Program
             }
 
             internal bool IsClosing { get { lock (_gate) return _closed; } }
+            internal bool IsAttached => _attachDrain is not null;
 
             internal SessionLease? TryAcquire()
             {
@@ -8387,6 +8486,7 @@ internal static class Program
                 Tool("get_progress", "Read the bounded progress event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_loaded_sources", "Query and refresh loaded sources when the debugger supports it.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("read_memory", "Read memory when the adapter advertises supportsReadMemoryRequest; count defaults to zero.", """{"type":"object","properties":{"memory_reference":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"count":{"type":"integer","minimum":0,"maximum":2147483647,"default":0}},"required":["memory_reference"],"additionalProperties":false}"""),
+                Tool("write_memory", "Write base64 bytes to debuggee memory with owner permission when supportsWriteMemoryRequest is advertised. Uncertain writes must not be retried automatically.", """{"type":"object","properties":{"memory_reference":{"type":"string","minLength":1},"data":{"type":"string"},"offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"allow_partial":{"type":"boolean","default":false}},"required":["memory_reference","data"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("disassemble", "Disassemble memory when the adapter advertises supportsDisassembleRequest.", """{"type":"object","properties":{"memory_reference":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"instruction_offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"instruction_count":{"type":"integer","minimum":1,"maximum":2147483647,"default":64},"resolve_symbols":{"type":"boolean","default":true}},"required":["memory_reference"],"additionalProperties":false}"""),
                 Tool("get_locations", "Resolve a location reference when the adapter advertises supportsLocationsRequest.", """{"type":"object","properties":{"location_reference":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["location_reference"],"additionalProperties":false}"""),
                 Tool("get_step_in_targets", "Query targets for the selected stopped frame; mux ownership is required.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),

@@ -380,7 +380,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 _ = removeSession!.Invoke(sessions, [sessionId, null]);
             };
             var slotConstructor = slotType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
-                binder: null, types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)], modifiers: null);
+                binder: null, types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action), typeof(Func<Task>)], modifiers: null);
             Assert.NotNull(slotConstructor);
             slot = slotConstructor!.Invoke([
                 TimeSpan.FromSeconds(2),
@@ -401,6 +401,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                     await DisposeSessionAsync();
                 }),
                 remove,
+                null,
             ]);
             var addSession = sessions.GetType().GetMethod("TryAdd", [typeof(string), _session.GetType()]);
             var addSlot = slots.GetType().GetMethod("TryAdd", [typeof(string), slotType]);

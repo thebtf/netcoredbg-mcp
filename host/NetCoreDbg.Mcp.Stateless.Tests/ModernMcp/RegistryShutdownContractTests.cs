@@ -127,6 +127,89 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyWriteMemory_AttachedStaleWriteReturnsUnknownWhileTargetLives()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject { ["supportsWriteMemoryRequest"] = true },
+            ["memoryWriteMode"] = "stale",
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"), outputScript: script);
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<CallToolResult>? pending = null;
+        try
+        {
+            var attached = Content(await harness.CallLegacyAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "write-attach-start"));
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyAsync("get_threads", new JsonObject(), "write-attach-barrier");
+            var before = (await harness.Fixture.ReadTranscriptAsync()).Count;
+            pending = harness.CallLegacyAsync("write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID" }, "write-attach-stale");
+            await harness.Fixture.WaitForTranscriptKindAsync("memory-write-response-gated", observation.Token);
+            _ = await harness.CallLegacyAsync("get_threads", new JsonObject(), "write-attach-stale-barrier");
+            harness.Fixture.ReleaseStackTraceResponse();
+            var result = Content(await pending.WaitAsync(TimeSpan.FromSeconds(3)));
+            var error = Assert.IsType<string>(result["error"]?.GetValue<string>());
+            Assert.Contains("unknown", error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("do not retry", error, StringComparison.OrdinalIgnoreCase);
+            Assert.False(result.ContainsKey("data"));
+            Assert.False(target.HasExited);
+            Assert.Single((await harness.Fixture.ReadTranscriptAsync()).Skip(before), static entry => entry.Kind == "request" && entry.Command == "writeMemory");
+        }
+        finally
+        {
+            harness.Fixture.ReleaseStackTraceResponse();
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "write-attach-drain").WaitAsync(TimeSpan.FromSeconds(10)));
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "write-attach-cleanup").WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyWriteMemory_CancelledBeforeAdmissionKeepsSessionAndDoesNotWrite()
+    {
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsWriteMemoryRequest"] = true } };
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"), outputScript: script);
+        harness.EnableLegacyCompat();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var caller = new CancellationTokenSource();
+        Task<CallToolResult>? pending = null;
+        SemaphoreSlim? admission = null;
+        var held = false;
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "write-cancel-start"));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyAsync("get_threads", new JsonObject(), "write-cancel-barrier");
+            var before = (await harness.Fixture.ReadTranscriptAsync()).Count;
+            admission = harness.LegacySessionAdmissionGate;
+            await admission.WaitAsync(observation.Token);
+            held = true;
+            pending = harness.CallLegacyAsync("write_memory", new JsonObject { ["memory_reference"] = "0x1234", ["data"] = "AQID" }, "write-cancel-before-admission", caller.Token);
+            Assert.False(pending.IsCompleted);
+            caller.Cancel();
+            admission.Release();
+            held = false;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending.WaitAsync(observation.Token));
+            var state = Content(await harness.CallLegacyAsync("get_threads", new JsonObject(), "write-cancel-still-usable").WaitAsync(observation.Token));
+            Assert.NotNull(state["data"]);
+            var after = (await harness.Fixture.ReadTranscriptAsync()).Skip(before).ToArray();
+            Assert.DoesNotContain(after, static entry => entry.Kind == "request" && entry.Command is "writeMemory" or "terminate" or "disconnect");
+        }
+        finally
+        {
+            if (held) admission!.Release();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "write-cancel-cleanup").WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
     public async Task LegacyAttach_CancelledBeforeAdmissionNeverWritesAttachLater()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -1089,6 +1172,15 @@ public sealed class RegistryShutdownContractTests
                 .Invoke(registry, [resourceServer, uri, true, cancellationToken])!;
         public string LegacySessionId => Assert.IsType<string>(registry.GetType()
             .GetField("_legacySessionId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
+        public SemaphoreSlim LegacySessionAdmissionGate
+        {
+            get
+            {
+                var sessions = registry.GetType().GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
+                var session = sessions.GetType().GetProperty("Item")!.GetValue(sessions, [LegacySessionId])!;
+                return Assert.IsType<SemaphoreSlim>(session.GetType().GetField("_callStackAdmissionGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session));
+            }
+        }
 
         public static async Task<RegistryHostHarness> CreateAsync(
             FixtureConfiguration configuration, bool holdLaunchResponse = false, JsonObject? outputScript = null,

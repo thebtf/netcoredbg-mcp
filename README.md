@@ -51,7 +51,7 @@ only `start_debug`, `attach_debug`, `get_debug_state`, `debuggee_activity`, `get
 `get_scopes`, `get_variables`, `evaluate_expression`, `quick_evaluate`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
-`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `write_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`,
 `get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
@@ -147,6 +147,17 @@ invalidates an in-flight result. Responses are bounded to 256 KiB and invalid
 or oversized responses fail rather than return partial data. Numeric inputs
 are limited to signed 32-bit integers. Stack and variable projections do not
 expose new references. Adapter support and consumer verification are separate.
+
+`write_memory` is destructive, requires mux ownership and an advertised
+`supportsWriteMemoryRequest`, and accepts strict base64 with a signed 32-bit
+offset. It can run while the session is running or stopped. A write invalidates
+the previous inspection context. If the session or lifecycle changes during a
+dispatched write, or its outcome is otherwise uncertain, it may have executed;
+do not retry automatically. Uncertain cleanup can close the session and terminate
+a launched debuggee. For an attached target, the host retains cleanup ownership
+and returns without waiting indefinitely for the target to exit; detach remains
+unconfirmed. Native input size and numeric bounds differ from Python. Adapter
+support and consumer verification remain separate.
 
 The legacy context tools return Python-style `data` envelopes from one native
 stopped epoch. Stop context includes up to five frames, 15 first-scope locals,
