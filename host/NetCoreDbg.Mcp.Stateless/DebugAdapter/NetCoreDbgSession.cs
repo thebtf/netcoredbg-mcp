@@ -67,6 +67,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
+    private TaskCompletionSource<(int ThreadId, string Context)?>? _quickPauseStop;
+    private PauseRecord? _quickPauseRecord;
     private readonly Dictionary<string, (DapLoadedSource Source, int Bytes)> _loadedSources = new(StringComparer.Ordinal);
     private int _loadedSourceBytes;
     private bool _loadedSourcesIncomplete;
@@ -1247,12 +1249,81 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return reference;
     }
 
-    internal async Task<DapPauseResult> PauseAsync(int? threadId, CancellationToken cancellationToken)
+    internal const string QuickEvaluationFailedAfterResume = "Evaluation failed; the pause was resumed.";
+
+    internal async Task<(DapEvaluateResult? Value, string? Error, bool Drain)> QuickEvaluateAsync(
+        string expression, int? frameId, CancellationToken cancellationToken)
+    {
+        var observed = new TaskCompletionSource<(int ThreadId, string Context)?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_stateGate)
+        {
+            if (_quickPauseStop is not null || _inspectionClosed || IsRetirementRequested || LegacyStateUnderLock().Event != "continued")
+                return (null, "Program is not running or another quick evaluation is active.", false);
+            _quickPauseStop = observed;
+        }
+        try
+        {
+            var pause = await PauseCoreAsync(null, cancellationToken, requireRunning: true).ConfigureAwait(false);
+            if (pause.Outcome != DapPauseOutcome.Acknowledged)
+                return (null, "Pause was not confirmed; do not retry automatically.", pause.RequiresDrain);
+            (int ThreadId, string Context)? stopped;
+            try { stopped = await observed.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false); }
+            catch (TimeoutException) { return (null, "No pause stop was observed; do not retry automatically.", false); }
+            if (stopped is not { } target || target.ThreadId != pause.ThreadId || !IsStoppedContextCurrent(target.ThreadId, target.Context))
+                return (null, "The stop was not owned by this pause or has changed.", false);
+            var selectedFrame = frameId;
+            if (selectedFrame is null)
+            {
+                var stack = await GetCallStackAsync(target.ThreadId, 0, 1, true, cancellationToken).ConfigureAwait(false);
+                if (stack.IsRefused || stack.Frames.Count == 0 || stack.InspectionContextId != target.Context)
+                    return (null, "Stopped context changed or no frame is available.", RequiresInspectionDrain());
+                selectedFrame = stack.Frames[0].Id;
+            }
+            var value = await EvaluateExpressionAsync(target.Context, selectedFrame.Value, expression, cancellationToken).ConfigureAwait(false);
+            if (value.Outcome is not (DapEvaluateOutcome.Success or DapEvaluateOutcome.Failed)
+                || !IsStoppedContextCurrent(target.ThreadId, target.Context))
+                return (null, "Evaluation outcome is unknown; do not retry automatically.", RequiresInspectionDrain());
+            cancellationToken.ThrowIfCancellationRequested();
+            var continued = await ContinueCoreAsync(target.ThreadId, cancellationToken, target.Context, null, null, acknowledgementOnly: true).ConfigureAwait(false);
+            if (!continued.Acknowledged || continued.Outcome != DapContinueOutcome.TimedOut)
+                return (null, "Resume was not confirmed or execution stopped again; do not retry automatically.", continued.RequiresDrain);
+            return value.Outcome == DapEvaluateOutcome.Failed
+                ? (null, QuickEvaluationFailedAfterResume, continued.RequiresDrain)
+                : (value, null, continued.RequiresDrain);
+        }
+        finally
+        {
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_quickPauseStop, observed)) { _quickPauseStop = null; _quickPauseRecord = null; }
+            }
+        }
+    }
+
+    internal void VetoQuickPause()
+    {
+        lock (_stateGate)
+        {
+            _quickPauseStop?.TrySetResult(null);
+            _quickPauseRecord = null;
+        }
+    }
+
+    internal Task<DapPauseResult> PauseAsync(int? threadId, CancellationToken cancellationToken) =>
+        PauseCoreAsync(threadId, cancellationToken, requireRunning: false);
+
+    private async Task<DapPauseResult> PauseCoreAsync(int? threadId, CancellationToken cancellationToken, bool requireRunning)
     {
         cancellationToken.ThrowIfCancellationRequested();
         PauseRecord active;
         lock (_stateGate)
         {
+            if (requireRunning && LegacyStateUnderLock().Event != "continued") return DapPauseResult.Refused;
+            if (!requireRunning && _quickPauseStop is { } quick)
+            {
+                quick.TrySetResult(null);
+                _quickPauseRecord = null;
+            }
             if (_inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing
                 || _activePause is not null || _activeStepOver is not null
                 || (_executionAdmission == ExecutionAdmission.Active && _activeContinue is not { CommittedWrite: true }))
@@ -1268,6 +1339,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
 
             active = new PauseRecord(_requestTimeout, _stepOverTimeProvider, cancellationToken);
+            active.RequireRunning = requireRunning;
+            if (requireRunning) _quickPauseRecord = active;
             _activePause = active;
         }
 
@@ -1404,7 +1477,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool CanWritePause(PauseRecord active) =>
         ReferenceEquals(_activePause, active) && active.Outcome is null && active.ProtocolFailure is null
         && !_inspectionClosed && !IsRetirementRequested && _executionAdmission != ExecutionAdmission.Closing
-        && _state.Event is not "exited" and not "terminated";
+        && _state.Event is not "exited" and not "terminated"
+        && (!active.RequireRunning || LegacyStateUnderLock().Event == "continued");
 
     private static bool PauseWriteRequiresDrain(PauseRecord active) =>
         active.ProtocolFailure is not null || active.Outcome?.Outcome == DapPauseOutcome.Terminal
@@ -1622,8 +1696,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TaskCompletionSource<bool> admissionFinished, long breakpointRevision, CancellationToken cancellationToken) =>
         ContinueCoreAsync(threadId, cancellationToken, expectedContext, admissionFinished, breakpointRevision);
 
+    private sealed class QuickContinueVetoException : Exception { }
+
     private async Task<DapContinueResult> ContinueCoreAsync(int? threadId, CancellationToken cancellationToken,
-        string? expectedContext, TaskCompletionSource<bool>? admissionFinished, long? breakpointRevision)
+        string? expectedContext, TaskCompletionSource<bool>? admissionFinished, long? breakpointRevision, bool acknowledgementOnly = false)
     {
         if (cancellationToken.IsCancellationRequested || !TryAdmitExecution())
         {
@@ -1647,6 +1723,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         || (expectedContext is not null && (_state.Event != "stopped" || _state.CurrentThreadId != threadId
                             || !StringComparer.Ordinal.Equals(_inspectionContextId, expectedContext)))
                         || (breakpointRevision is not null && _legacyBreakpointRevision != breakpointRevision)
+                        || (acknowledgementOnly && _quickPauseRecord is null)
                         || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapContinueResult.Refused;
@@ -1654,10 +1731,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                     selectedThreadId = resolved;
                     active = new ContinueRecord(selectedThreadId, cancellationToken);
+                    if (acknowledgementOnly) { active.QuickPause = _quickPauseRecord; active.QuickContext = expectedContext; }
                     _activeContinue = active;
-                    _state = new DapSessionState(null, null, null);
-                    ClearCallStackEligibility();
-                    _inspectionContextId = null;
+                    if (!acknowledgementOnly)
+                    {
+                        _state = new DapSessionState(null, null, null);
+                        ClearCallStackEligibility();
+                        _inspectionContextId = null;
+                    }
                 }
 
                 request = await BeginRequestAsync(
@@ -1673,8 +1754,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 admissionFinished?.TrySetResult(request is not null);
             }
 
+            if (acknowledgementOnly)
+            {
+                _ = await request!.Completion.Task.WaitAsync(active!.DeadlineToken).ConfigureAwait(false);
+                lock (_stateGate)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (active.ProtocolFailure is { } failure) throw new InvalidDataException("DAP continue exchange failed.", failure);
+                    return FinalizeContinue(active, interrupted: true);
+                }
+            }
+
             return await WaitForContinueOutcomeAsync(
                 active!, active!.DeadlineToken, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QuickContinueVetoException)
+        {
+            return DapContinueResult.Refused;
         }
         catch (OperationCanceledException exception)
         {
@@ -2859,7 +2955,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             RemovePending(request);
             request.Completion.TrySetException(exception);
-            if (pause is not null || command == "terminate")
+            if (pause is not null || command == "terminate" || exception is QuickContinueVetoException)
             {
                 _ = request.Completion.Task.Exception;
             }
@@ -2947,7 +3043,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
             }
             stepOver?.MarkWriteStarted();
-            continueExecution?.MarkWriteStarted();
+            if (continueExecution?.QuickPause is { } quickPause)
+            {
+                lock (_stateGate)
+                {
+                    if (!ReferenceEquals(_quickPauseRecord, quickPause) || _inspectionClosed || IsRetirementRequested
+                        || _state.Event != "stopped" || _state.CurrentThreadId != continueExecution.ThreadId
+                        || !HasStepOverAuthority(continueExecution.ThreadId)
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, continueExecution.QuickContext))
+                        throw new QuickContinueVetoException();
+                    _state = new DapSessionState(null, null, null);
+                    ClearCallStackEligibility();
+                    _inspectionContextId = null;
+                    continueExecution.MarkWriteStarted();
+                }
+            }
+            else continueExecution?.MarkWriteStarted();
             if (inspectionRequest is { Command: "setVariable" } mutation)
             {
                 lock (_stateGate)
@@ -4193,6 +4304,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     else if (threadId is { } hitThread && HasStepOverAuthority(hitThread))
                         ScheduleLegacyBreakpointHit(hitThread, GetOrCreateInspectionContext(), _legacyBreakpointObservations.Values.SelectMany(static value => value).ToArray());
                     else _legacyHitCountsIncomplete = true;
+                }
+                if (_quickPauseStop is { } quick)
+                {
+                    var owned = _quickPauseRecord?.Request is { Command: "pause", WriteStarted: true }
+                        && reason == "pause" && threadId is { } quickThread
+                        && _quickPauseRecord.ThreadId == quickThread && HasStepOverAuthority(quickThread);
+                    quick.TrySetResult(owned ? (threadId!.Value, GetOrCreateInspectionContext()) : null);
                 }
                 _activeStepOver?.ObserveStopped(message, reason, threadId);
             }
@@ -5804,6 +5922,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public CancellationToken DeadlineToken => _deadline.Token;
         public PendingRequest? Request { get; set; }
         public int? ThreadId { get; set; }
+        public bool RequireRunning { get; set; }
         public bool Finalized { get; set; }
         public bool AcknowledgementObserved { get; private set; }
         public DapPauseResult? Outcome { get; private set; }
@@ -5954,6 +6073,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private DapContinueResult? _stoppedCandidate;
 
         public int ThreadId { get; } = threadId;
+        public PauseRecord? QuickPause { get; set; }
+        public string? QuickContext { get; set; }
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
