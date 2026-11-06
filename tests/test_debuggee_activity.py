@@ -109,6 +109,24 @@ def register_activity_fastmcp(
 
 
 @pytest.mark.asyncio
+async def test_unknown_tracepoint_continue_is_exposed_and_activity_is_refused() -> None:
+    manager = make_manager()
+    manager.state.state = DebugState.RUNNING
+    manager.state.execution_outcome_unknown = True
+    manager.state.process_id = 123
+    registry, _ = register_activity_tool(manager)
+
+    state = await registry.tools["get_debug_state"]()
+    activity = await registry.tools["debuggee_activity"](None, window_ms=1)
+
+    assert state["state"] == "unknown"
+    assert state["data"]["execState"] == "unknown"
+    assert state["data"]["debuggeeAlive"] is None
+    assert activity["state"] == "unknown"
+    assert "error" in activity
+
+
+@pytest.mark.asyncio
 async def test_event_handlers_register_once_across_stop_start_cycle() -> None:
     manager = make_manager()
     manager._client = DAPClient("netcoredbg")
@@ -206,7 +224,7 @@ async def test_transparent_tracepoint_stop_is_counted_before_filtering() -> None
     await asyncio.sleep(0)
 
     assert manager.activity_snapshot().stopped_events == 1
-    manager._check_tracepoint.assert_awaited_once_with(7)  # type: ignore[attr-defined]
+    assert manager.activity_snapshot().state == DebugState.RUNNING
 
 
 def test_output_sequence_survives_buffer_trimming() -> None:

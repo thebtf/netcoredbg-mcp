@@ -680,6 +680,29 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["threadId"] == 1
 
     @pytest.mark.asyncio
+    async def test_tracepoint_continue_rechecks_admission_before_writing(self):
+        client = DAPClient("/path")
+        stdin = MagicMock()
+        client._process = SimpleNamespace(pid=1, stdin=stdin, returncode=None)
+        run = client._run_for_direct_reader()
+        started = asyncio.Event()
+        allowed = True
+
+        async def send():
+            started.set()
+            return await client.continue_execution(1, admission=lambda: allowed)
+
+        async with client._request_lock:
+            pending = asyncio.create_task(send())
+            await started.wait()
+            allowed = False
+        with pytest.raises(RuntimeError, match="no longer current"):
+            await pending
+
+        stdin.write.assert_not_called()
+        assert run.pending == {}
+
+    @pytest.mark.asyncio
     async def test_stack_trace_request_format(self):
         """Test stackTrace request has correct format."""
         client = DAPClient("/path")

@@ -2574,10 +2574,10 @@ async def test_tracepoint_auto_resume():
         mgr = TracepointManager()
         m._tracepoint_manager = mgr
         tp_line = _find_line("sum += i")
-        mgr.add(SOURCE, tp_line, "i")
+        tp = mgr.add(SOURCE, tp_line, "i")
 
         # Set real DAP breakpoint for the tracepoint
-        await m.add_breakpoint(SOURCE, tp_line)
+        await m.add_breakpoint(SOURCE, tp_line, tracepoint_id=tp.id)
 
         # Also set a REAL breakpoint on "return sum" to eventually stop
         return_line = _find_line("return sum")

@@ -108,7 +108,9 @@ class _ResourceOutputBuffer(deque[OutputEntry]):
 class SessionManager:
     """Manages debug session lifecycle and state."""
 
-    def __init__(self, netcoredbg_path: str | None = None, project_path: str | None = None):
+    def __init__(
+        self, netcoredbg_path: str | None = None, project_path: str | None = None
+    ):
         self._client = DAPClient(netcoredbg_path)
         self._state = self._create_session_state()
         self._breakpoints = BreakpointRegistry()
@@ -123,10 +125,17 @@ class SessionManager:
         self._build_manager = BuildManager()
         self._last_build_result: BuildResult | None = None
         self._last_launch_config: dict[str, Any] | None = None  # For restart
-        self._last_version_warning: str | None = None  # dbgshim version mismatch warning
+        self._last_version_warning: str | None = (
+            None  # dbgshim version mismatch warning
+        )
         self._session_id: str | None = None
         self._stealth_mode = False
         self._lifecycle_lock = asyncio.Lock()
+        self._breakpoint_lock = asyncio.Lock()
+        self._breakpoint_revision = 0
+        self._pending_breakpoint_mutations = 0
+        self._breakpoint_sync_unknown: set[str] = set()
+        self._execution_revision = 0
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._hygiene = RuntimeHygieneService(self)
@@ -137,7 +146,9 @@ class SessionManager:
         self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
         self._stealth_foreground_restore_worker: asyncio.Task[bool] | None = None
         self._stealth_foreground_restore_join_task: asyncio.Task[None] | None = None
-        self._resource_update_callback: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
+        self._resource_update_callback: (
+            Callable[[tuple[str, ...]], Awaitable[None]] | None
+        ) = None
         # At most one live delivery task per URI; further revisions coalesce.
         self._resource_update_tasks: dict[str, asyncio.Task[None]] = {}
         self._resource_update_coalesce: set[str] = set()
@@ -344,7 +355,10 @@ class SessionManager:
             epoch=state.activity_epoch,
             captured_at=time.monotonic(),
             state=state.state,
-            exec_state=derive_exec_state(state.state, state.stop_reason),
+            exec_state=(
+                "unknown" if state.execution_outcome_unknown
+                else derive_exec_state(state.state, state.stop_reason)
+            ),
             stop_reason=state.stop_reason,
             debuggee_pid=state.process_id,
             continued_events=state.continued_events,
@@ -920,6 +934,7 @@ class SessionManager:
         if terminal.debuggee_exit_code is not None and self._state.exit_code is None:
             self._state.exit_code = terminal.debuggee_exit_code
 
+        self._state.execution_outcome_unknown = False
         if self._stopping_dap_run == terminal.generation:
             return
         self._set_state(DebugState.TERMINATED)
@@ -967,7 +982,9 @@ class SessionManager:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._update_hit_count(body.thread_id))
-                loop.create_task(self._check_tracepoint(body.thread_id))
+                loop.create_task(
+                    self._check_tracepoint(body.thread_id, self._trace_stop_token())
+                )
             except RuntimeError:
                 # No running event loop (test environment) — fall through to normal stop.
                 self._set_state(DebugState.STOPPED)
@@ -983,78 +1000,221 @@ class SessionManager:
                 except RuntimeError:
                     pass
 
-    async def _check_tracepoint(self, thread_id: int) -> None:
-        """Check if the stopped location matches a tracepoint and handle it.
+    def _trace_stop_token(self) -> tuple[SessionState, int, int, int, object | None]:
+        return (
+            self._state,
+            self._state.stopped_events,
+            self._state.continued_events,
+            self._execution_revision,
+            self._active_dap_run,
+        )
 
-        When a tracepoint is found, evaluates the expression and resumes execution
-        WITHOUT surfacing a STOPPED state to callers (transparent non-stopping hit).
-        When no tracepoint matches, transitions to STOPPED and signals _execution_event
-        so that callers waiting on wait_for_stopped() are unblocked.
+    def _trace_stop_is_current(
+        self, token: tuple[SessionState, int, int, int, object | None]
+    ) -> bool:
+        state, stopped, continued, execution, generation = token
+        return (
+            self._state is state
+            and state.stopped_events == stopped
+            and state.continued_events == continued
+            and self._execution_revision == execution
+            and self._active_dap_run == generation
+            and self._stopping_dap_run is None
+            and state.transport_terminal is None
+            and state.exit_code is None
+            and not state.execution_outcome_unknown
+            and state.state != DebugState.TERMINATED
+        )
 
-        Entire operation is wrapped in a 5s timeout to prevent event loop starvation
-        if DAP requests hang (e.g., debugger unresponsive).
-        """
-        try:
-            await asyncio.wait_for(self._check_tracepoint_inner(thread_id), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("_check_tracepoint timed out after 5s — falling back to STOPPED")
+    def _publish_trace_stop(
+        self, token: tuple[SessionState, int, int, int, object | None]
+    ) -> None:
+        if self._trace_stop_is_current(token):
             self._set_state(DebugState.STOPPED)
             self._execution_event.set()
+
+    def _publish_trace_outcome_unknown(
+        self, token: tuple[SessionState, int, int, int, object | None]
+    ) -> None:
+        if self._trace_stop_is_current(token):
+            self._state.execution_outcome_unknown = True
+            self._state.current_frame_id = None
+            self._execution_event.set()
+            self._publish_resource_updates(STATE_URI)
+
+    async def _check_tracepoint(
+        self,
+        thread_id: int,
+        token: tuple[SessionState, int, int, int, object | None] | None = None,
+    ) -> None:
+        """Resolve a stopped event without resuming a newer or ambiguous stop."""
+        token = token or self._trace_stop_token()
+        try:
+            await asyncio.wait_for(
+                self._check_tracepoint_inner(thread_id, token), timeout=5.0
+            )
+        except asyncio.CancelledError:
+            self._publish_trace_stop(token)
+            raise
+        except asyncio.TimeoutError:
+            logger.warning("Tracepoint check timed out")
+            self._publish_trace_stop(token)
         except Exception as e:
             logger.warning("Tracepoint check failed: %s", e)
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+            self._publish_trace_stop(token)
 
-    async def _check_tracepoint_inner(self, thread_id: int) -> None:
-        """Inner tracepoint check logic (called with timeout wrapper)."""
-        mgr = getattr(self, "_tracepoint_manager", None)
-        if mgr is None:
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+    async def _check_tracepoint_inner(
+        self,
+        thread_id: int,
+        token: tuple[SessionState, int, int, int, object | None] | None = None,
+    ) -> None:
+        token = token or self._trace_stop_token()
+        manager = self._tracepoint_manager
+        revision = self._breakpoint_revision
+        if (manager is None or self._pending_breakpoint_mutations
+                or self._breakpoint_sync_unknown or not self._trace_stop_is_current(token)):
+            self._publish_trace_stop(token)
             return
 
         frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
-        if not frames:
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+        if not self._trace_stop_is_current(token):
             return
-
+        if not frames or not frames[0].source or not frames[0].line:
+            self._publish_trace_stop(token)
+            return
         top = frames[0]
-        logger.debug("_check_tracepoint: top frame source=%s line=%s", top.source, top.line)
-        if not top.source or not top.line:
-            logger.debug("_check_tracepoint: no source/line, falling through to STOPPED")
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+        source = top.source
+        assert source is not None
+        tp = manager.find_tracepoint_for_location(source, top.line)
+        if tp is None or revision != self._breakpoint_revision:
+            self._publish_trace_stop(token)
             return
 
-        tp = mgr.find_tracepoint_for_location(top.source, top.line)
-        if tp is None:
-            logger.debug("_check_tracepoint: no matching tracepoint, normal STOPPED")
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+        normalize = self._breakpoints._normalize_path
+        trace_file = normalize(tp.file)
+        frame_file = normalize(source)
+        matches = [
+            item
+            for item in manager.tracepoints.values()
+            if item.active
+            and normalize(item.file) == trace_file
+            and top.line in (item.line, item.dap_line)
+        ]
+        physical = self._breakpoints.get_for_file(tp.file)
+        if not matches or any(
+            not any(item.id in bp.tracepoint_owners for bp in physical)
+            for item in matches
+        ):
+            self._publish_trace_stop(token)
             return
-        logger.debug("_check_tracepoint: matched tracepoint %s, evaluating", tp.id)
 
-        # Check whether a USER-defined breakpoint (not tracepoint-owned) exists here.
-        # Tracepoints add their own DAP breakpoint — exclude those from the check.
-        tracepoint_lines = set()
-        for t in mgr.tracepoints.values():
-            if t.active:
-                tracepoint_lines.add(t.line)
-                if t.dap_line is not None:
-                    tracepoint_lines.add(t.dap_line)
-        user_bps = self._breakpoints.get_for_file(top.source)
-        has_user_breakpoint = any(
-            bp.line == top.line and bp.line not in tracepoint_lines for bp in user_bps
-        )
+        def trace_is_current() -> bool:
+            return (
+                self._trace_stop_is_current(token)
+                and revision == self._breakpoint_revision
+                and not self._pending_breakpoint_mutations
+                and not self._breakpoint_sync_unknown
+                and self._tracepoint_manager is manager
+                and all(item.active and item.id in manager.tracepoints for item in matches)
+            )
+
+        candidates = [
+            (path, bp)
+            for path, breakpoints in self._breakpoints.get_all().items()
+            if normalize(path) in (trace_file, frame_file)
+            or os.path.normcase(os.path.basename(path))
+            == os.path.normcase(os.path.basename(source))
+            for bp in breakpoints
+            if bp.user_owned and top.line in (bp.line, bp.dap_line)
+        ]
+        has_user_breakpoint = bool(self._breakpoints.get_function_breakpoints())
+        for path, bp in candidates:
+            if has_user_breakpoint:
+                break
+            if (
+                normalize(path) != trace_file
+                or frame_file != trace_file
+                or not bp.tracepoint_owners
+                or bp.line != tp.line
+                or not bp.condition
+                or bp.hit_condition
+                or bp.log_message
+            ):
+                has_user_breakpoint = True
+                break
+            condition_admitted = False
+
+            def admit_condition() -> bool:
+                nonlocal condition_admitted
+                condition_admitted = trace_is_current()
+                return condition_admitted
+
+            try:
+                response = await self._client.evaluate(
+                    bp.condition, top.id, admission=admit_condition
+                )
+            except BaseException:
+                if condition_admitted:
+                    self._publish_trace_outcome_unknown(token)
+                raise
+            if not self._trace_stop_is_current(token):
+                return
+            if (
+                not response.success
+                or response.body.get("type") != "bool"
+                or response.body.get("result") != "false"
+            ):
+                has_user_breakpoint = True
+                break
+
+        if revision != self._breakpoint_revision or not matches:
+            self._publish_trace_stop(token)
+            return
+        for item in matches:
+            completed = await manager.on_tracepoint_hit(
+                item,
+                self,
+                thread_id,
+                has_user_breakpoint=True,
+                top_frame=top,
+                is_current=trace_is_current,
+                on_uncertain=lambda: self._publish_trace_outcome_unknown(token),
+            )
+            if not self._trace_stop_is_current(token):
+                return
+            if not completed:
+                self._publish_trace_stop(token)
+                return
+            if not trace_is_current():
+                self._publish_trace_stop(token)
+                return
 
         if has_user_breakpoint:
-            self._set_state(DebugState.STOPPED)
-            self._execution_event.set()
+            self._publish_trace_stop(token)
+            return
 
-        await mgr.on_tracepoint_hit(
-            tp, self, thread_id, has_user_breakpoint=has_user_breakpoint, top_frame=top
-        )
+        admitted_revision: int | None = None
+
+        def admit_continue() -> bool:
+            nonlocal admitted_revision
+            if not trace_is_current():
+                return False
+            self._execution_revision += 1
+            admitted_revision = self._execution_revision
+            return True
+
+        try:
+            response = await self._client.continue_execution(thread_id, admission=admit_continue)
+        except BaseException:
+            if admitted_revision is not None:
+                state, stopped, continued, _, generation = token
+                self._publish_trace_outcome_unknown(
+                    (state, stopped, continued, admitted_revision, generation)
+                )
+            raise
+        if not response.success and admitted_revision is not None:
+            state, stopped, continued, _, generation = token
+            self._publish_trace_stop((state, stopped, continued, admitted_revision, generation))
 
     def _resolve_hit_count_key(self, source: str, runtime_line: int) -> tuple[str, int]:
         """Map a runtime stop line back to the user-requested breakpoint line.
@@ -1311,9 +1471,23 @@ class SessionManager:
             for file_path, bps in self.breakpoints.get_all().items():
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
-                        self.breakpoints.remove(file_path, bp.line)
+                        if bp.tracepoint_owners:
+                            manager = self._tracepoint_manager
+                            if manager is not None:
+                                for tp in manager.tracepoints.values():
+                                    if tp.breakpoint_id == body.breakpoint_id:
+                                        tp.breakpoint_id = None
+                                        tp.dap_line = None
+                            bp.verified = False
+                            bp.id = None
+                            bp.dap_line = None
+                        else:
+                            self.breakpoints.remove(file_path, bp.line)
+                        self._breakpoint_revision += 1
                         self._publish_resource_updates(BREAKPOINTS_URI)
-                        logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
+                        logger.info(
+                            f"Breakpoint {body.breakpoint_id} removed by adapter"
+                        )
                         return
         elif body.reason in ("changed", "new") and body.breakpoint_id is not None:
             # Update existing breakpoint's verified status; record DAP-adjusted line if changed.
@@ -1330,8 +1504,11 @@ class SessionManager:
                         # Propagate to any tracepoint whose underlying bp matches
                         mgr = getattr(self, "_tracepoint_manager", None)
                         if mgr is not None:
-                            mgr.set_dap_line_for_breakpoint(body.breakpoint_id, bp.dap_line)
+                            mgr.set_dap_line_for_breakpoint(
+                                body.breakpoint_id, bp.dap_line
+                            )
                         if old_value != (bp.verified, bp.dap_line):
+                            self._breakpoint_revision += 1
                             self._publish_resource_updates(BREAKPOINTS_URI)
                         logger.debug(
                             f"Breakpoint {body.breakpoint_id} updated: "
@@ -1430,6 +1607,7 @@ class SessionManager:
         The DAP event handlers (_on_stopped, _on_terminated, _on_exited)
         will set this new event when the program stops.
         """
+        self._execution_revision += 1
         self._execution_event = asyncio.Event()
 
     async def wait_for_stopped(
@@ -1457,7 +1635,9 @@ class SessionManager:
         while True:
             remaining = timeout - (time.monotonic() - start_time)
             if remaining <= 0:
-                process_alive = self._client.is_running and self._state.process_id is not None
+                process_alive = (
+                    self._client.is_running and self._state.process_id is not None
+                )
                 logger.warning(
                     f"wait_for_stopped timed out after {timeout}s "
                     f"(state={self._state.state.value}, process_alive={process_alive})"
@@ -1486,23 +1666,31 @@ class SessionManager:
                     try:
                         await heartbeat_callback(elapsed)
                     except Exception as exc:  # noqa: BLE001
-                        logger.debug("heartbeat_callback raised %s: %s", type(exc).__name__, exc)
+                        logger.debug(
+                            "heartbeat_callback raised %s: %s", type(exc).__name__, exc
+                        )
                 # Continue waiting
 
         return StoppedSnapshot(
-            state=self._state.state,
+            state=DebugState.TERMINATED
+            if self._state.exit_code is not None
+            else self._state.state,
             stop_reason=self._state.stop_reason,
             thread_id=self._state.current_thread_id,
             timed_out=False,
             exit_code=self._state.exit_code,
             exception_info=self._state.exception_info,
-            process_alive=self._state.state != DebugState.TERMINATED,
+            process_alive=None if self._state.execution_outcome_unknown else (
+                self._state.exit_code is None and self._state.state != DebugState.TERMINATED
+            ),
             description=self._state.stop_description,
             text=self._state.stop_text,
+            outcome_unknown=self._state.execution_outcome_unknown,
         )
 
     async def quick_evaluate(self, expression: str, frame_id: int | None = None) -> dict[str, Any]:
         """Pause → evaluate → resume atomically. For use while program is running."""
+        self._require_confirmed_execution()
         if self._state.state != DebugState.RUNNING:
             raise RuntimeError(
                 f"Program is not running (state: {self._state.state.value}). "
@@ -2233,6 +2421,7 @@ class SessionManager:
             # pre-build gate. Only a joined successful drain releases it.
             if joined_and_drained and self._active_dap_run == stopping_generation:
                 self._active_dap_run = None
+                self._breakpoint_sync_unknown.clear()
             if self._stopping_dap_run == stopping_generation:
                 self._stopping_dap_run = None
 
@@ -2340,14 +2529,46 @@ class SessionManager:
                 bps[i].id = dap_bp.get("id")
         return response
 
-    async def _sync_file_breakpoints(self, file_path: str) -> None:
-        """Sync breakpoints for a single file."""
-        breakpoints = self._breakpoints.get_for_file(file_path)
-        dap_breakpoints = [bp.to_dap() for bp in breakpoints]
+    def _require_confirmed_breakpoint_sync(self, file_path: str) -> None:
+        if self._breakpoints._normalize_path(file_path) in self._breakpoint_sync_unknown:
+            raise RuntimeError(
+                "Breakpoint sync is unconfirmed; stop the debug session before retrying"
+            )
 
-        response = await self._client.set_breakpoints(file_path, dap_breakpoints)
-        if response.success:
-            self._breakpoints.update_from_dap(file_path, response.body.get("breakpoints", []))
+    async def _sync_file_breakpoints(self, file_path: str) -> None:
+        """Sync one complete file set; retain uncertainty until the adapter drains."""
+        normalized = self._breakpoints._normalize_path(file_path)
+        self._require_confirmed_breakpoint_sync(file_path)
+        breakpoints = self._breakpoints.get_for_file(file_path)
+        state = self._state
+        generation = self._active_dap_run
+        client = self._client
+        try:
+            response = await client.set_breakpoints(
+                file_path, [bp.to_dap() for bp in breakpoints]
+            )
+            if (self._state is not state or self._active_dap_run != generation
+                    or self._client is not client):
+                raise RuntimeError("Breakpoint sync session changed")
+            if not response.success:
+                raise RuntimeError(response.message or "setBreakpoints failed")
+        except BaseException:
+            if (self._state is state and self._active_dap_run == generation
+                    and self._client is client):
+                self._breakpoint_sync_unknown.add(normalized)
+                self._breakpoint_revision += 1
+            raise
+        self._breakpoints.update_from_dap(file_path, response.body.get("breakpoints", []))
+        self._breakpoint_revision += 1
+        manager = self._tracepoint_manager
+        if manager is not None:
+            for tp in manager.tracepoints.values():
+                if self._breakpoints._normalize_path(tp.file) != normalized:
+                    continue
+                bp = next((item for item in breakpoints if tp.id in item.tracepoint_owners), None)
+                if bp is not None:
+                    tp.breakpoint_id = bp.id
+                    tp.dap_line = bp.dap_line
 
     # Breakpoint operations
 
@@ -2357,74 +2578,109 @@ class SessionManager:
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
     ) -> Breakpoint:
-        """Add a breakpoint."""
-        before = self._breakpoint_resource_snapshot()
+        """Add a user or tracepoint owner of a source breakpoint."""
+        self._pending_breakpoint_mutations += 1
+        self._breakpoint_revision += 1
         try:
-            bp = Breakpoint(
-                file=file,
-                line=line,
-                condition=condition,
-                hit_condition=hit_condition,
-            )
-            self._breakpoints.add(bp)
-
-            if self.is_active:
-                await self._sync_file_breakpoints(file)
-
-            return bp
+            async with self._breakpoint_lock:
+                self._require_confirmed_breakpoint_sync(file)
+                before = self._breakpoint_resource_snapshot()
+                try:
+                    bp = self._breakpoints.add(
+                        Breakpoint(
+                            file=file, line=line, condition=condition, hit_condition=hit_condition
+                        ),
+                        tracepoint_id=tracepoint_id,
+                    )
+                    if self.is_active:
+                        await self._sync_file_breakpoints(file)
+                    return bp
+                finally:
+                    self._publish_breakpoints_if_changed(before)
         finally:
-            self._publish_breakpoints_if_changed(before)
+            self._pending_breakpoint_mutations -= 1
 
-    async def remove_breakpoint(self, file: str, line: int) -> bool:
-        """Remove a breakpoint."""
-        before = self._breakpoint_resource_snapshot()
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool:
+        """Remove one exact owner only after its physical sync is confirmed."""
+        self._pending_breakpoint_mutations += 1
+        self._breakpoint_revision += 1
         try:
-            removed = self._breakpoints.remove(file, line)
-            if removed and self.is_active:
-                await self._sync_file_breakpoints(file)
-            return removed
+            async with self._breakpoint_lock:
+                self._require_confirmed_breakpoint_sync(file)
+                before = self._breakpoint_resource_snapshot()
+                snapshot = self._breakpoints.snapshot_for_file(file)
+                state, generation, client = self._state, self._active_dap_run, self._client
+                try:
+                    removed = self._breakpoints.remove(file, line, tracepoint_id=tracepoint_id)
+                    if removed and self.is_active:
+                        try:
+                            await self._sync_file_breakpoints(file)
+                        except BaseException:
+                            if (self._state is state and self._active_dap_run == generation
+                                    and self._client is client):
+                                self._breakpoints.restore_for_file(file, snapshot)
+                                self._breakpoint_revision += 1
+                            raise
+                    return removed
+                finally:
+                    self._publish_breakpoints_if_changed(before)
         finally:
-            self._publish_breakpoints_if_changed(before)
+            self._pending_breakpoint_mutations -= 1
 
     async def clear_breakpoints(self, file: str | None = None) -> int:
-        """Clear breakpoints. Without file, also clears function breakpoints."""
-        before = self._breakpoint_resource_snapshot()
+        """Clear user owners while preserving tracepoints and unconfirmed intent."""
+        self._pending_breakpoint_mutations += 1
+        self._breakpoint_revision += 1
         try:
-            if file:
-                files = [file]
-            else:
-                files = self._breakpoints.get_files()
+            async with self._breakpoint_lock:
+                before = self._breakpoint_resource_snapshot()
+                try:
+                    files = [file] if file else self._breakpoints.get_files()
+                    count = 0
+                    for path in files:
+                        self._require_confirmed_breakpoint_sync(path)
+                        snapshot = self._breakpoints.snapshot_for_file(path)
+                        state, generation, client = self._state, self._active_dap_run, self._client
+                        removed = self._breakpoints.clear(path)
+                        if removed and self.is_active:
+                            try:
+                                await self._sync_file_breakpoints(path)
+                            except BaseException:
+                                if (self._state is state and self._active_dap_run == generation
+                                        and self._client is client):
+                                    self._breakpoints.restore_for_file(path, snapshot)
+                                    self._breakpoint_revision += 1
+                                raise
+                        count += removed
 
-            count = self._breakpoints.clear(file)
-
-            if self.is_active:
-                for f in files:
-                    await self._client.set_breakpoints(f, [])
-
-            # Without file filter, also drop function breakpoints — they're not
-            # file-scoped and otherwise persist invisibly across restart cycles.
-            if not file:
-                existing_function_breakpoints = self._breakpoints.get_function_breakpoints()
-                fbp_count = len(existing_function_breakpoints)
-                if fbp_count > 0:
-                    self._breakpoints.clear_function_breakpoints()
-                    if self.is_active:
-                        try:
-                            response = await self._sync_function_breakpoints()
-                            if response is not None and not response.success:
-                                raise RuntimeError(
-                                    response.message or "setFunctionBreakpoints failed"
-                                )
-                        except Exception:
-                            for bp in existing_function_breakpoints:
-                                self._breakpoints.add_function_breakpoint(bp)
-                            raise
-                    count += fbp_count
-
-            return count
+                    if not file:
+                        existing = self._breakpoints.get_function_breakpoints()
+                        fbp_count = len(existing)
+                        if fbp_count:
+                            self._breakpoints.clear_function_breakpoints()
+                            self._breakpoint_revision += 1
+                            if self.is_active:
+                                try:
+                                    response = await self._sync_function_breakpoints()
+                                    if response is not None and not response.success:
+                                        raise RuntimeError(
+                                            response.message or "setFunctionBreakpoints failed"
+                                        )
+                                except Exception:
+                                    for bp in existing:
+                                        self._breakpoints.add_function_breakpoint(bp)
+                                    raise
+                            count += fbp_count
+                    return count
+                finally:
+                    self._publish_breakpoints_if_changed(before)
         finally:
-            self._publish_breakpoints_if_changed(before)
+            self._pending_breakpoint_mutations -= 1
 
     async def add_function_breakpoint(
         self, name: str, condition: str | None = None, hit_condition: str | None = None
@@ -2441,28 +2697,37 @@ class SessionManager:
             if not caps.get("supportsFunctionBreakpoints", False):
                 raise RuntimeError("DAP adapter does not support function breakpoints")
 
-        bp = FunctionBreakpoint(name=name, condition=condition, hit_condition=hit_condition)
+        bp = FunctionBreakpoint(
+            name=name, condition=condition, hit_condition=hit_condition
+        )
         self._breakpoints.add_function_breakpoint(bp)
+        self._breakpoint_revision += 1
         if self.is_active:
             try:
                 response = await self._sync_function_breakpoints()
                 if response is not None and not response.success:
-                    raise RuntimeError(response.message or "setFunctionBreakpoints failed")
+                    raise RuntimeError(
+                        response.message or "setFunctionBreakpoints failed"
+                    )
             except Exception:
                 # Rollback: remove from registry if DAP sync failed
                 self._breakpoints.remove_function_breakpoint(name)
+                self._breakpoint_revision += 1
                 raise
         return bp
 
     async def remove_function_breakpoint(self, name: str) -> bool:
         """Remove a function breakpoint."""
         removed = self._breakpoints.remove_function_breakpoint(name)
-        if removed and self.is_active:
-            await self._sync_function_breakpoints()
+        if removed:
+            self._breakpoint_revision += 1
+            if self.is_active:
+                await self._sync_function_breakpoints()
         return removed
 
     async def set_variable(self, variables_reference: int, name: str, value: str) -> dict[str, Any]:
         """Set a variable's value."""
+        self._require_confirmed_execution()
         response = await self._client.set_variable(variables_reference, name, value)
         if response.success:
             return {
@@ -2475,8 +2740,16 @@ class SessionManager:
 
     # Execution control
 
+    def _require_confirmed_execution(self) -> None:
+        if self._state.execution_outcome_unknown:
+            raise RuntimeError(
+                "Tracepoint operation is unconfirmed; "
+                "wait for adapter termination or stop the session"
+            )
+
     async def continue_execution(self, thread_id: int | None = None) -> dict[str, Any]:
         """Continue execution."""
+        self._require_confirmed_execution()
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread to continue")
@@ -2488,6 +2761,7 @@ class SessionManager:
 
     async def step_over(self, thread_id: int | None = None) -> dict[str, Any]:
         """Step over."""
+        self._require_confirmed_execution()
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread for stepping")
@@ -2499,6 +2773,7 @@ class SessionManager:
         self, thread_id: int | None = None, target_id: int | None = None
     ) -> dict[str, Any]:
         """Step into, optionally targeting a specific call on the line."""
+        self._require_confirmed_execution()
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread for stepping")
@@ -2521,6 +2796,7 @@ class SessionManager:
 
     async def step_out(self, thread_id: int | None = None) -> dict[str, Any]:
         """Step out."""
+        self._require_confirmed_execution()
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread for stepping")
@@ -2567,6 +2843,7 @@ class SessionManager:
         self, thread_id: int | None = None, start_frame: int = 0, levels: int = 20
     ) -> list[StackFrame]:
         """Get stack trace for thread."""
+        self._require_confirmed_execution()
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread for stack trace")
@@ -2623,6 +2900,7 @@ class SessionManager:
 
     async def get_scopes(self, frame_id: int | None = None) -> list[dict[str, Any]]:
         """Get scopes for frame."""
+        self._require_confirmed_execution()
         fid = frame_id or self._state.current_frame_id
         logger.debug(
             f"get_scopes: frame_id={frame_id}, current_frame_id={self._state.current_frame_id}, "
@@ -2650,6 +2928,7 @@ class SessionManager:
         count: int | None = None,
     ) -> list[Variable]:
         """Get variables for scope/variable, with optional paging and filtering."""
+        self._require_confirmed_execution()
         response = await self._client.variables(
             variables_reference, filter=filter, start=start, count=count
         )
@@ -2694,6 +2973,7 @@ class SessionManager:
         resolve_symbols: bool = True,
     ) -> list[dict[str, Any]]:
         """Disassemble machine instructions from a DAP memory reference."""
+        self._require_confirmed_execution()
         if not memory_reference:
             raise ValueError("memory_reference is required")
         if instruction_count <= 0:
@@ -2712,6 +2992,7 @@ class SessionManager:
 
     async def get_locations(self, location_reference: int) -> dict[str, Any]:
         """Resolve a DAP locationReference into source coordinates."""
+        self._require_confirmed_execution()
         if location_reference <= 0:
             raise ValueError("location_reference must be greater than 0")
 
@@ -2737,6 +3018,7 @@ class SessionManager:
         count: int = 0,
     ) -> dict[str, Any]:
         """Read bytes from a DAP memory reference."""
+        self._require_confirmed_execution()
         if not memory_reference:
             raise ValueError("memory_reference is required")
         if count < 0:
@@ -2761,6 +3043,7 @@ class SessionManager:
         allow_partial: bool = False,
     ) -> dict[str, Any]:
         """Write base64-encoded bytes to a DAP memory reference."""
+        self._require_confirmed_execution()
         if not memory_reference:
             raise ValueError("memory_reference is required")
         try:
@@ -2785,6 +3068,7 @@ class SessionManager:
         self, expression: str, frame_id: int | None = None, context: str = "watch"
     ) -> dict[str, Any]:
         """Evaluate expression."""
+        self._require_confirmed_execution()
         fid = frame_id or self._state.current_frame_id
         response = await self._client.evaluate(expression, fid, context)
         if response.success:

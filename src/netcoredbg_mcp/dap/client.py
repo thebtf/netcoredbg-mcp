@@ -859,46 +859,88 @@ class DAPClient:
                 pass  # Handler not registered
 
     async def send_request(
-        self, command: str, arguments: dict[str, Any] | None = None, timeout: float = 30.0
+        self,
+        command: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> DAPResponse:
+        """Send one request while the current adapter run accepts work."""
+        return await self._send_request(command, arguments, timeout)
+
+    async def _send_request(
+        self,
+        command: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+        *,
+        admission: Callable[[], bool] | None = None,
     ) -> DAPResponse:
         """Send one request only while the current adapter run accepts work."""
         run = self._run
         if not self.is_running or run is None or run.phase is not _RunPhase.ACTIVE:
             raise RuntimeError("DAP client not running")
 
-        # Admission and registration share the request lock. If finalization
-        # wins first, no future can be registered after the one settlement pass.
-        async with self._request_lock:
-            if self._run is not run or run.phase is not _RunPhase.ACTIVE:
-                raise RuntimeError("DAP client not running")
-            self._seq += 1
-            seq = self._seq
-            future: asyncio.Future[DAPResponse] = asyncio.get_running_loop().create_future()
-            run.pending[seq] = future
-            self._pending = run.pending
-        request = DAPRequest(seq=seq, command=command, arguments=arguments or {})
+        future: asyncio.Future[DAPResponse] | None = None
+        seq = 0
         try:
-            await self._send(request)
+            async with self._request_lock:
+                if self._run is not run or run.phase is not _RunPhase.ACTIVE:
+                    raise RuntimeError("DAP client not running")
+                if admission is not None and (
+                    self._process is not run.process or run.process.stdin is None
+                ):
+                    raise RuntimeError("DAP client has no writable adapter")
+                if admission is not None and not admission():
+                    raise RuntimeError("Tracepoint operation is no longer current")
+                self._seq += 1
+                seq = self._seq
+                future = asyncio.get_running_loop().create_future()
+                run.pending[seq] = future
+                self._pending = run.pending
+                request = DAPRequest(
+                    seq=seq, command=command, arguments=arguments or {}
+                )
+                # Admission and the actual write are contiguous under this lock.
+                if admission is not None:
+                    self._write(request)
+
+            if admission is None:
+                await self._send(request)
+            else:
+                assert run.process.stdin is not None
+                await run.process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError):
+            if future is None:
+                raise
+            run.pending.pop(seq, None)
             if not future.done():
                 future.set_exception(
                     RuntimeError("netcoredbg process died — pending request cancelled")
                 )
-            # Consume the generation's terminal request outcome instead of
-            # leaking a platform-specific pipe exception to the caller.
             return await future
+        except BaseException:
+            if future is not None:
+                run.pending.pop(seq, None)
+                if not future.done():
+                    future.cancel()
+            raise
+
+        assert future is not None
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(seq, None)
-            raise TimeoutError(f"Request {command} timed out after {timeout}s") from None
+            run.pending.pop(seq, None)
+            raise TimeoutError(
+                f"Request {command} timed out after {timeout}s"
+            ) from None
+        except asyncio.CancelledError:
+            run.pending.pop(seq, None)
+            raise
 
-    async def _send(self, request: DAPRequest) -> None:
-        """Send request to netcoredbg."""
+    def _write(self, request: DAPRequest) -> None:
         if not self._process or not self._process.stdin:
             raise RuntimeError("Process not running")
-
         data = request.to_bytes()
         logger.debug(
             ">>> %s: %s",
@@ -906,6 +948,11 @@ class DAPClient:
             format_request_arguments_for_log(request.command, request.arguments),
         )
         self._process.stdin.write(data)
+
+    async def _send(self, request: DAPRequest) -> None:
+        """Send request to netcoredbg."""
+        self._write(request)
+        assert self._process is not None and self._process.stdin is not None
         await self._process.stdin.drain()
 
     async def _read_loop(self, run: _DapRun | None = None) -> None:
@@ -1135,9 +1182,15 @@ class DAPClient:
             {"filters": filters or []},
         )
 
-    async def continue_execution(self, thread_id: int) -> DAPResponse:
-        """Continue execution."""
-        return await self.send_request(Commands.CONTINUE, {"threadId": thread_id})
+    async def continue_execution(
+        self, thread_id: int, *, admission: Callable[[], bool] | None = None
+    ) -> DAPResponse:
+        """Continue execution, optionally fencing the DAP write against stale state."""
+        if admission is None:
+            return await self.send_request(Commands.CONTINUE, {"threadId": thread_id})
+        return await self._send_request(
+            Commands.CONTINUE, {"threadId": thread_id}, admission=admission
+        )
 
     async def step_over(self, thread_id: int) -> DAPResponse:
         """Step over (next line)."""
@@ -1266,13 +1319,16 @@ class DAPClient:
         )
 
     async def evaluate(
-        self, expression: str, frame_id: int | None = None, context: str = "watch"
+        self, expression: str, frame_id: int | None = None, context: str = "watch",
+        *, admission: Callable[[], bool] | None = None,
     ) -> DAPResponse:
         """Evaluate expression."""
         args: dict[str, Any] = {"expression": expression, "context": context}
         if frame_id is not None:
             args["frameId"] = frame_id
-        return await self.send_request(Commands.EVALUATE, args)
+        if admission is None:
+            return await self.send_request(Commands.EVALUATE, args)
+        return await self._send_request(Commands.EVALUATE, args, admission=admission)
 
     async def exception_info(self, thread_id: int) -> DAPResponse:
         """Get exception info for thread."""

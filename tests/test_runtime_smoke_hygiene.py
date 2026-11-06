@@ -51,6 +51,11 @@ class FakeHygieneSession:
             raise RuntimeError(self.clear_failure)
         return self.breakpoints.clear(file)
 
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool:
+        return self.breakpoints.remove(file, line, tracepoint_id=tracepoint_id)
+
     async def configure_exception_breakpoints(self, filters: list[str]) -> bool:
         self.exception_calls.append(list(filters))
         return self.exception_success

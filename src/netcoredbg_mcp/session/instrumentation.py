@@ -36,9 +36,13 @@ class _InstrumentationSession(Protocol):
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
     ) -> Any: ...
 
-    async def remove_breakpoint(self, file: str, line: int) -> bool: ...
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -135,9 +139,17 @@ class InstrumentationGroupService:
             await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
         manager = self._tracepoint_manager(create=False)
         for ref in record["tracepoints"]:
-            if manager is not None:
-                manager.remove(str(ref["id"]))
-            await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
+            tracepoint_id = str(ref["id"])
+            if manager is None or tracepoint_id not in manager.tracepoints:
+                continue
+            removed = await self._session.remove_breakpoint(
+                ref["file"], int(ref["line"]), tracepoint_id=tracepoint_id
+            )
+            if removed or not any(
+                tracepoint_id in bp.tracepoint_owners
+                for bp in self._session.breakpoints.get_for_file(str(ref["file"]))
+            ):
+                manager.remove(tracepoint_id)
 
         leaks = self._leaks(record)
         if leaks:
@@ -194,10 +206,15 @@ class InstrumentationGroupService:
         assert manager is not None
         tracepoint = manager.add(file, line, expression)
         try:
-            bp = await self._session.add_breakpoint(file, line)
-        except Exception:
-            manager.remove(tracepoint.id)
-            raise
+            bp = await self._session.add_breakpoint(file, line, tracepoint_id=tracepoint.id)
+        except Exception as exc:
+            retained = any(
+                tracepoint.id in bp.tracepoint_owners
+                for bp in self._session.breakpoints.get_for_file(file)
+            )
+            if not retained:
+                manager.remove(tracepoint.id)
+            raise RuntimeError(f"Tracepoint {tracepoint.id} setup failed: {exc}") from exc
         tracepoint.breakpoint_id = getattr(bp, "id", None)
         tracepoint.dap_line = getattr(bp, "dap_line", None)
         return {
@@ -217,11 +234,18 @@ class InstrumentationGroupService:
     ) -> None:
         manager = self._tracepoint_manager(create=False)
         for ref in reversed(tracepoint_refs):
-            if manager is not None:
-                with suppress(Exception):
-                    manager.remove(str(ref["id"]))
+            tracepoint_id = str(ref["id"])
+            if manager is None or tracepoint_id not in manager.tracepoints:
+                continue
             with suppress(Exception):
-                await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
+                removed = await self._session.remove_breakpoint(
+                    ref["file"], int(ref["line"]), tracepoint_id=tracepoint_id
+                )
+                if removed or not any(
+                    tracepoint_id in bp.tracepoint_owners
+                    for bp in self._session.breakpoints.get_for_file(str(ref["file"]))
+                ):
+                    manager.remove(tracepoint_id)
         for ref in reversed(breakpoint_refs):
             with suppress(Exception):
                 await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
@@ -266,9 +290,11 @@ class InstrumentationGroupService:
     def _leaks(self, record: dict[str, Any]) -> list[dict[str, Any]]:
         leaks = []
         manager = self._tracepoint_manager(create=False)
-        for ref in [*record["breakpoints"], *record["tracepoints"]]:
+        for ref in record["breakpoints"]:
             for bp in self._session.breakpoints.get_for_file(str(ref["file"])):
-                if int(getattr(bp, "line", -1)) == int(ref["line"]):
+                if int(getattr(bp, "line", -1)) == int(ref["line"]) and getattr(
+                    bp, "user_owned", True
+                ):
                     leaks.append(
                         {
                             "kind": "breakpoint",
@@ -277,11 +303,18 @@ class InstrumentationGroupService:
                         }
                     )
                     break
-        if manager is not None:
-            tracepoints = manager.tracepoints
-            for ref in record["tracepoints"]:
-                if ref["id"] in tracepoints:
-                    leaks.append({"kind": "tracepoint", "id": ref["id"]})
+        tracepoints = manager.tracepoints if manager is not None else {}
+        for ref in record["tracepoints"]:
+            tracepoint_id = str(ref["id"])
+            if tracepoint_id in tracepoints:
+                leaks.append({"kind": "tracepoint", "id": tracepoint_id})
+            for bp in self._session.breakpoints.get_for_file(str(ref["file"])):
+                if bp.line == int(ref["line"]) and tracepoint_id in bp.tracepoint_owners:
+                    leaks.append({
+                        "kind": "breakpoint",
+                        "file": os.path.normpath(str(ref["file"])),
+                        "line": int(ref["line"]),
+                    })
         return leaks
 
     def _pass(self, reason: str, **payload: Any) -> InstrumentationResult:

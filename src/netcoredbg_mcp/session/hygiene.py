@@ -26,6 +26,9 @@ class _HygieneSession(Protocol):
     def is_active(self) -> bool: ...
 
     async def clear_breakpoints(self, file: str | None = None) -> int: ...
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool: ...
     async def configure_exception_breakpoints(self, filters: list[str]) -> bool: ...
 
 
@@ -148,7 +151,7 @@ class RuntimeHygieneService:
 
         if clear_breakpoints:
             try:
-                tracepoints_removed = self._clear_tracepoints(file)
+                tracepoints_removed = await self._clear_tracepoints(file)
             except Exception as exc:
                 cleanup_errors.append(CleanupError("clear_tracepoints", str(exc)))
             try:
@@ -193,7 +196,7 @@ class RuntimeHygieneService:
             return 0
         return int(manager.clear_log())
 
-    def _clear_tracepoints(self, file: str | None) -> int:
+    async def _clear_tracepoints(self, file: str | None) -> int:
         manager = getattr(self._session, "_tracepoint_manager", None)
         remove = getattr(manager, "remove", None)
         if manager is None or not callable(remove):
@@ -205,6 +208,9 @@ class RuntimeHygieneService:
         for tracepoint_id, tracepoint in list(tracepoints.items()):
             if not _tracepoint_in_scope(tracepoint, file):
                 continue
+            await self._session.remove_breakpoint(
+                str(tracepoint.file), int(tracepoint.line), tracepoint_id=str(tracepoint_id)
+            )
             if remove(str(tracepoint_id)) is not None:
                 removed += 1
         return removed
