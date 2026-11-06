@@ -1922,11 +1922,6 @@ internal static class Program
                 if (name == VerifyDebugFreshness)
                 {
                     if (_legacyStarting || _legacyStopping || _legacyAttachClosing) return LegacyError("A debug session transition is in progress.");
-                    if (muxId is not null && _legacySessionId is not null)
-                    {
-                        _legacyCompositeEvaluations++;
-                        compositeEvaluationHeld = true;
-                    }
                     var freshnessGeneration = _legacySessionGeneration;
                     var freshnessSessionId = _legacySessionId;
                     var projectPath = freshnessSessionId is not null && _legacyAttachSession is null ? _legacyResolvedLaunch?.ProjectRoot : null;
@@ -1939,6 +1934,8 @@ internal static class Program
                     gateHeld = true;
                     if (freshnessGeneration != _legacySessionGeneration || freshnessSessionId != _legacySessionId || _legacyStarting || _legacyStopping || _legacyAttachClosing)
                         return LegacyError("Debug session changed before freshness observation.");
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner is not null && _legacyOwner != muxId)
+                        return LegacyError("Debug session is owned by another agent.");
                     NetCoreDbgSession? freshnessSession = null;
                     if (freshnessSessionId is not null && (!_sessions.TryGetValue(freshnessSessionId, out freshnessSession) || !_isUsable(freshnessSession)))
                         return LegacyError("Debug session state is unavailable.");
@@ -1971,6 +1968,8 @@ internal static class Program
                     if (freshnessGeneration != _legacySessionGeneration || freshnessSessionId != _legacySessionId || _legacyStarting || _legacyStopping || _legacyAttachClosing
                         || (freshnessSessionId is not null && (!_sessions.TryGetValue(freshnessSessionId, out var currentFreshnessSession) || !ReferenceEquals(currentFreshnessSession, freshnessSession))))
                         return LegacyError("Debug session changed before freshness observation.");
+                    if (muxId is not null && _legacyHasOwner && _legacyOwner is not null && _legacyOwner != muxId)
+                        return LegacyError("Debug session is owned by another agent.");
                     if (error is not null) return LegacyError(error);
                     cancellationToken.ThrowIfCancellationRequested();
                     return LegacyBoundedUtilityResponse(data!, LegacySnapshot().State);

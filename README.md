@@ -89,7 +89,8 @@ inventories or oversized results are refused. Missing requested observations
 produce warnings; without expectations and `require_active_process`, `PASS` can
 occur even without a session or observations. An identified foreign mux owner is
 refused, an untagged direct read remains allowed, and this read does not claim
-ownership. Native name matching uses .NET case-insensitive comparison
+or hold ownership. A named read is refused if a different named owner appears before
+it publishes its result. Native name matching uses .NET case-insensitive comparison
 and invariant lowercasing, not Python's full Unicode `casefold`; path display and
 normalization also follow .NET rules. Full parity remains open (#552, #550). The
 standalone tool does not populate Python runtime-smoke evidence storage.

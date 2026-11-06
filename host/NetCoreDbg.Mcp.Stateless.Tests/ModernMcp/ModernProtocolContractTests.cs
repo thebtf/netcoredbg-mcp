@@ -401,6 +401,62 @@ public sealed class ModernProtocolContractTests
         finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
     }
 
+    [Fact]
+    public async Task LegacyCompat_Freshness_UnownedReadDoesNotProtectFutureOwner()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = ModernMcpScratchDirectory.Create();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["NETCOREDBG_PROJECT_ROOT"] = null,
+                    ["MCP_PROJECT_ROOT"] = null,
+                    ["NETCOREDBG_SESSION_TIMEOUT"] = "0",
+                },
+                RootsHandler: async token =>
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(token);
+                    return new ListRootsResult { Roots = [new Root { Uri = new Uri(root).AbsoluteUri }] };
+                }));
+            using var target = driver.StartOwnedTarget();
+            var original = new JsonObject { ["muxSessionId"] = "freshness-original" };
+            var reader = new JsonObject { ["muxSessionId"] = "freshness-reader" };
+            var first = new JsonObject { ["muxSessionId"] = "freshness-first-owner" };
+            var second = new JsonObject { ["muxSessionId"] = "freshness-second-owner" };
+            Task<JsonObject>? pending = null;
+            JsonObject? firstResult = null, secondResult = null, readResult = null;
+            try
+            {
+                Assert.True((await LegacyConsoleCallAsync(driver, "attach_debug", new JsonObject { ["process_id"] = target.Id }, original))["data"]?["success"]?.GetValue<bool>());
+                pending = LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject(), reader);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                firstResult = await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "first" }, first);
+                secondResult = await LegacyConsoleCallAsync(driver, "output_checkpoint", new JsonObject { ["name"] = "second" }, second);
+                release.TrySetResult();
+                readResult = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                release.TrySetResult();
+                if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+                await FixtureProcess.StopOwnedTargetAsync(target);
+                await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), original));
+                await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), original));
+            }
+            Assert.Equal("PASS", firstResult?["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("PASS", secondResult?["data"]?["status"]?.GetValue<string>());
+            Assert.Contains("owned by another agent", readResult?["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(root); }
+    }
+
 #pragma warning restore MCP9005
 
     [Theory]
