@@ -1353,12 +1353,16 @@ Path checks are point-in-time checks, not a guarantee against concurrent
 replacement. Process metrics are reported as unavailable.
 
 For this subset, `runtime_smoke_validate_probe` validates without starting a
-run. `runtime_smoke_run_probe` and `runtime_smoke_run_plan` start durable runs;
-use `runtime_smoke_wait_for_result`, `runtime_smoke_get_result`, and
-`runtime_smoke_stop` to observe or stop them. Only the default probe
-budgets are supported; `agent_mode`, other lifecycle tools, UI scenarios and
-cross-platform file observation still require Python. Python remains the
-installed default.
+run. `runtime_smoke_start`, `runtime_smoke_run_probe` and `runtime_smoke_run_plan`
+start durable runs. Use `runtime_smoke_wait_for_result`, `runtime_smoke_get_result`,
+`runtime_smoke_evidence_bundle`, `runtime_smoke_tail_events`,
+`runtime_smoke_mark_event_cursor`, `runtime_smoke_get_event_delta`, and
+`runtime_smoke_stop` to observe or stop them. Cursors cover lifecycle events only;
+additional sources and `agent_mode` are blocked. `runtime_smoke_cleanup_contract`
+reports the current host process only and cannot clear unconfirmed cleanup. A new
+host does not prove cleanup in a previous host. Only the default probe budgets
+are supported; UI scenarios and cross-platform file observation still require
+Python. Python remains the installed default.
 
 ### Input provenance
 

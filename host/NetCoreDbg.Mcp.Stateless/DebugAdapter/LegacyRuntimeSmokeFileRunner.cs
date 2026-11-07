@@ -88,7 +88,11 @@ internal static class LegacyRuntimeSmokeFileRunner
         cancellationToken.ThrowIfCancellationRequested();
         var started = Stopwatch.StartNew();
         JsonObject admission = Validate(plan);
-        if (Text(admission["status"]) != "PASS") return admission;
+        if (Text(admission["status"]) != "PASS")
+        {
+            admission["cleanup"] = Cleanup();
+            return admission;
+        }
         var root = (JsonObject)plan!;
         var item = (JsonObject)((JsonArray)root["cases"]!)[0]!;
         var transition = (JsonObject)((JsonArray)item["transitions"]!)[0]!;
