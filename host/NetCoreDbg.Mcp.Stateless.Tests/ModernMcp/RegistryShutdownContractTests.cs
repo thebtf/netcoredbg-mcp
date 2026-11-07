@@ -433,6 +433,126 @@ public sealed class RegistryShutdownContractTests
         }
     }
 
+    [Fact]
+    public async Task LegacyRuntimeSmoke_OutputFieldReadsTheFirstMatchingOwnedOutputValue()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject
+            {
+                ["category"] = "stdout",
+                ["output"] = "source=audio reason=ready nottrack=wrong\nsource=audio reason=ready\u00a0track=custom-audio extra\nsource=audio reason=ready track=later\nsource=audio reason=empty track=\n",
+            }),
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"), outputScript: script);
+        harness.EnableLegacyCompat();
+        const string owner = "smoke-field-owner";
+        JsonObject Probe() => new()
+        {
+            ["kind"] = "output.field",
+            ["phase"] = "after",
+            ["name"] = "track",
+            ["checkpoint"] = "before",
+            ["source"] = "audio",
+            ["reason"] = "ready",
+            ["field"] = "track",
+            ["expected"] = "contains:audio",
+        };
+        JsonObject Plan(JsonObject probe) => new()
+        {
+            ["schema"] = "netcoredbg.runtime_smoke.v2",
+            ["cases"] = new JsonArray(new JsonObject
+            {
+                ["id"] = "field",
+                ["transitions"] = new JsonArray(new JsonObject
+                {
+                    ["settle"] = new JsonObject { ["idle_ms"] = 0 },
+                    ["probes"] = new JsonArray(probe),
+                }),
+            }),
+        };
+        var checkpoint = Content(await harness.CallLegacyWithMetaAsync("output_checkpoint", new JsonObject { ["name"] = "before" }, "field-checkpoint", owner));
+        Assert.Equal("PASS", checkpoint["data"]?["status"]?.GetValue<string>());
+        var started = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "field-launch", owner));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyWithMetaAsync("get_threads", new JsonObject(), "field-barrier", owner);
+
+            var response = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(Probe()) }, "field-sync", owner));
+            Assert.Equal("PASS", response["data"]?["status"]?.GetValue<string>());
+            var observed = response["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0];
+            Assert.Equal("output.field.track", observed?["path"]?.GetValue<string>());
+            Assert.Equal("custom-audio", observed?["value"]?.GetValue<string>());
+            Assert.Equal("contains:audio", observed?["expected"]?.GetValue<string>());
+
+            var wrongExpected = Probe();
+            wrongExpected["expected"] = "other";
+            var mismatch = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(wrongExpected) }, "field-mismatch", owner));
+            Assert.Equal("FAIL", mismatch["data"]?["status"]?.GetValue<string>());
+            var missing = Probe();
+            missing["field"] = "missing";
+            var absent = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(missing) }, "field-missing", owner));
+            Assert.Equal("FAIL", absent["data"]?["status"]?.GetValue<string>());
+
+            var alias = Probe();
+            alias.Remove("expected");
+            alias["expect"] = "custom-audio";
+            var aliasResult = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(alias) }, "field-expect", owner));
+            Assert.Equal("PASS", aliasResult["data"]?["status"]?.GetValue<string>());
+            var precedence = Probe();
+            precedence["expected"] = null;
+            precedence["expect"] = "custom-audio";
+            var precedenceResult = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(precedence) }, "field-precedence", owner));
+            Assert.Equal("FAIL", precedenceResult["data"]?["status"]?.GetValue<string>());
+            var empty = Probe();
+            empty["reason"] = "empty";
+            empty["expected"] = "";
+            var emptyResult = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(empty) }, "field-empty", owner));
+            Assert.Equal("PASS", emptyResult["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("", emptyResult["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0]?["value"]?.GetValue<string>());
+            var invalid = Probe();
+            invalid["source"] = 17;
+            var rejected = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_validate_probe",
+                new JsonObject { ["probe"] = invalid }, "field-invalid", owner));
+            Assert.Equal("BLOCKED", rejected["data"]?["status"]?.GetValue<string>());
+
+            var durable = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe",
+                new JsonObject { ["probe"] = Probe() }, "field-durable", owner));
+            var runId = Assert.IsType<string>(durable["data"]?["run_id"]?.GetValue<string>());
+            var finished = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_wait_for_result",
+                new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "field-wait", owner).WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("PASS", finished["data"]?["status"]?.GetValue<string>());
+            var retained = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_get_result",
+                new JsonObject { ["run_id"] = runId }, "field-result", owner));
+            Assert.Equal("custom-audio", retained["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0]?["value"]?.GetValue<string>());
+
+            _ = await harness.CallLegacyWithMetaAsync("get_output", new JsonObject { ["clear"] = true }, "field-clear", owner);
+            var trimmed = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(Probe()) }, "field-trimmed", owner));
+            Assert.Equal("FAIL", trimmed["data"]?["status"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (started) await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "field-stop", owner).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
     [Theory]
     [InlineData("ready", "PASS")]
     [InlineData("not-ready", "FAIL")]

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
@@ -133,6 +134,73 @@ internal sealed class LegacyOutputEvidence
         };
     }
 
+    internal JsonObject Field(string checkpoint, string source, string reason, string field,
+        DapOutputBuffer? buffer, CancellationToken cancellationToken)
+    {
+        var timer = Stopwatch.StartNew();
+        CheckBudget(timer, cancellationToken);
+        if (!_checkpoints.TryGetValue(checkpoint, out var position))
+            return new JsonObject { ["status"] = "FAIL", ["reason"] = "output checkpoint not found", ["value"] = null };
+        if (_incomplete.Contains(checkpoint))
+            return new JsonObject { ["status"] = "FAIL", ["reason"] = "output checkpoint range incomplete after unpublished start", ["value"] = null };
+        var range = buffer?.CaptureSince(position, timer, cancellationToken) ?? new DapOutputBuffer.Range(true, string.Empty, 0, 0, null);
+        if (!range.Complete)
+            return new JsonObject { ["status"] = "FAIL", ["reason"] = "output checkpoint range trimmed", ["value"] = null };
+
+        var sourceMarker = "source=" + source;
+        var reasonMarker = "reason=" + reason;
+        var fieldMarker = field + "=";
+        var text = range.Text.AsSpan();
+        for (var start = 0; start < text.Length;)
+        {
+            CheckBudget(timer, cancellationToken);
+            var end = start;
+            while (end < text.Length && !IsLineBreak(text[end]))
+            {
+                if ((end & 4095) == 0) CheckBudget(timer, cancellationToken);
+                end++;
+            }
+            var line = text[start..end];
+            if (line.Contains(sourceMarker, StringComparison.Ordinal) && line.Contains(reasonMarker, StringComparison.Ordinal))
+            {
+                var cursor = 0;
+                while (cursor <= line.Length - fieldMarker.Length)
+                {
+                    CheckBudget(timer, cancellationToken);
+                    var offset = line[cursor..].IndexOf(fieldMarker, StringComparison.Ordinal);
+                    if (offset < 0) break;
+                    var index = cursor + offset;
+                    if (index == 0 || PythonWhitespace(line[index - 1]))
+                    {
+                        var valueStart = index + fieldMarker.Length;
+                        var valueEnd = valueStart;
+                        while (valueEnd < line.Length && !PythonWhitespace(line[valueEnd]))
+                        {
+                            if ((valueEnd & 4095) == 0) CheckBudget(timer, cancellationToken);
+                            valueEnd++;
+                        }
+                        CheckBudget(timer, cancellationToken);
+                        return new JsonObject { ["status"] = "PASS", ["value"] = line[valueStart..valueEnd].ToString() };
+                    }
+                    cursor = index + 1;
+                }
+            }
+            if (end == text.Length) break;
+            start = end + 1;
+            if (text[end] == '\r' && start < text.Length && text[start] == '\n') start++;
+        }
+        return new JsonObject
+        {
+            ["status"] = "FAIL",
+            ["reason"] = "output field not found",
+            ["value"] = null,
+            ["requested"] = new JsonObject { ["source"] = source, ["reason"] = reason, ["field"] = field }
+        };
+    }
+
+    private static bool PythonWhitespace(char value) => char.IsWhiteSpace(value) || value is >= '\u001c' and <= '\u001f';
+    private static bool IsLineBreak(char value) => value is '\n' or '\r' or '\v' or '\f' or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029';
+
     internal static void CheckBudget(Stopwatch timer, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -146,7 +214,7 @@ internal sealed class LegacyOutputEvidence
         for (var i = 0; i < text.Length; i++)
         {
             if ((i & 4095) == 0) CheckBudget(timer, cancellationToken);
-            if (text[i] is not ('\n' or '\r' or '\v' or '\f' or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029')) continue;
+            if (!IsLineBreak(text[i])) continue;
             lines.Add(text[start..i]);
             if (text[i] == '\r' && i + 1 < text.Length && text[i + 1] == '\n') i++;
             start = i + 1;
