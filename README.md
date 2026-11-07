@@ -1359,7 +1359,16 @@ and locator fields must be strings or null, at most 4,096 characters each. A
 missing or trimmed checkpoint, session replacement, or unavailable output cannot pass.
 Observations describe the captured session at the time of the check, not later
 output or state. Regex probes remain blocked until Python regex compatibility is
-established. The output path has not yet been verified on Linux or macOS.
+established. An idle-buffer smoke was exercised on Linux; nonempty debugger
+output on Linux and the macOS path have not yet been verified.
+
+A `debug.evaluate` probe requires `get_call_stack` to have selected a frame in
+the current stopped context for the same mux owner. The observed value is the
+debugger's result string; `expected` is compared to it without type coercion.
+Evaluation can execute code and have side effects. Cancellation, timeout, or a
+lost context after dispatch can leave its outcome unknown; do not retry
+automatically. An unconfirmed direct or durable run reports failed cleanup and
+blocks further runs in that host.
 
 For this subset, `runtime_smoke_validate_probe` validates without starting a
 run. `runtime_smoke_start`, `runtime_smoke_run_probe` and `runtime_smoke_run_plan`
