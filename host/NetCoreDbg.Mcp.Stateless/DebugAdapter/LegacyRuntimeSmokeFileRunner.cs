@@ -15,9 +15,9 @@ internal static class LegacyRuntimeSmokeFileRunner
     {
         var result = LegacyRuntimeSmokeValidation.ValidateNative(plan);
         result["accepted_action_kinds"] = new JsonArray("ui.noop");
-        result["accepted_probe_kinds"] = new JsonArray("file.json");
+        result["accepted_probe_kinds"] = new JsonArray("file.json", "output.since");
         result["accepted_probe_phases"] = new JsonArray("after");
-        result["native_execution_subset"] = "Windows only: one inline v2 case with one after-only file.json probe on a drive reported as fixed, an optional ui.noop action, optional default budgets, and no cleanup; validation vocabulary does not imply executable support.";
+        result["native_execution_subset"] = "One inline v2 case with one after-only probe: file.json on a Windows fixed drive, or output.since with regex=false; optional ui.noop, default budgets, and no cleanup. Validation vocabulary does not imply broader execution support.";
         if (Text(result["status"]) == "INVALID_SETUP") return result;
         string? reason = Unsupported(plan);
         if (reason is not null)
@@ -29,7 +29,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             {
                 ["reason"] = reason,
                 ["requested"] = new JsonObject(),
-                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case, one after-only file.json probe, optional ui.noop and default budgets, and no cleanup" },
+                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case, one after-only file.json or literal output.since probe, optional ui.noop and default budgets, and no cleanup" },
                 ["next_step"] = "Use a supported plan or run this plan with the Python runtime."
             };
         }
@@ -43,7 +43,6 @@ internal static class LegacyRuntimeSmokeFileRunner
 
     private static string? Unsupported(JsonNode? plan)
     {
-        if (!OperatingSystem.IsWindows()) return "native file observation is currently Windows-only";
         if (plan is not JsonObject root || Text(root["schema"]) != "netcoredbg.runtime_smoke.v2") return "only inline v2 plans are supported";
         if (!Only(root, "schema", "name", "description", "cases", "budgets")) return "unsupported plan field";
         if (root.ContainsKey("budgets") && (root["budgets"] is not JsonObject budgets || !Only(budgets, "max_actions", "max_elapsed_seconds") || budgets.Count != 2 || !IntegerEquals(budgets["max_actions"], 1) || !IntegerEquals(budgets["max_elapsed_seconds"], 5))) return "only default budgets max_actions=1 and max_elapsed_seconds=5 are supported";
@@ -55,10 +54,21 @@ internal static class LegacyRuntimeSmokeFileRunner
         if (transition.ContainsKey("action") && (transition["action"] is not JsonObject action || !Only(action, "kind") || Text(action["kind"]) != "ui.noop")) return "only ui.noop without extra action fields is supported";
         if (transition["id"] is not null && Text(transition["id"]) is null) return "transition id must be a string";
         if (transition.ContainsKey("settle") && (transition["settle"] is not JsonObject settle || !Only(settle, "idle_ms") || (settle.ContainsKey("idle_ms") && (settle["idle_ms"] is not JsonValue idle || !idle.TryGetValue<int>(out int ms) || ms != 0)))) return "only settle idle_ms=0 or the default settle is supported";
-        if (transition["probes"] is not JsonArray { Count: 1 } probes || probes[0] is not JsonObject probe) return "exactly one file.json probe is supported";
-        if (!Only(probe, "kind", "phase", "name", "path", "jsonpath", "expected")) return "unsupported probe field";
-        if (Text(probe["kind"]) != "file.json" || Text(probe["phase"]) != "after") return "only an explicit after-phase file.json probe is supported";
+        if (transition["probes"] is not JsonArray { Count: 1 } probes || probes[0] is not JsonObject probe) return "exactly one probe is supported";
+        if (Text(probe["phase"]) != "after") return "only an explicit after-phase probe is supported";
         if (probe["name"] is not null && Text(probe["name"]) is null) return "probe name must be a string";
+        if (Text(probe["kind"]) == "output.since")
+        {
+            if (!Only(probe, "kind", "phase", "name", "checkpoint", "required", "forbidden", "regex", "max_matches")) return "unsupported output.since field";
+            if (probe["checkpoint"] is not null && Text(probe["checkpoint"]) is null) return "checkpoint must be a string or null";
+            if (probe["regex"] is not JsonValue regex || !regex.TryGetValue<bool>(out var useRegex) || useRegex) return "output.since requires regex=false until Python regex compatibility is established";
+            if (!Patterns(probe["required"]) || !Patterns(probe["forbidden"])) return "output.since patterns must be bounded lists of strings";
+            if (probe.ContainsKey("max_matches") && (probe["max_matches"] is not JsonValue max || !max.TryGetValue<int>(out var count) || count is < 0 or > 256)) return "max_matches must be an integer between 0 and 256";
+            return null;
+        }
+        if (Text(probe["kind"]) != "file.json") return "only file.json and output.since probes are supported";
+        if (!OperatingSystem.IsWindows()) return "native file observation is currently Windows-only";
+        if (!Only(probe, "kind", "phase", "name", "path", "jsonpath", "expected")) return "unsupported probe field";
         string? path = Text(probe["path"]);
         if (path is null || !LocalFilePath(path)) return "file path must be on a Windows drive reported as fixed, without device names or alternate streams";
         if (string.Equals(Path.GetFileName(path), "diagnostic-latest.json", StringComparison.Ordinal)) return "diagnostic-latest.json alias is not supported";
@@ -83,7 +93,21 @@ internal static class LegacyRuntimeSmokeFileRunner
         { return false; }
     }
 
-    internal static async Task<JsonObject> RunAsync(JsonNode? plan, CancellationToken cancellationToken)
+    internal static bool UsesOutput(JsonNode? plan) =>
+        plan is JsonObject root && root["cases"] is JsonArray { Count: 1 } cases && cases[0] is JsonObject item
+        && item["transitions"] is JsonArray { Count: 1 } transitions && transitions[0] is JsonObject transition
+        && transition["probes"] is JsonArray { Count: 1 } probes && probes[0] is JsonObject probe
+        && Text(probe["kind"]) == "output.since";
+
+    private static bool Patterns(JsonNode? node) => node is null ||
+        (node is JsonArray { Count: <= 256 } items && items.All(item => Text(item) is string text && text.Length <= 4096));
+
+    internal static Task<JsonObject> RunAsync(JsonNode? plan, CancellationToken cancellationToken) =>
+        RunAsync(plan, cancellationToken, null);
+
+
+    internal static async Task<JsonObject> RunAsync(JsonNode? plan, CancellationToken cancellationToken,
+        Func<JsonObject, CancellationToken, Task<JsonObject>>? outputObserver)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var started = Stopwatch.StartNew();
@@ -121,7 +145,11 @@ internal static class LegacyRuntimeSmokeFileRunner
             settled = true;
             metricClock.Stop();
             executionToken.ThrowIfCancellationRequested();
-            observed = await ObserveAsync(probe, executionToken).ConfigureAwait(false);
+            observed = Text(probe["kind"]) == "output.since"
+                ? outputObserver is null
+                    ? new JsonObject { ["name"] = Text(probe["name"]) ?? "output.since", ["kind"] = "output.since", ["status"] = "BLOCKED", ["reason"] = "output observation is unavailable" }
+                    : await outputObserver(probe, executionToken).ConfigureAwait(false)
+                : await ObserveAsync(probe, executionToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             timedOut = budgeted && (executionToken.IsCancellationRequested || started.Elapsed >= TimeSpan.FromSeconds(5));
         }
@@ -136,8 +164,9 @@ internal static class LegacyRuntimeSmokeFileRunner
         string reason = timedOut ? "elapsed time budget exhausted" : status == "PASS" ? "transition passed" : Text(observed!["reason"]) ?? "transition failed";
         string caseReason = status == "PASS" ? "case passed" : reason;
         string resultReason = status == "PASS" ? "runtime smoke v2 scenario passed" : reason;
-        string name = Text(probe["name"]) is string n && n.Length > 0 ? n : "file.json";
-        string key = name == "file.json" && string.IsNullOrEmpty(Text(probe["name"])) ? "file.json" : "file.json." + name;
+        string kind = Text(probe["kind"])!;
+        string name = Text(probe["name"]) is string n && n.Length > 0 ? n : kind;
+        string key = name == kind && string.IsNullOrEmpty(Text(probe["name"])) ? kind : kind + "." + name;
         if (observed is not null) observed["path"] = key;
         JsonNode? value = observed?["value"];
         var after = new JsonObject();
