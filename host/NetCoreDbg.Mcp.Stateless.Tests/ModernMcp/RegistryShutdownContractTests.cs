@@ -62,6 +62,111 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyLaunchCompatibility_InspectsWithoutClaimingAShimSwap()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var versionedAssembly = typeof(RegistryShutdownContractTests).Assembly.Location;
+        var activeMajor = FileVersionInfo.GetVersionInfo(versionedAssembly).FileMajorPart;
+        var targetMajor = activeMajor == 8 ? 9 : 8;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), debuggerPathFactory: scratch =>
+        {
+            var shim = Path.Combine(scratch, "dbgshim.dll");
+            var bytes = File.ReadAllBytes(versionedAssembly);
+            var fileVersion = Assert.IsType<string>(FileVersionInfo.GetVersionInfo(versionedAssembly).FileVersion);
+            var original = System.Text.Encoding.Unicode.GetBytes(fileVersion + "\0");
+            var replacement = System.Text.Encoding.Unicode.GetBytes(fileVersion.Replace('.', ',') + "\0");
+            Assert.NotEqual(original, replacement);
+            var replacements = 0;
+            for (var offset = 0; offset <= bytes.Length - original.Length;)
+            {
+                var index = bytes.AsSpan(offset).IndexOf(original);
+                if (index < 0) break;
+                replacement.CopyTo(bytes.AsSpan(offset + index));
+                offset += index + original.Length;
+                replacements++;
+            }
+            Assert.True(replacements > 0);
+            File.WriteAllBytes(shim, bytes);
+            Assert.Contains(',', FileVersionInfo.GetVersionInfo(shim).FileVersion!);
+            File.WriteAllBytes(Path.Combine(scratch, "debugger.exe"), []);
+            return Path.Combine(scratch, "debugger.exe");
+        });
+        harness.EnableLegacyCompat();
+        var runtimeConfig = Path.ChangeExtension(harness.ProgramPath, ".runtimeconfig.json");
+        await File.WriteAllTextAsync(runtimeConfig, JsonSerializer.Serialize(new { runtimeOptions = new { framework = new { name = "Microsoft.NETCore.App", version = $"{targetMajor}.0.0" } } }));
+        var originalProgram = await File.ReadAllBytesAsync(harness.ProgramPath);
+        var originalConfig = await File.ReadAllBytesAsync(runtimeConfig);
+
+        var response = Content(await harness.CallLegacyAsync("inspect_debug_launch_compatibility",
+            new JsonObject { ["program"] = harness.ProgramPath }, "launch-compatibility"));
+
+        Assert.Null(response["error"]);
+        Assert.Equal("idle", response["state"]?.GetValue<string>());
+        var data = Assert.IsType<JsonObject>(response["data"]);
+        Assert.Equal(harness.ProgramPath, data["program"]?.GetValue<string>());
+        Assert.Equal("known", data["targetRuntime"]?["status"]?.GetValue<string>());
+        Assert.Equal(targetMajor, data["targetRuntime"]?["major"]?.GetValue<int>());
+        Assert.Equal("known", data["activeDbgshim"]?["status"]?.GetValue<string>());
+        Assert.Equal(activeMajor, data["activeDbgshim"]?["major"]?.GetValue<int>());
+        Assert.Equal("unknown", data["verdict"]?.GetValue<string>());
+        Assert.Null(data["compatible"]);
+        Assert.Contains("does not select a cached candidate", data["warning"]?.GetValue<string>());
+        Assert.False(data["willMutateSharedDebugger"]?.GetValue<bool>());
+        Assert.False(data["mutationPerformed"]?.GetValue<bool>());
+        Assert.NotEqual("compatible_after_swap", data["verdict"]?.GetValue<string>());
+        Assert.Equal(originalProgram, await File.ReadAllBytesAsync(harness.ProgramPath));
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(runtimeConfig));
+        await File.WriteAllTextAsync(runtimeConfig, JsonSerializer.Serialize(new { runtimeOptions = new { framework = new { name = "Microsoft.NETCore.App", version = $"{activeMajor}.0.0" } } }));
+        var matching = Content(await harness.CallLegacyAsync("inspect_debug_launch_compatibility",
+            new JsonObject { ["program"] = harness.ProgramPath }, "launch-compatibility-matching"));
+        Assert.Equal("compatible", matching["data"]?["verdict"]?.GetValue<string>());
+        Assert.True(matching["data"]?["compatible"]?.GetValue<bool>());
+        Assert.Contains("loaded shim", matching["data"]?["warning"]?.GetValue<string>());
+
+        await File.WriteAllTextAsync(runtimeConfig, "{invalid");
+        var malformed = Content(await harness.CallLegacyAsync("inspect_debug_launch_compatibility",
+            new JsonObject { ["program"] = harness.ProgramPath }, "launch-compatibility-malformed"));
+        Assert.Equal("malformed", malformed["data"]?["targetRuntime"]?["status"]?.GetValue<string>());
+        Assert.Equal("unknown", malformed["data"]?["verdict"]?.GetValue<string>());
+        Assert.Null(malformed["data"]?["compatible"]);
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyLaunchCompatibility_DoesNotBindPathOnlyDebuggerToAnotherExecutable()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var previousPath = Environment.GetEnvironmentVariable("PATH");
+        var versionedAssembly = typeof(RegistryShutdownContractTests).Assembly.Location;
+        var activeMajor = FileVersionInfo.GetVersionInfo(versionedAssembly).FileMajorPart;
+        try
+        {
+            await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), debuggerPathFactory: scratch =>
+            {
+                var searchDirectory = Path.Combine(scratch, "path-only-debugger");
+                Directory.CreateDirectory(searchDirectory);
+                File.WriteAllBytes(Path.Combine(searchDirectory, "decoy-debugger.exe"), []);
+                File.Copy(versionedAssembly, Path.Combine(searchDirectory, "dbgshim.dll"));
+                Environment.SetEnvironmentVariable("PATH", searchDirectory + Path.PathSeparator + previousPath);
+                return "decoy-debugger";
+            });
+            harness.EnableLegacyCompat();
+            var runtimeConfig = Path.ChangeExtension(harness.ProgramPath, ".runtimeconfig.json");
+            await File.WriteAllTextAsync(runtimeConfig, JsonSerializer.Serialize(new { runtimeOptions = new { framework = new { name = "Microsoft.NETCore.App", version = $"{activeMajor}.0.0" } } }));
+
+            var response = Content(await harness.CallLegacyAsync("inspect_debug_launch_compatibility",
+                new JsonObject { ["program"] = harness.ProgramPath }, "launch-compatibility-path"));
+            var data = Assert.IsType<JsonObject>(response["data"]);
+            Assert.Equal("unavailable", data["activeDbgshim"]?["status"]?.GetValue<string>());
+            Assert.Null(data["activeDbgshim"]?["path"]);
+            Assert.Equal("unknown", data["verdict"]?.GetValue<string>());
+            Assert.Null(data["compatible"]);
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        }
+        finally { Environment.SetEnvironmentVariable("PATH", previousPath); }
+    }
+
+    [Fact]
     public async Task LegacyCleanupProcesses_StatusAndAccessChecksDoNotMutateSession()
     {
         await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SpawnDescendant: true, LifecycleMode: "all-stop"));
@@ -2042,7 +2147,7 @@ public sealed class RegistryShutdownContractTests
 
         public static async Task<RegistryHostHarness> CreateAsync(
             FixtureConfiguration configuration, bool holdLaunchResponse = false, JsonObject? outputScript = null,
-            Action? failedStartCleanupCompleted = null, Func<object, ValueTask>? disposeSession = null)
+            Action? failedStartCleanupCompleted = null, Func<object, ValueTask>? disposeSession = null, Func<string, string>? debuggerPathFactory = null)
         {
             var previousLaunchGate = Environment.GetEnvironmentVariable(LaunchGateVariable);
             var previousOutputScript = Environment.GetEnvironmentVariable(OutputScriptVariable);
@@ -2056,6 +2161,7 @@ public sealed class RegistryShutdownContractTests
                 fixture = FixtureProcess.Create(configuration);
                 var program = Path.Combine(scratch, "controlled-program.dll");
                 await File.WriteAllBytesAsync(program, []);
+                var debuggerPath = debuggerPathFactory?.Invoke(scratch) ?? fixture.ExecutablePath;
                 var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
                     RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
                 var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
@@ -2072,16 +2178,16 @@ public sealed class RegistryShutdownContractTests
                     var disposerDelegate = bridge.GetMethod("CreateDisposerDelegate", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [sessionType, disposeSession]);
                     registry = registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null,
                         types: [typeof(string), typeof(Func<,>).MakeGenericType(sessionType, typeof(bool)), typeof(Func<,>).MakeGenericType(sessionType, typeof(ValueTask))], modifiers: null)!
-                        .Invoke([fixture.ExecutablePath, usableDelegate, disposerDelegate]);
+                        .Invoke([debuggerPath, usableDelegate, disposerDelegate]);
                 }
                 else
                 {
                     registry = failedStartCleanupCompleted is null
                     ? Activator.CreateInstance(registryType, BindingFlags.Instance | BindingFlags.NonPublic,
-                        binder: null, args: [fixture.ExecutablePath], culture: null)!
+                        binder: null, args: [debuggerPath], culture: null)!
                     : registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
                         binder: null, types: [typeof(string), typeof(Action)], modifiers: null)!
-                        .Invoke([fixture.ExecutablePath, failedStartCleanupCompleted]);
+                        .Invoke([debuggerPath, failedStartCleanupCompleted]);
                 }
                 var buildHost = programType.GetMethod("BuildHost", BindingFlags.Static | BindingFlags.NonPublic,
                     binder: null, types: [registryType], modifiers: null)!;

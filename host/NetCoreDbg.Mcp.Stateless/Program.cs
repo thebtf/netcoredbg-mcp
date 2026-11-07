@@ -303,6 +303,7 @@ internal static class Program
         private const string GetOutputTail = "get_output_tail";
         private const string GetBuildDiagnostics = "get_build_diagnostics";
         private const string VerifyDebugFreshness = "verify_debug_freshness";
+        private const string InspectLaunchCompatibility = "inspect_debug_launch_compatibility";
         private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
         private const string StepInto = "step_into";
@@ -819,7 +820,7 @@ internal static class Program
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or CleanupProcesses or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
-                or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
+                or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations or InspectLaunchCompatibility
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
@@ -1948,6 +1949,30 @@ internal static class Program
                         return LegacyError("Debug session changed before diagnostics completed.");
                     cancellationToken.ThrowIfCancellationRequested();
                     return parsed;
+                }
+                if (name == InspectLaunchCompatibility)
+                {
+                    if (!arguments.TryGetValue("program", out var requestedProgram) || requestedProgram.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(requestedProgram.GetString())) return LegacyError("A program is required.");
+                    var programPath = requestedProgram.GetString()!;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    var root = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken,
+                        context.Params.InputResponses, context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
+                    object? data = null;
+                    string? error = null;
+                    if (root is null) error = "Resolved project root is required for launch inspection.";
+                    else
+                    {
+                        try { data = await Task.Run(() => LegacyLaunchCompatibility.Inspect(root, programPath, _debuggerPath), cancellationToken).ConfigureAwait(false); }
+                        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
+                        { error = exception.Message; }
+                    }
+                    await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (error is not null) return LegacyError(error);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return LegacyBoundedUtilityResponse(data!, LegacySnapshot().State);
                 }
                 if (name == VerifyDebugFreshness)
                 {
@@ -3899,6 +3924,7 @@ internal static class Program
                 var invalid = name switch
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
+                    InspectLaunchCompatibility => key != "program",
                     AttachDebug => key != "process_id",
                     CleanupProcesses => key != "force",
                     RestartDebug => key != "rebuild",
@@ -8819,6 +8845,7 @@ internal static class Program
             Tools =
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
+                Tool("inspect_debug_launch_compatibility", "Inspect target and active dbgshim versions without launching. Native launch does not automatically select cached shims.", """{"type":"object","properties":{"program":{"type":"string","minLength":1}},"required":["program"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
