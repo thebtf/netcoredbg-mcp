@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Win32.SafeHandles;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -19,6 +21,430 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class RegistryShutdownContractTests
 {
     private static readonly TimeSpan ObservationTimeout = TimeSpan.FromSeconds(5);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr sourceHandle, IntPtr targetProcess,
+        out IntPtr targetHandle, uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint options);
+
+    [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateOwnedWitness(SafeProcessHandle process, uint exitCode);
+
+    private static SafeProcessHandle OpenControlledWitness(int pid, long? expectedStartTicks)
+    {
+        var handle = OpenProcess(0x00101000, false, checked((uint)pid));
+        try
+        {
+            Assert.False(handle.IsInvalid);
+            Assert.True(GetProcessTimes(handle, out var creation, out _, out _, out _));
+            Assert.Equal(Assert.IsType<long>(expectedStartTicks), DateTime.FromFileTimeUtc(creation).Ticks);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_StatusAndAccessChecksDoNotMutateSession()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SpawnDescendant: true, LifecycleMode: "all-stop"));
+        harness.EnableLegacyCompat();
+        const string owner = "cleanup-status-owner";
+        try
+        {
+            var started = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "cleanup-status-start", owner).WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await harness.Fixture.WaitForEventAsync("process", observation.Token);
+            _ = await harness.CallLegacyWithMetaAsync("get_threads", new JsonObject(), "cleanup-status-barrier", owner);
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            var startup = Assert.Single(transcript, e => e.Kind == "startup");
+            var child = Assert.Single(transcript, e => e.Kind == "descendant");
+            var adapterPid = Assert.IsType<int>(startup.ProcessId);
+            var childPid = Assert.IsType<int>(child.ProcessId);
+            using var witness = OperatingSystem.IsWindows() ? OpenControlledWitness(childPid, child.ProcessStartTimeUtcTicks) : null;
+            var before = transcript.Count;
+            foreach (var arguments in new[] { new JsonObject(), new JsonObject { ["force"] = false } })
+            {
+                var status = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", arguments, "cleanup-status", "cleanup-other"));
+                Assert.Null(status["error"]);
+                var data = Assert.IsType<JsonObject>(status["data"]);
+                Assert.Equal("status", data["action"]?.GetValue<string>());
+                var processes = Assert.IsType<JsonArray>(data["processes"]);
+                Assert.Equal(processes.Count, data["total"]?.GetValue<int>());
+                Assert.Equal(processes.Count(p => p?["alive"]?.GetValue<bool>() == true), data["alive"]?.GetValue<int>());
+                Assert.Contains(processes, p => (OperatingSystem.IsWindows()
+                    ? p?["pid"]?.GetValue<int>() == adapterPid && p?["role"]?.GetValue<string>() == "netcoredbg"
+                    : p?["role"]?.GetValue<string>() == "adapter_guardian") && p?["alive"]?.GetValue<bool>() == true);
+                Assert.Contains(processes, p => p?["pid"]?.GetValue<int>() == childPid && p?["role"]?.GetValue<string>() == "debuggee" && p?["alive"]?.GetValue<bool>() == true);
+            }
+            var denied = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-denied", "cleanup-other"));
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var malformed = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = "true" }, "cleanup-malformed", owner));
+            Assert.NotNull(malformed["error"]);
+            Assert.DoesNotContain((await harness.Fixture.ReadTranscriptAsync()).Skip(before), e => e.Kind == "request" && e.Command is "terminate" or "disconnect");
+        }
+        finally
+        {
+            await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "cleanup-status-finally", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_ForceStopsOwnedJobWithoutStoppingOtherTarget()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true, SpawnDescendant: true, HoldExitAfterDisconnectResponse: true));
+        harness.EnableLegacyCompat();
+        using var unrelated = harness.Fixture.StartOwnedTarget();
+        const string owner = "cleanup-force-owner";
+        try
+        {
+            var started = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "cleanup-force-start", owner).WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            var startup = Assert.Single(transcript, e => e.Kind == "startup");
+            var descendant = Assert.Single(transcript, e => e.Kind == "descendant");
+            using var adapter = OpenControlledWitness(Assert.IsType<int>(startup.ProcessId), startup.ProcessStartTimeUtcTicks);
+            using var child = OpenControlledWitness(Assert.IsType<int>(descendant.ProcessId), descendant.ProcessStartTimeUtcTicks);
+            Assert.Equal(258u, WaitForSingleObject(adapter, 0));
+            Assert.Equal(258u, WaitForSingleObject(child, 0));
+            var result = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-force", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(result["error"]);
+            var data = Assert.IsType<JsonObject>(result["data"]);
+            Assert.Equal("cleanup", data["action"]?.GetValue<string>());
+            Assert.True(data["complete"]?.GetValue<bool>());
+            Assert.Equal(1, data["terminated"]?.GetValue<int>());
+            Assert.Equal(0, data["remaining_owners"]?.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(data["errors"]));
+            Assert.Null(data["tree_terminated"]);
+            Assert.Null(data["tree_drained"]);
+            Assert.Equal(0u, WaitForSingleObject(adapter, 5000));
+            Assert.Equal(0u, WaitForSingleObject(child, 5000));
+            Assert.False(unrelated.HasExited);
+            Assert.Single((await harness.Fixture.ReadTranscriptAsync()).Skip(transcript.Count), e => e.Kind == "request" && e.Command == "disconnect");
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(unrelated);
+            await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "cleanup-force-finally", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_AttachedTargetSurvivesUnconfirmedDetachAndRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true));
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        const string owner = "cleanup-attach-owner";
+        try
+        {
+            var attached = Content(await harness.CallLegacyWithMetaAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "cleanup-attach-start", owner).WaitAsync(ObservationTimeout));
+            Assert.True(attached["data"]?["success"]?.GetValue<bool>());
+            var before = (await harness.Fixture.ReadTranscriptAsync()).Count;
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var result = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, $"cleanup-attach-{attempt}", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+                Assert.NotNull(result["error"]);
+                var data = Assert.IsType<JsonObject>(result["data"]);
+                Assert.False(data["complete"]?.GetValue<bool>() ?? true);
+                Assert.True(data["remaining_owners"]?.GetValue<int>() > 0);
+                Assert.NotEmpty(Assert.IsType<JsonArray>(data["errors"]));
+                Assert.Null(data["tree_terminated"]);
+                Assert.False(target.HasExited);
+            }
+            var actions = (await harness.Fixture.ReadTranscriptAsync()).Skip(before).Where(e => e.Kind == "request").ToArray();
+            Assert.DoesNotContain(actions, e => e.Command == "terminate");
+            var disconnect = JsonNode.Parse(Assert.Single(actions, e => e.Command == "disconnect").RawPayload!)!;
+            Assert.False(disconnect["arguments"]?["terminateDebuggee"]?.GetValue<bool>());
+        }
+        finally
+        {
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "cleanup-attach-finally", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "cleanup-attach-finally-retry", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_AlreadyExitedRootIsNotCountedAsForced()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        using var target = harness.Fixture.StartOwnedTarget();
+        var handle = target.SafeHandle;
+        await FixtureProcess.StopOwnedTargetAsync(target);
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var owner = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession+WindowsProcessTreeOwnership", throwOnError: true)!;
+        var terminate = owner.GetMethod("TryTerminateRoot", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.False(Assert.IsType<bool>(terminate.Invoke(null, [handle])));
+        Assert.Equal(0u, WaitForSingleObject(handle, 5000));
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_RootTerminationFailureRetainsOwnerUntilRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true, HoldExitAfterDisconnectResponse: true));
+        harness.EnableLegacyCompat();
+        Process? adapter = null;
+        FieldInfo? handleField = null;
+        SafeProcessHandle? original = null;
+        SafeProcessHandle? restricted = null;
+        SafeProcessHandle? witness = null;
+        string? token = null;
+        Exception? testFailure = null;
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "cleanup-root-start").WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            token = harness.LegacySessionId;
+            var slot = harness.OwnedSlot(token);
+            Assert.NotNull(slot);
+            var binding = harness.SceneBinding(token);
+            var session = binding.GetType().GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(binding)!;
+            adapter = Assert.IsType<Process>(session.GetType().GetField("_process", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session));
+            session.GetType().GetField("_stopTimeout", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(session, TimeSpan.FromMilliseconds(150));
+            handleField = typeof(Process).GetField("_processHandle", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            original = adapter.SafeHandle;
+            var self = GetCurrentProcess();
+            Assert.True(DuplicateHandle(self, original.DangerousGetHandle(), self, out var witnessHandle, 0, false, 2));
+            witness = new SafeProcessHandle(witnessHandle, ownsHandle: true);
+            Assert.True(DuplicateHandle(self, original.DangerousGetHandle(), self, out var limitedHandle, 0x00101000, false, 0));
+            restricted = new SafeProcessHandle(limitedHandle, ownsHandle: true);
+            handleField.SetValue(adapter, restricted);
+
+            var first = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-root-first").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.NotNull(first["error"]);
+            Assert.False(first["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.False(restricted.IsClosed);
+            Assert.Equal(258u, WaitForSingleObject(witness, 0));
+            handleField.SetValue(adapter, original);
+            restricted.Dispose();
+            restricted = null;
+
+            var retry = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-root-retry").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(retry["error"]);
+            Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+            Assert.Equal(1, retry["data"]?["terminated"]?.GetValue<int>());
+            Assert.Null(harness.OwnedSlot(token));
+            Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+            Assert.Single(await harness.Fixture.ReadTranscriptAsync(), e => e.Kind == "request" && e.Command == "disconnect");
+        }
+        catch (Exception exception)
+        {
+            testFailure = exception;
+            throw;
+        }
+        finally
+        {
+            if (adapter is not null && handleField is not null && original is not null && !original.IsClosed)
+                handleField.SetValue(adapter, original);
+            restricted?.Dispose();
+            if (token is not null)
+                await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-root-finally").WaitAsync(TimeSpan.FromSeconds(20)));
+            if (witness is not null)
+            {
+                if (WaitForSingleObject(witness, 0) != 0) _ = TerminateOwnedWitness(witness, 1);
+                Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+                witness.Dispose();
+            }
+            if (token is not null && harness.OwnedSlot(token) is null) original?.Dispose();
+            var cleanupFailure = await Record.ExceptionAsync(async () => await harness.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)));
+            if (cleanupFailure is not null)
+            {
+                if (testFailure is null) throw cleanupFailure;
+                testFailure.Data["HarnessCleanupFailure"] = cleanupFailure;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_JobQueryFailureRetainsOwnerUntilVerifiedRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true));
+        harness.EnableLegacyCompat();
+        object? owner = null;
+        FieldInfo? jobField = null;
+        SafeHandle? originalJob = null;
+        SafeHandle? restrictedJob = null;
+        string? token = null;
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "cleanup-job-query-start").WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            token = harness.LegacySessionId;
+            var slot = harness.OwnedSlot(token);
+            Assert.NotNull(slot);
+            var binding = harness.SceneBinding(token);
+            var session = binding.GetType().GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(binding)!;
+            owner = session.GetType().GetField("_processTreeOwnership", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+            jobField = owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            originalJob = Assert.IsAssignableFrom<SafeHandle>(jobField.GetValue(owner));
+            var self = GetCurrentProcess();
+            Assert.True(DuplicateHandle(self, originalJob.DangerousGetHandle(), self, out var restricted, 0x0008, false, 0));
+            restrictedJob = Assert.IsAssignableFrom<SafeHandle>(Activator.CreateInstance(originalJob.GetType(), restricted));
+            jobField.SetValue(owner, restrictedJob);
+
+            var first = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-job-query-first").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.NotNull(first["error"]);
+            Assert.False(first["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.False(restrictedJob.IsClosed);
+            jobField.SetValue(owner, originalJob);
+            restrictedJob.Dispose();
+            restrictedJob = null;
+
+            var retry = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-job-query-retry").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(retry["error"]);
+            Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+            Assert.Null(harness.OwnedSlot(token));
+            Assert.Single(await harness.Fixture.ReadTranscriptAsync(), e => e.Kind == "request" && e.Command == "disconnect");
+        }
+        finally
+        {
+            if (owner is not null && jobField is not null && originalJob is not null && !originalJob.IsClosed)
+                jobField.SetValue(owner, originalJob);
+            restrictedJob?.Dispose();
+            if (token is not null)
+                await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true }, "cleanup-job-query-finally").WaitAsync(TimeSpan.FromSeconds(20)));
+            if (token is not null && harness.OwnedSlot(token) is null) originalJob?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_IncompleteObservationsDoNotBlockOwnerCleanup()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true));
+        harness.EnableLegacyCompat();
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "legacy-cleanup-overflow-start").WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            var token = harness.LegacySessionId;
+            var binding = harness.SceneBinding(token);
+            var session = binding.GetType().GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(binding)!;
+            session.GetType().GetField("_legacyProcessObservationsIncomplete", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(session, true);
+
+            var cleanup = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "legacy-cleanup-overflow-force").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(cleanup["error"]);
+            Assert.True(cleanup["data"]?["complete"]?.GetValue<bool>());
+            Assert.False(cleanup["data"]?["observations_complete"]?.GetValue<bool>() ?? true);
+            Assert.Equal(0, cleanup["data"]?["remaining_owners"]?.GetValue<int>());
+            Assert.Null(harness.OwnedSlot(token));
+            Assert.Single(await harness.Fixture.ReadTranscriptAsync(), e => e.Kind == "request" && e.Command == "disconnect");
+        }
+        finally
+        {
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(),
+                "legacy-cleanup-overflow-finally").WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_DisposalFailureRetainsOwnerAndRetryCompletesWithoutRepeatingStop()
+    {
+        var disposeAttempts = 0;
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true),
+            disposeSession: session =>
+            {
+                if (Interlocked.Increment(ref disposeAttempts) == 1)
+                    return ValueTask.FromException(new InvalidOperationException("controlled disposal failure"));
+                return RegistryHostHarness.DisposeSessionAsync(session);
+            });
+        harness.EnableLegacyCompat();
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "legacy-cleanup-retry-start").WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            var token = harness.LegacySessionId;
+            Assert.NotNull(harness.OwnedSlot(token));
+
+            var first = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "legacy-cleanup-retry-first").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.NotNull(first["error"]);
+            Assert.Equal("cleanup", first["data"]?["action"]?.GetValue<string>());
+            Assert.False(first["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.True(first["data"]?["remaining_owners"]?.GetValue<int>() > 0);
+            Assert.NotEmpty(Assert.IsType<JsonArray>(first["data"]?["errors"]));
+            Assert.NotNull(harness.OwnedSlot(token));
+            Assert.Equal(1, Volatile.Read(ref disposeAttempts));
+            var firstTranscript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(firstTranscript, e => e.Kind == "request" && e.Command == "disconnect");
+
+            var retry = Content(await harness.CallLegacyAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "legacy-cleanup-retry-second").WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(retry["error"]);
+            Assert.Equal("cleanup", retry["data"]?["action"]?.GetValue<string>());
+            Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+            Assert.Equal(0, retry["data"]?["remaining_owners"]?.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(retry["data"]?["errors"]));
+            Assert.Equal(2, Volatile.Read(ref disposeAttempts));
+            Assert.Null(harness.OwnedSlot(token));
+            var retryTranscript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(retryTranscript, e => e.Kind == "request" && e.Command == "disconnect");
+            Assert.Equal(firstTranscript.Count(e => e.Kind == "request" && e.Command == "terminate"),
+                retryTranscript.Count(e => e.Kind == "request" && e.Command == "terminate"));
+        }
+        finally
+        {
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(),
+                "legacy-cleanup-retry-finally").WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
     [Fact]
     public async Task StopDebug_CleanupFailureRetainsOwnerForRetryWithoutRepeatingDebuggerStop()
     {
@@ -1709,7 +2135,11 @@ public sealed class RegistryShutdownContractTests
             CallCoreAsync(registry.GetType().GetMethod("CallLegacyAsync", BindingFlags.Instance | BindingFlags.NonPublic)!,
                 tool, arguments, id, callerCancellation);
 
-        private Task<CallToolResult> CallCoreAsync(MethodInfo method, string tool, JsonObject arguments, string id, CancellationToken callerCancellation)
+        public Task<CallToolResult> CallLegacyWithMetaAsync(string tool, JsonObject arguments, string id, string muxId) =>
+            CallCoreAsync(registry.GetType().GetMethod("CallLegacyAsync", BindingFlags.Instance | BindingFlags.NonPublic)!,
+                tool, arguments, id, default, muxId);
+
+        private Task<CallToolResult> CallCoreAsync(MethodInfo method, string tool, JsonObject arguments, string id, CancellationToken callerCancellation, string? muxId = null)
         {
             var parameters = new CallToolRequestParams
             {
@@ -1717,11 +2147,13 @@ public sealed class RegistryShutdownContractTests
                 Arguments = arguments.ToDictionary(static property => property.Key,
                     static property => JsonSerializer.SerializeToElement(property.Value)),
             };
+            var raw = JsonSerializer.SerializeToNode(parameters)!.AsObject();
+            if (muxId is not null) raw["_meta"] = new JsonObject { ["muxSessionId"] = muxId };
             var request = new JsonRpcRequest
             {
                 Id = new RequestId(id),
                 Method = "tools/call",
-                Params = JsonSerializer.SerializeToNode(parameters),
+                Params = raw,
             };
             var context = new RequestContext<CallToolRequestParams>(server, request, parameters);
             if (tool is "start_debug" or "attach_debug")
