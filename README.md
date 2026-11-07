@@ -1241,6 +1241,15 @@ The published MCP catalog has 135 tools.
 The server also exposes four resources: `debug://state`, `debug://breakpoints`,
 `debug://output`, and `debug://threads`.
 
+In the unreleased Python source, `apply_code_change` allows one delta attempt
+per module in a debuggee session. Restart debugging before another attempt for
+that module. If application is unconfirmed, the source edits remain on disk and
+the runtime may have changed. The source-file check does not lock out external
+writers. The installed Python version does not yet include this protection.
+An execution request must have replied before a later stop can clear its EnC
+guard. If the stop arrives first, another stop may be needed; an unconfirmed
+request requires a debugging restart.
+
 In the unreleased Python source, `get_loaded_sources` refreshes `debug://state`
 in DAP reader order. Its returned list is the adapter snapshot; later source
 events can change the live state independently.

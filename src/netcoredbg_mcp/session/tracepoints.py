@@ -573,7 +573,9 @@ class TracepointManager:
                 if not has_user_breakpoint:
                     try:
                         session.prepare_for_execution()
-                        await session._client.continue_execution(thread_id)
+                        await session._request_execution(
+                            lambda: session._client.continue_execution(thread_id)
+                        )
                     except Exception as e:
                         logger.warning(
                             "Failed to resume after rate-limited tracepoint: %s", e
@@ -646,7 +648,9 @@ class TracepointManager:
             if not has_user_breakpoint and not uncertain:
                 try:
                     session.prepare_for_execution()
-                    await session._client.continue_execution(thread_id)
+                    await session._request_execution(
+                        lambda: session._client.continue_execution(thread_id)
+                    )
                 except Exception as e:
                     logger.warning(
                         "Failed to resume after tracepoint evaluation: %s", e

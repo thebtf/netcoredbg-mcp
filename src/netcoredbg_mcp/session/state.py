@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -614,6 +615,16 @@ class SessionState:
     execution_outcome_unknown: bool = False
     unconfirmed_attach_pids: list[int] = field(default_factory=list)
     unconfirmed_attach_omitted: int = 0
+    _enc_apply_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
+    _enc_attempted_modules: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _enc_execution_pending: dict[object, bool] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _enc_execution_unknown: bool = field(default=False, init=False, repr=False, compare=False)
     activity_epoch: object = field(
         default_factory=object,
         init=False,
