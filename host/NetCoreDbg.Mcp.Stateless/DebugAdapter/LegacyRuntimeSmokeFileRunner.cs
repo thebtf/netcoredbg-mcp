@@ -1,0 +1,307 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+
+namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
+
+internal static class LegacyRuntimeSmokeFileRunner
+{
+    private const int MaxFileBytes = 16 * 1024 * 1024;
+    private static readonly Regex JsonPath = new(@"\A\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+\z", RegexOptions.CultureInvariant);
+
+    internal static JsonObject Validate(JsonNode? plan)
+    {
+        var result = LegacyRuntimeSmokeValidation.ValidateNative(plan);
+        result["accepted_action_kinds"] = new JsonArray();
+        result["accepted_probe_kinds"] = new JsonArray("file.json");
+        result["accepted_probe_phases"] = new JsonArray("after");
+        result["native_execution_subset"] = "Windows only: one inline v2 case with one after-only file.json probe on a drive-letter path, no action, and no cleanup; validation vocabulary does not imply executable support.";
+        if (Text(result["status"]) == "INVALID_SETUP") return result;
+        string? reason = Unsupported(plan);
+        if (reason is not null)
+        {
+            result["status"] = "BLOCKED";
+            result["can_run"] = false;
+            result["reason"] = reason;
+            result["blocked"] = new JsonObject
+            {
+                ["reason"] = reason,
+                ["requested"] = new JsonObject(),
+                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case, one after-only file.json probe and no actions or cleanup" },
+                ["next_step"] = "Use a supported plan or run this plan with the Python runtime."
+            };
+        }
+        else
+        {
+            result["status"] = "PASS";
+            result["can_run"] = true;
+        }
+        return result;
+    }
+
+    private static string? Unsupported(JsonNode? plan)
+    {
+        if (!OperatingSystem.IsWindows()) return "native file observation is currently Windows-only";
+        if (plan is not JsonObject root || Text(root["schema"]) != "netcoredbg.runtime_smoke.v2") return "only inline v2 plans are supported";
+        if (!Only(root, "schema", "name", "description", "cases")) return "unsupported plan field";
+        if (root["cases"] is not JsonArray { Count: 1 } cases || cases[0] is not JsonObject item) return "exactly one inline case is supported";
+        if (!Only(item, "id", "transitions")) return "unsupported case field";
+        if (item["id"] is not null && Text(item["id"]) is null) return "case id must be a string";
+        if (item["transitions"] is not JsonArray { Count: 1 } transitions || transitions[0] is not JsonObject transition) return "exactly one transition is supported";
+        if (!Only(transition, "id", "settle", "probes")) return "unsupported transition field";
+        if (transition["id"] is not null && Text(transition["id"]) is null) return "transition id must be a string";
+        if (transition.ContainsKey("settle") && (transition["settle"] is not JsonObject settle || !Only(settle, "idle_ms") || (settle.ContainsKey("idle_ms") && (settle["idle_ms"] is not JsonValue idle || !idle.TryGetValue<int>(out int ms) || ms != 0)))) return "only settle idle_ms=0 or the default settle is supported";
+        if (transition["probes"] is not JsonArray { Count: 1 } probes || probes[0] is not JsonObject probe) return "exactly one file.json probe is supported";
+        if (!Only(probe, "kind", "phase", "name", "path", "jsonpath", "expected")) return "unsupported probe field";
+        if (Text(probe["kind"]) != "file.json" || Text(probe["phase"]) != "after") return "only an explicit after-phase file.json probe is supported";
+        if (probe["name"] is not null && Text(probe["name"]) is null) return "probe name must be a string";
+        string? path = Text(probe["path"]);
+        if (path is null || !LocalFilePath(path)) return "file path must be an absolute Windows drive-letter path without device names or alternate streams";
+        if (string.Equals(Path.GetFileName(path), "diagnostic-latest.json", StringComparison.Ordinal)) return "diagnostic-latest.json alias is not supported";
+        string? expression = Text(probe["jsonpath"]);
+        if (expression is null || !JsonPath.IsMatch(expression)) return "only simple dotted identifier JSONPath expressions are supported";
+        if (probe.ContainsKey("expected") && probe["expected"] is not null && Text(probe["expected"]) is null) return "only string or null expectations are supported";
+        if (Text(probe["expected"]) is string expected && expected.StartsWith("contains:", StringComparison.Ordinal)) return "contains expectations are not supported";
+        return null;
+    }
+
+    private static bool LocalFilePath(string path)
+    {
+        if (path.Length < 4 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || (path[2] != '\\' && path[2] != '/')) return false;
+        foreach (string part in path[3..].Split(['\\', '/']))
+        {
+            if (part.Length == 0 || part is "." or ".." || part.EndsWith(' ') || part.EndsWith('.') || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+            string stem = part.Split('.')[0].TrimEnd(' ');
+            if (Regex.IsMatch(stem, @"\A(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)) return false;
+        }
+        return true;
+    }
+
+    internal static async Task<JsonObject> RunAsync(JsonNode? plan, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var started = Stopwatch.StartNew();
+        JsonObject admission = Validate(plan);
+        if (Text(admission["status"]) != "PASS") return admission;
+        var root = (JsonObject)plan!;
+        var item = (JsonObject)((JsonArray)root["cases"]!)[0]!;
+        var transition = (JsonObject)((JsonArray)item["transitions"]!)[0]!;
+        var probe = (JsonObject)((JsonArray)transition["probes"]!)[0]!;
+        var idleMs = transition["settle"] is JsonObject settle && settle.ContainsKey("idle_ms") ? 0 : 250;
+        var metricClock = Stopwatch.StartNew();
+        if (idleMs != 0) await Task.Delay(idleMs, cancellationToken).ConfigureAwait(false);
+        metricClock.Stop();
+        cancellationToken.ThrowIfCancellationRequested();
+        JsonObject observed = await ObserveAsync(probe, cancellationToken).ConfigureAwait(false);
+        string status = Text(observed["status"])!;
+        string reason = status == "PASS" ? "transition passed" : Text(observed["reason"]) ?? "transition failed";
+        string caseReason = status == "PASS" ? "case passed" : reason;
+        string resultReason = status == "PASS" ? "runtime smoke v2 scenario passed" : reason;
+        string name = Text(probe["name"]) is string n && n.Length > 0 ? n : "file.json";
+        string key = name == "file.json" && string.IsNullOrEmpty(Text(probe["name"])) ? "file.json" : "file.json." + name;
+        observed["path"] = key;
+        JsonNode? value = observed["value"];
+        var after = new JsonObject { [key] = value?.DeepClone() };
+        var diff = new JsonObject();
+        if (value is not null) diff[key] = new JsonObject { ["from"] = null, ["to"] = value.DeepClone() };
+        var metrics = Metrics((long)Math.Round(metricClock.Elapsed.TotalMilliseconds));
+        var transitionResult = new JsonObject
+        {
+            ["id"] = transition["id"]?.DeepClone(),
+            ["status"] = status,
+            ["reason"] = reason,
+            ["actions"] = new JsonArray(),
+            ["metrics"] = metrics,
+            ["settle"] = new JsonObject { ["status"] = "PASS", ["idle_ms"] = idleMs },
+            ["before"] = new JsonObject(),
+            ["after"] = after,
+            ["diff"] = diff,
+            ["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = new JsonArray(observed) }
+        };
+        var caseCleanup = Cleanup();
+        caseCleanup["case_id"] = Text(item["id"]) ?? "";
+        var caseResult = new JsonObject
+        {
+            ["id"] = item["id"]?.DeepClone(),
+            ["status"] = status,
+            ["reason"] = caseReason,
+            ["actions"] = new JsonArray(),
+            ["transitions"] = new JsonArray(transitionResult),
+            ["before"] = new JsonObject(),
+            ["after"] = after.DeepClone(),
+            ["diff"] = diff.DeepClone(),
+            ["metrics"] = metrics.DeepClone(),
+            ["failed_assertions"] = new JsonArray(),
+            ["cleanup"] = caseCleanup
+        };
+        var cleanup = Cleanup();
+        cleanup["failed_case_cleanups"] = new JsonArray();
+        var refs = new JsonArray();
+        if (Text(observed["evidence_ref"]) is string evidence)
+            refs.Add(new JsonObject { ["case_id"] = item["id"]?.DeepClone(), ["phase"] = "after", ["probe"] = name, ["evidence_ref"] = evidence });
+        long elapsed = started.ElapsedMilliseconds;
+        var result = new JsonObject
+        {
+            ["status"] = status,
+            ["reason"] = resultReason,
+            ["elapsed_ms"] = elapsed,
+            ["action_count"] = 0,
+            ["completed_steps"] = new JsonArray(),
+            ["failed_assertions"] = new JsonArray(),
+            ["cleanup"] = cleanup,
+            ["evidence_refs"] = refs,
+            ["generated_case_count"] = 0,
+            ["cases"] = new JsonArray(caseResult),
+            ["baseline"] = null,
+            ["metrics_thresholds"] = null
+        };
+        foreach (string field in new[] { "accepted_schema_values", "accepted_top_level_keys_v2", "accepted_action_kinds", "accepted_probe_kinds", "accepted_probe_phases", "native_execution_subset" })
+            if (admission.ContainsKey(field)) result[field] = admission[field]?.DeepClone();
+        result["compact"] = new JsonObject
+        {
+            ["status"] = status,
+            ["reason"] = resultReason,
+            ["elapsed_ms"] = elapsed,
+            ["action_count"] = 0,
+            ["generated_case_count"] = 0,
+            ["case_count"] = 1,
+            ["cleanup"] = Compact(cleanup),
+            ["evidence_refs"] = Compact(refs)
+        };
+        return result;
+    }
+
+    private static async Task<JsonObject> ObserveAsync(JsonObject probe, CancellationToken cancellationToken)
+    {
+        string path = Text(probe["path"])!;
+        string expression = Text(probe["jsonpath"])!;
+        string name = Text(probe["name"]) is string n && n.Length > 0 ? n : "file.json";
+        var result = new JsonObject { ["name"] = name, ["kind"] = "file.json", ["status"] = "FAIL", ["value"] = null, ["resolved_path"] = path };
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string current = Path.GetPathRoot(path)!;
+            string[] parts = path[current.Length..].Split(['\\', '/']);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                current = Path.Combine(current, parts[i]);
+                var attributes = File.GetAttributes(current);
+                if ((attributes & (FileAttributes.Device | FileAttributes.ReparsePoint)) != 0 ||
+                    (i == parts.Length - 1 && (attributes & FileAttributes.Directory) != 0) ||
+                    (i != parts.Length - 1 && (attributes & FileAttributes.Directory) == 0))
+                {
+                    result["reason"] = "path is not a regular file or contains a reparse point";
+                    result["missing_side"] = "file";
+                    return result;
+                }
+            }
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (!stream.CanSeek || stream.Length > MaxFileBytes)
+            {
+                result["reason"] = $"file is not a regular file or exceeds {MaxFileBytes} bytes";
+                return result;
+            }
+            using var buffer = new MemoryStream();
+            var bytes = new byte[8192];
+            int count;
+            while ((count = await stream.ReadAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+            {
+                if (buffer.Length + count > MaxFileBytes)
+                {
+                    result["reason"] = $"file exceeds {MaxFileBytes} bytes";
+                    return result;
+                }
+                buffer.Write(bytes, 0, count);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            string json = new UTF8Encoding(false, true).GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+            JsonNode? value = JsonNode.Parse(json);
+            foreach (string part in expression[2..].Split('.')) value = value is JsonObject obj && obj.TryGetPropertyValue(part, out var child) ? child : null;
+            result["value"] = value?.DeepClone();
+            result["jsonpath"] = expression;
+            result["evidence_ref"] = $"file:{Path.GetFileName(path)}:{expression}";
+            result["status"] = "PASS";
+            if (probe.ContainsKey("expected"))
+            {
+                result["expected"] = probe["expected"]?.DeepClone();
+                if (!Equal(value, probe["expected"])) { result["status"] = "FAIL"; result["reason"] = "expected value did not match"; }
+            }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (FileNotFoundException) { result["reason"] = "json file missing"; result["missing_side"] = "file"; }
+        catch (DirectoryNotFoundException) { result["reason"] = "json file missing"; result["missing_side"] = "file"; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or DecoderFallbackException or ArgumentException or NotSupportedException)
+        {
+            result["reason"] = ex is JsonException or DecoderFallbackException ? "jsonpath evaluation failed" : "json file read failed";
+            result["jsonpath"] = expression;
+            result["error"] = ex.Message;
+        }
+        return result;
+    }
+    private static bool Equal(JsonNode? left, JsonNode? right)
+    {
+        if (left is null || right is null) return left is null && right is null;
+        return Text(left) is string actual && Text(right) is string expected && actual == expected;
+    }
+
+    private static JsonNode? Compact(JsonNode? value)
+    {
+        if (value is JsonObject obj)
+        {
+            var result = new JsonObject();
+            var omitted = new JsonArray();
+            foreach (var item in obj)
+            {
+                if (Text(item.Value) is string text && text.EnumerateRunes().Count() is var length && length > 240)
+                {
+                    result[item.Key + "_length"] = length;
+                    omitted.Add(item.Key);
+                }
+                else result[item.Key] = Compact(item.Value);
+            }
+            if (omitted.Count > 0) result["omitted_fields"] = omitted;
+            return result;
+        }
+        if (value is JsonArray array)
+        {
+            var result = new JsonArray();
+            foreach (var item in array.Take(8)) result.Add(Compact(item));
+            if (array.Count > 8) result.Add(new JsonObject { ["omitted_count"] = array.Count - 8 });
+            return result;
+        }
+        if (Text(value) is string scalar && scalar.EnumerateRunes().Count() is var count && count > 240)
+            return new JsonObject { ["text_length"] = count };
+        return value?.DeepClone();
+    }
+
+
+    private static JsonObject Metrics(long latency) => new()
+    {
+        ["action_latency_ms"] = latency,
+        ["working_set_delta_mb"] = null,
+        ["private_bytes_delta_mb"] = null,
+        ["partial"] = true,
+        ["field_status"] = new JsonObject
+        {
+            ["action_latency_ms"] = new JsonObject { ["status"] = "PASS" },
+            ["working_set_delta_mb"] = new JsonObject { ["status"] = "BLOCKED", ["reason"] = "target process metrics not observed" },
+            ["private_bytes_delta_mb"] = new JsonObject { ["status"] = "BLOCKED", ["reason"] = "target process metrics not observed" }
+        }
+    };
+
+    private static JsonObject Cleanup() => new()
+    {
+        ["status"] = "PASS",
+        ["attempted"] = new JsonArray(),
+        ["failures"] = new JsonArray(),
+        ["tracepoints_removed"] = 0,
+        ["isolated_profiles_torn_down"] = 0,
+        ["debug_stop"] = null,
+        ["process_registry_after"] = null
+    };
+
+    private static bool Only(JsonObject obj, params string[] accepted) => obj.All(pair => accepted.Contains(pair.Key, StringComparer.Ordinal));
+    private static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+}

@@ -1342,6 +1342,17 @@ For long-lived orchestration, use the lifecycle family:
 consumer-mode release gate and the examples in [`docs/examples/`](docs/examples/)
 for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 
+The source-built opt-in `--legacy-compat` host supports a narrower Windows-only
+`runtime_smoke_validate_plan` / `run_runtime_smoke` path: one inline v2 case,
+one after-phase `file.json` probe, no action or cleanup, and an absolute
+drive-letter path. JSONPath is limited to dotted identifiers; expected values
+are strings or null, and files are limited to 16 MiB. Device paths, reparse
+points, `diagnostic-latest.json`, file-based plan inputs, and other plans are
+refused. Path checks are point-in-time checks, not a guarantee against concurrent
+replacement. Process metrics are reported as unavailable. Durable lifecycle,
+UI scenarios, and cross-platform file observation still require the Python path;
+Python remains the installed default.
+
 ### Input provenance
 
 Runtime-smoke plans can distinguish the runner's own input from operator or
