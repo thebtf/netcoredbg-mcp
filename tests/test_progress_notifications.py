@@ -225,6 +225,36 @@ class TestExecuteAndWaitProgress:
         )
 
 
+    @pytest.mark.asyncio
+    async def test_continue_during_enc_preserves_stopped_event(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from netcoredbg_mcp.dap.protocol import DAPEvent
+        from netcoredbg_mcp.server import create_server
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager(netcoredbg_path="/unused")
+        manager._on_stopped(
+            DAPEvent(seq=1, event="stopped", body={"reason": "pause", "threadId": 1})
+        )
+        stopped_event = manager._execution_event
+        revision = manager._execution_revision
+        manager.client.continue_execution = AsyncMock()
+        ctx = SimpleNamespace(report_progress=AsyncMock())
+        with patch("netcoredbg_mcp.server.get_session", return_value=manager):
+            mcp = create_server()
+            async with manager.state._enc_apply_lock:
+                result = await mcp._tool_manager.call_tool(
+                    "continue_execution", {"thread_id": 1}, context=ctx, convert_result=False
+                )
+
+        assert "error" in result
+        assert manager._execution_event is stopped_event and stopped_event.is_set()
+        assert manager._execution_revision == revision
+        manager.client.continue_execution.assert_not_awaited()
+
+
 class TestCallbackPlumbing:
     """Tests for output_callback forwarding through the chain."""
 

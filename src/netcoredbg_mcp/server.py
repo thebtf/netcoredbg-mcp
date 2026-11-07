@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -251,7 +252,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
             except Exception:
                 pass
 
-            session.prepare_for_execution()
+            try:
+                session.prepare_for_execution()
+            except BaseException:
+                if inspect.iscoroutine(action_coro):
+                    action_coro.close()
+                raise
             await action_coro
 
             # Phase 2: Report waiting

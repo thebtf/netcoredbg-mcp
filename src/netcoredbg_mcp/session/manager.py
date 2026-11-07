@@ -1684,6 +1684,8 @@ class SessionManager:
         The DAP event handlers (_on_stopped, _on_terminated, _on_exited)
         will set this new event when the program stops.
         """
+        if self._state._enc_apply_lock.locked():
+            raise RuntimeError("An Edit-and-Continue operation is in progress")
         self._execution_revision += 1
         self._execution_event = asyncio.Event()
 

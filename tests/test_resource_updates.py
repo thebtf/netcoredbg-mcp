@@ -639,7 +639,11 @@ async def test_terminate_does_not_dispatch_during_enc() -> None:
 
     registry = ToolRegistry()
     session = SessionManager(netcoredbg_path="/unused")
-    session.state.state = DebugState.STOPPED
+    session._on_stopped(
+        DAPEvent(seq=1, event="stopped", body={"reason": "pause", "threadId": 1})
+    )
+    stopped_event = session._execution_event
+    stopped_revision = session._execution_revision
     session.client._capabilities = {"supportsTerminateRequest": True}
     session.client.terminate = AsyncMock(return_value=SimpleNamespace(success=True))
     session.wait_for_stopped = AsyncMock(
@@ -662,6 +666,8 @@ async def test_terminate_does_not_dispatch_during_enc() -> None:
 
     assert "error" in result
     session.client.terminate.assert_not_awaited()
+    assert session._execution_event is stopped_event and stopped_event.is_set()
+    assert session._execution_revision == stopped_revision
 
     result = await registry.tools["terminate_debug"](ctx=object())  # type: ignore[operator]
     assert result["data"]["state"] == DebugState.TERMINATED.value
