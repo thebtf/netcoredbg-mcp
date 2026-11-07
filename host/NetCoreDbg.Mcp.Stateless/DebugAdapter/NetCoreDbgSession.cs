@@ -17,10 +17,13 @@ namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
 internal enum MemoryInspectionCommand { ReadMemory, Disassemble, Locations }
 
+internal readonly record struct LegacyObservedProcess(int Pid, string Role, string? Program, double RegisteredAt, bool? Alive);
+
 internal sealed class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
+    private const int MaximumLegacyProcessObservations = 256;
     private const int MaximumThreadCount = 256;
     private const int MaximumThreadNameBytes = 1024;
     private const int MaximumStackFrameCount = 256;
@@ -40,6 +43,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     };
 
     private readonly Process _process;
+    private readonly int _adapterProcessId;
+    private readonly double _adapterObservedAt;
+    private int _adapterExitConfirmed;
+    private int _legacyForcedRootTerminations;
+    private int _legacyForcedRootPending;
     private readonly Stream _input;
     private readonly Stream _output;
     private readonly Stream _error;
@@ -108,6 +116,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private DapThread[]? _legacyThreads;
     private int? _legacyProcessId;
     private string? _legacyProcessName;
+    private Dictionary<int, (string? Name, double ObservedAt)>? _legacyProcessObservations;
+    private bool _legacyProcessObservationsIncomplete;
     private double? _legacyLastStopAt;
     private double? _legacyLastResumeAt;
     private long _activityContinued, _activityStopped, _activityStepStops, _activityOutput;
@@ -118,6 +128,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _legacyEventDetailsIncomplete;
     private JsonElement? _legacyExceptionInfo;
     private Task? _cleanupTask;
+    private Task? _cleanupRootTask;
+    private Task? _cleanupPreparationTask;
     private Exception? _readerFailure;
     private int _retirementRequested;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
@@ -180,6 +192,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         Action<string>? resourceEventObserver = null)
     {
         _process = process;
+        _adapterProcessId = resourceEventObserver is null ? 0 : process.Id;
+        _adapterObservedAt = resourceEventObserver is null ? 0 : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000d;
         _input = input;
         _output = output;
         _error = error;
@@ -245,6 +259,63 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _legacyThreads, _legacyProcessId, _legacyProcessName, _stopDescription, _stopText,
                 _legacyLastStopAt, _legacyLastResumeAt, _legacyInvalidation, _legacyMemoryEvent, _legacyExceptionInfo, !_legacyEventDetailsIncomplete);
         }
+    }
+
+    internal int LegacyForcedRootTerminations => Volatile.Read(ref _legacyForcedRootTerminations);
+
+    internal LegacyObservedProcess[] CaptureLegacyProcessObservations(out bool complete)
+    {
+        KeyValuePair<int, (string? Name, double ObservedAt)>[] observed;
+        bool adapterReplaced;
+        lock (_stateGate)
+        {
+            complete = !_legacyProcessObservationsIncomplete;
+            observed = _legacyProcessObservations?.ToArray() ?? [];
+            adapterReplaced = _legacyProcessObservations?.ContainsKey(_adapterProcessId) == true;
+        }
+
+        var result = new LegacyObservedProcess[Math.Min(MaximumLegacyProcessObservations, observed.Length + (adapterReplaced ? 0 : 1))];
+        var index = 0;
+        var budget = 256;
+        if (!adapterReplaced)
+        {
+            bool? alive;
+            try { alive = !_process.HasExited; }
+            catch (InvalidOperationException) { alive = Volatile.Read(ref _adapterExitConfirmed) != 0 ? false : null; }
+            catch (Win32Exception) { alive = null; }
+            result[index++] = new(_adapterProcessId, OperatingSystem.IsWindows() ? "netcoredbg" : "adapter_guardian", null, _adapterObservedAt, alive);
+        }
+        foreach (var entry in observed)
+        {
+            var bytes = 256 + 6 * Encoding.UTF8.GetByteCount(entry.Value.Name ?? string.Empty);
+            if (index == result.Length || budget + bytes > 192 * 1024) { complete = false; break; }
+            budget += bytes;
+            result[index++] = new(entry.Key, "debuggee", entry.Value.Name, entry.Value.ObservedAt, ObservePidAlive(entry.Key));
+        }
+        if (index != result.Length) Array.Resize(ref result, index);
+        return result;
+    }
+
+    private static bool? ObservePidAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var process = WindowsNativeSceneProcess.Open(pid);
+                if (process.IsInvalid) return Marshal.GetLastWin32Error() == 87 ? false : null;
+                if (WindowsNativeSceneProcess.IsAlive(process)) return true;
+                if (WindowsNativeSceneProcess.IsExited(process)) return false;
+                return null;
+            }
+            using var observed = Process.GetProcessById(pid);
+            return !observed.HasExited;
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (Win32Exception) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
 
     private void InvalidateLoadedSources()
@@ -3766,6 +3837,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         _legacyProcessId = TryGetInt32(body, "systemProcessId");
                         var name = TryGetString(body, "name");
                         _legacyProcessName = name is not null && Encoding.UTF8.GetByteCount(name) <= 4096 ? name : null;
+                        if (_legacyProcessId is { } observedPid)
+                        {
+                            _legacyProcessObservations ??= [];
+                            if (_legacyProcessObservations.Count < MaximumLegacyProcessObservations || _legacyProcessObservations.ContainsKey(observedPid))
+                                _legacyProcessObservations[observedPid] = (_legacyProcessName, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000d);
+                            else _legacyProcessObservationsIncomplete = true;
+                        }
                     }
                 }
                 break;
@@ -4813,6 +4891,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_cleanupGate)
         {
+            if (_cleanupTask is { IsFaulted: true } previous && previous.Exception?.InnerException is WindowsJobCleanupUnconfirmedException)
+            {
+                _cleanupTask = null;
+                if (_cleanupRootTask is { IsFaulted: true } or { IsCanceled: true }) _cleanupRootTask = null;
+            }
             if (_cleanupTask is not null) return _cleanupTask;
             if (_attachTarget is { } target)
             {
@@ -4827,6 +4910,47 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
     private async Task CleanupAsync()
+    {
+        var retainOwnership = false;
+        try
+        {
+            try
+            {
+                await (_cleanupRootTask ??= CleanupRootAsync()).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (_processTreeOwnership is WindowsProcessTreeOwnership)
+            {
+                retainOwnership = true;
+                throw new WindowsJobCleanupUnconfirmedException(exception);
+            }
+            if (HasExited())
+            {
+                if (_processTreeOwnership is WindowsProcessTreeOwnership windowsOwnership)
+                {
+                    try
+                    {
+                        windowsOwnership.Terminate();
+                        await windowsOwnership.WaitForDrainAsync(_stopTimeout).ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        retainOwnership = true;
+                        throw new WindowsJobCleanupUnconfirmedException(exception);
+                    }
+                }
+                else
+                {
+                    _processTreeOwnership?.Terminate();
+                }
+            }
+        }
+        finally
+        {
+            if (!retainOwnership) await DisposeCleanupResourcesAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task PrepareCleanupAsync()
     {
         await _callStackAdmissionGate.WaitAsync().ConfigureAwait(false);
         try
@@ -4843,93 +4967,95 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _callStackAdmissionGate.Release();
         }
 
+        if ((!_attachMayHaveDispatched || _attachTarget is null) && !HasExited() && !_forceCleanup.IsCancellationRequested)
+        {
+            if (_supportsTerminate && !_legacyTerminateDispatched)
+            {
+                await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
+            }
+
+            if (!_forceCleanup.IsCancellationRequested)
+            {
+                await TrySendCleanupRequestAsync(
+                    "disconnect",
+                    new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
+            }
+        }
+
+        _input.Dispose();
+    }
+
+    private async Task CleanupRootAsync()
+    {
+        await (_cleanupPreparationTask ??= PrepareCleanupAsync()).ConfigureAwait(false);
+        var unixOwnership = _processTreeOwnership as UnixProcessGroupOwnership;
+        var guardianSignaled = unixOwnership is not null;
+
+        if (_forceCleanup.IsCancellationRequested)
+        {
+            unixOwnership?.Terminate();
+            if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
+            {
+                if (KillProcessTree()) Volatile.Write(ref _legacyForcedRootPending, 1);
+                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
+                }
+            }
+        }
+        else
+        {
+            unixOwnership?.SignalGracefulShutdown();
+            if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+            {
+                if (KillProcessTree()) Volatile.Write(ref _legacyForcedRootPending, 1);
+                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException("The owned debugger process did not exit after its process tree was killed.");
+                }
+            }
+        }
+        if (Volatile.Read(ref _legacyForcedRootPending) != 0) Volatile.Write(ref _legacyForcedRootTerminations, 1);
+    }
+
+    private async Task DisposeCleanupResourcesAsync()
+    {
         try
         {
-            if ((!_attachMayHaveDispatched || _attachTarget is null) && !HasExited() && !_forceCleanup.IsCancellationRequested)
-            {
-                if (_supportsTerminate && !_legacyTerminateDispatched)
-                {
-                    await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
-                }
-
-                if (!_forceCleanup.IsCancellationRequested)
-                {
-                    await TrySendCleanupRequestAsync(
-                        "disconnect",
-                        new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
-                }
-            }
-
             _input.Dispose();
-            var unixOwnership = _processTreeOwnership as UnixProcessGroupOwnership;
-            var guardianSignaled = unixOwnership is not null;
-
-            if (_forceCleanup.IsCancellationRequested)
-            {
-                unixOwnership?.Terminate();
-                if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
-                {
-                    KillProcessTree();
-                    if (!await WaitForProcessExitAsync().ConfigureAwait(false))
-                    {
-                        throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
-                    }
-                }
-            }
-            else
-            {
-                unixOwnership?.SignalGracefulShutdown();
-                if (!HasExited() && !await WaitForProcessExitAsync().ConfigureAwait(false))
-                {
-                    KillProcessTree();
-                    if (!await WaitForProcessExitAsync().ConfigureAwait(false))
-                    {
-                        throw new InvalidOperationException("The owned debugger process did not exit after its process tree was killed.");
-                    }
-                }
-            }
-
-            if (HasExited())
-            {
-                _processTreeOwnership?.Terminate();
-            }
         }
         finally
         {
             try
             {
-                _input.Dispose();
+                await ObserveBackgroundTasksAsync().ConfigureAwait(false);
             }
             finally
             {
                 try
                 {
-                    await ObserveBackgroundTasksAsync().ConfigureAwait(false);
+                    _output.Dispose();
+                    _error.Dispose();
                 }
                 finally
                 {
                     try
                     {
-                        _output.Dispose();
-                        _error.Dispose();
+                        _writeGate.Dispose();
                     }
                     finally
                     {
                         try
                         {
-                            _writeGate.Dispose();
+                            try { if (_process.HasExited) Volatile.Write(ref _adapterExitConfirmed, 1); }
+                            catch (InvalidOperationException) { }
+                            catch (Win32Exception) { }
+                            _process.Dispose();
                         }
                         finally
                         {
-                            try
-                            {
-                                _process.Dispose();
-                            }
-                            finally
-                            {
-                                try { _processTreeOwnership?.Dispose(); }
-                                finally { _attachTarget?.Dispose(); }
-                            }
+                            try { _processTreeOwnership?.Dispose(); }
+                            finally { _attachTarget?.Dispose(); }
                         }
                     }
                 }
@@ -4952,6 +5078,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private async Task<bool> WaitForProcessExitAsync()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            var handle = _process.SafeHandle;
+            var started = Stopwatch.GetTimestamp();
+            while (!WindowsNativeSceneProcess.IsExited(handle))
+            {
+                var remaining = _stopTimeout - Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero) return false;
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(50) ? remaining : TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            }
+            return true;
+        }
+
         if (HasExited())
         {
             return true;
@@ -4969,19 +5108,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return HasExited();
     }
 
-    private void KillProcessTree()
+    private bool KillProcessTree()
     {
         try
         {
             if (!HasExited())
             {
+                if (OperatingSystem.IsWindows())
+                {
+                    if (_processTreeOwnership is not WindowsProcessTreeOwnership)
+                        throw new InvalidOperationException("The debugger job owner is unavailable.");
+                    var forcedRoot = WindowsProcessTreeOwnership.TryTerminateRoot(_process.SafeHandle);
+                    return forcedRoot && _resourceEventObserver is not null;
+                }
                 _process.Kill(entireProcessTree: true);
+                return false;
             }
         }
         catch (InvalidOperationException) when (HasExited())
         {
             // The owned process exited between the check and the kill request.
         }
+        return false;
     }
 
     private async Task ObserveBackgroundTasksAsync()
@@ -5346,6 +5494,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    internal sealed class WindowsJobCleanupUnconfirmedException(Exception inner)
+        : InvalidOperationException("The owned debugger process tree cleanup is unconfirmed.", inner);
+
     internal interface IProcessTreeOwnership : IDisposable
     {
         void Terminate();
@@ -5597,6 +5748,27 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             !process.IsInvalid && IsProcessInJob(process, _job, out var inJob) && inJob;
 
         internal uint ActiveProcessCount() => ActiveProcessCount(_job);
+
+        internal async Task WaitForDrainAsync(TimeSpan timeout)
+        {
+            var started = Stopwatch.GetTimestamp();
+            while (ActiveProcessCount() != 0)
+            {
+                var remaining = timeout - Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero)
+                    throw new TimeoutException("The owned debugger job did not drain.");
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(50) ? remaining : TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            }
+        }
+
+        internal static bool TryTerminateRoot(SafeProcessHandle process)
+        {
+            if (TerminateOwnedProcess(process, uint.MaxValue)) return true;
+            var error = Marshal.GetLastWin32Error();
+            // Access denied can mean exit is still in progress; the caller must wait on this handle.
+            if (error == 5) return false;
+            throw new Win32Exception(error, "Could not terminate the owned debugger root.");
+        }
 
         internal void MakeAttachPassive()
         {
@@ -5973,6 +6145,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateOwnedProcess(SafeProcessHandle process, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

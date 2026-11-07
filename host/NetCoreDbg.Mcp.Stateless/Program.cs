@@ -277,6 +277,7 @@ internal static class Program
         private const string GetDebugState = "get_debug_state";
         private const string DebuggeeActivity = "debuggee_activity";
         private const string StopDebug = "stop_debug";
+        private const string CleanupProcesses = "cleanup_processes";
         private const string RestartDebug = "restart_debug";
         private const string TerminateDebug = "terminate_debug";
         private const string GetThreads = "get_threads";
@@ -815,7 +816,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
+                or PauseExecution or ContinueExecution or StopDebug or CleanupProcesses or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -823,6 +824,17 @@ internal static class Program
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                 : new Dictionary<string, JsonElement>(context.Params.Arguments, StringComparer.Ordinal);
+            var cleanupRequested = name == CleanupProcesses;
+            var cleanupForce = false;
+            LegacyCleanupSnapshot? cleanupObservations = null;
+            if (cleanupRequested)
+            {
+                if (arguments.Keys.Any(static key => key != "force") ||
+                    (arguments.TryGetValue("force", out var force) && force.ValueKind is not (JsonValueKind.True or JsonValueKind.False)))
+                    return LegacyError("Unsupported or invalid argument.", "unknown");
+                cleanupForce = arguments.TryGetValue("force", out force) && force.ValueKind == JsonValueKind.True;
+                if (cleanupForce) { name = StopDebug; arguments.Clear(); }
+            }
             string? breakpointFile = null;
             var breakpointSourceValid = false;
             long breakpointGeneration = 0;
@@ -950,6 +962,12 @@ internal static class Program
                 }
                 if (_legacyAttachClosing && mutation && name != StopDebug)
                     return LegacyError("Attach cleanup is unconfirmed; only owner stop can re-enter it.", "unknown");
+                if (cleanupRequested)
+                {
+                    if (_legacyStarting || _legacyStopping) return LegacyError("A debug session transition is in progress.");
+                    cleanupObservations = CaptureLegacyProcessEntries();
+                    if (!cleanupForce) return LegacyProcessStatus(cleanupObservations);
+                }
                 if (_legacyAttachSession is not null && name == RestartDebug)
                     return LegacyError("An attached session cannot be restarted as a launch.");
                 if (name == HygienePreflight)
@@ -2152,6 +2170,33 @@ internal static class Program
                         return response;
                     });
                 }
+                if (cleanupForce && _legacySessionId is null)
+                {
+                    KeyValuePair<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)>[] orphaned;
+                    lock (_lifetimeGate) orphaned = _ownedSlots.ToArray();
+                    if (orphaned.Length > 0 && (!_legacyHasOwner || _legacyOwner != muxId))
+                        return LegacyCleanupResult(cleanupObservations!, false, "Cleanup owner is unavailable or belongs to another agent.");
+                    _legacyStopping = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    try
+                    {
+                        foreach (var entry in orphaned)
+                        {
+                            var close = entry.Value.Slot.CloseAndDrainAsync();
+                            _ = CompleteRetirementAsync(entry.Key, entry.Value.Session, entry.Value.Slot, entry.Value.Output, close);
+                            await Task.WhenAny(close, Task.Delay(StopTimeout)).ConfigureAwait(false);
+                            if (close.IsFaulted) _ = close.Exception;
+                        }
+                    }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStopping = false;
+                    }
+                    return LegacyCleanupResult(cleanupObservations!, true);
+                }
                 if (name == StopDebug && _legacySessionId is null)
                 {
                     if (_legacyBreakpointSessionId is not null)
@@ -2321,11 +2366,15 @@ internal static class Program
                         if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
                         idleGeneration.Observe("thread");
                         _legacyResources.Publish(idleGeneration);
-                        return LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
+                        return cleanupForce
+                            ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown")
+                            : LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
                     }
                     else if (close.IsFaulted) _ = close.Exception;
                     _legacyResources.Restore(retiredAttachResources);
-                    return LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
+                    return cleanupForce
+                        ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown")
+                        : LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
                 }
                 var targetedStep = false;
                 if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)
@@ -2449,7 +2498,17 @@ internal static class Program
                         gateHeld = true;
                         _legacyStopping = false;
                     }
-                    if (stopped.IsError == true) { _legacyResources.Restore(retired); return LegacyNativeError(stopped); }
+                    if (stopped.IsError == true)
+                    {
+                        _legacyResources.Restore(retired);
+                        if (cleanupForce)
+                        {
+                            var error = stopped.StructuredContent is { } failure && failure.TryGetProperty("error", out var value)
+                                ? value.GetString() : "Debug session cleanup is unconfirmed.";
+                            return LegacyCleanupResult(cleanupObservations!, false, error);
+                        }
+                        return LegacyNativeError(stopped);
+                    }
                     _legacyOutputEvidence.Clear();
                     if (breakpointSession is not null)
                         breakpointSession.WithLegacyBreakpointLock(() =>
@@ -2469,6 +2528,7 @@ internal static class Program
                     if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
                     idleGeneration.Observe("thread");
                     _legacyResources.Publish(idleGeneration);
+                    if (cleanupForce) return LegacyCleanupResult(cleanupObservations!, true);
                     return terminateFallback
                         ? LegacyResponseWithMessage(new { state = "idle" }, "idle", "Adapter does not support terminate; used disconnect instead.")
                         : LegacyResponse(new { success = true });
@@ -3733,6 +3793,7 @@ internal static class Program
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
                     AttachDebug => key != "process_id",
+                    CleanupProcesses => key != "force",
                     RestartDebug => key != "rebuild",
                     GetCallStack => key is not ("thread_id" or "levels"),
                     AddBreakpoint => key is not ("file" or "line" or "condition" or "hit_condition"),
@@ -4369,6 +4430,88 @@ internal static class Program
             }, false);
             return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
                 ? result : LegacyError("Output evidence result exceeds 256 KiB.", state);
+        }
+
+        private sealed record LegacyProcessEntry(int pid, string role, string? program, string? session_id, double registered_at, bool? alive);
+        private sealed record LegacyCleanupSnapshot(LegacyProcessEntry[] Processes, (NetCoreDbgSession Session, int ForcedBefore)[] Owners, bool ObservationsComplete);
+
+        private LegacyCleanupSnapshot CaptureLegacyProcessEntries()
+        {
+            KeyValuePair<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)>[] owners;
+            lock (_lifetimeGate) owners = _ownedSlots.ToArray();
+            var entries = new Dictionary<int, LegacyProcessEntry>();
+            var capturedOwners = new (NetCoreDbgSession Session, int ForcedBefore)[owners.Length];
+            var complete = true;
+            var budget = 0;
+            for (var index = 0; index < owners.Length; index++)
+            {
+                var owner = owners[index];
+                var observations = owner.Value.Session.CaptureLegacyProcessObservations(out var ownerComplete);
+                complete &= ownerComplete;
+                foreach (var process in observations)
+                {
+                    var bytes = 256 + 6 * Encoding.UTF8.GetByteCount(process.Program ?? string.Empty);
+                    if ((!entries.ContainsKey(process.Pid) && entries.Count == 256) || budget + bytes > 192 * 1024)
+                    {
+                        complete = false;
+                        break;
+                    }
+                    budget += bytes;
+                    entries[process.Pid] = new(process.Pid, process.Role, process.Program, owner.Key, process.RegisteredAt, process.Alive);
+                }
+                capturedOwners[index] = (owner.Value.Session, owner.Value.Session.LegacyForcedRootTerminations);
+            }
+            return new(entries.Values.ToArray(), capturedOwners, complete);
+        }
+
+        private CallToolResult LegacyProcessStatus(LegacyCleanupSnapshot snapshot)
+        {
+            var processes = snapshot.Processes;
+            var data = new
+            {
+                action = "status",
+                processes,
+                total = processes.Length,
+                alive = processes.Count(static process => process.alive == true),
+                alive_unknown = processes.Count(static process => process.alive is null),
+                observations_complete = snapshot.ObservationsComplete
+            };
+            if (snapshot.ObservationsComplete) return LegacyResponse(data);
+            const string error = "Process observations are incomplete.";
+            var state = LegacySnapshot().State;
+            return Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}", data }, false);
+        }
+
+        private CallToolResult LegacyCleanupResult(LegacyCleanupSnapshot snapshot, bool success, string? reason = null, string? stateOverride = null)
+        {
+            int remaining;
+            bool unavailable;
+            lock (_lifetimeGate)
+            {
+                remaining = _ownedSlots.Count;
+                unavailable = _shutdownRequested || _startCleanupFailure is not null || _buildCleanupUnconfirmed || _buildActive || _starts != 0;
+            }
+            var complete = success && remaining == 0 && !unavailable;
+            var terminated = 0;
+            foreach (var owner in snapshot.Owners)
+                terminated += Math.Max(0, owner.Session.LegacyForcedRootTerminations - owner.ForcedBefore);
+            var error = reason ?? "Owner cleanup incomplete; unfinished owners remain registered or cleanup is unconfirmed.";
+            var data = new
+            {
+                action = "cleanup",
+                terminated,
+                processes = snapshot.Processes,
+                observations_complete = snapshot.ObservationsComplete,
+                complete,
+                remaining_owners = remaining,
+                errors = complete ? Array.Empty<string>() : new[] { error },
+                tree_terminated = (int?)null,
+                tree_drained = (bool?)null
+            };
+            var state = stateOverride ?? LegacySnapshot().State;
+            return complete
+                ? LegacyResponseWithMessage(data, state, "Cleanup complete; the count includes only confirmed forced roots.")
+                : Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}", data }, false);
         }
 
         private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
@@ -7219,7 +7362,8 @@ internal static class Program
         }
 
         private sealed class SessionCleanupUnconfirmedException(Exception inner)
-            : InvalidOperationException("Debug session cleanup is unconfirmed.", inner) { }
+            : InvalidOperationException("Debug session cleanup is unconfirmed.", inner)
+        { }
 
         private sealed class SessionSlot
         {
@@ -7338,15 +7482,23 @@ internal static class Program
                     _abort.Dispose();
                     return;
                 }
+                var retryJobDrain = _launchStopTask is { IsFaulted: true } failedStop
+                    && failedStop.Exception?.InnerException is NetCoreDbgSession.WindowsJobCleanupUnconfirmedException;
+                var retainForRetry = false;
                 try
                 {
-                    await (_launchStopTask ??= StopLaunchedOnceAsync(drained)).ConfigureAwait(false);
+                    if (!retryJobDrain) await (_launchStopTask ??= StopLaunchedOnceAsync(drained)).ConfigureAwait(false);
+                }
+                catch (NetCoreDbgSession.WindowsJobCleanupUnconfirmedException exception)
+                {
+                    retainForRetry = true;
+                    throw new SessionCleanupUnconfirmedException(exception);
                 }
                 finally
                 {
                     try
                     {
-                        await DisposeForCloseAsync().ConfigureAwait(false);
+                        if (!retainForRetry) await DisposeForCloseAsync().ConfigureAwait(false);
                     }
                     finally
                     {
@@ -8562,6 +8714,7 @@ internal static class Program
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
+                Tool("cleanup_processes", "View process observations or join captured cleanup owners. PIDs do not authorize termination; attached detach remains unconfirmed.", """{"type":"object","properties":{"force":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("debuggee_activity", "Observe DAP events and trace entries during a bounded running-session window.", """{"type":"object","properties":{"window_ms":{"type":"integer","minimum":1,"maximum":30000,"default":1000}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("verify_debug_freshness", "Compare recorded DAP process metadata, observed inventories, workspace and artifact paths; a recorded PID does not prove liveness or process identity.", """{"type":"object","properties":{"expected_process_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"expected_process_name":{"type":["string","null"]},"expected_workspace":{"type":["string","null"]},"expected_sources":{"type":["array","null"],"items":{"type":"string"}},"expected_modules":{"type":["array","null"],"items":{"type":"string"}},"expected_artifacts":{"type":["array","null"],"items":{"type":"string"}},"require_active_process":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),

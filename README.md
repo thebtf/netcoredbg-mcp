@@ -54,7 +54,7 @@ only `start_debug`, `attach_debug`, `get_debug_state`, `debuggee_activity`, `get
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `write_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `search_output`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`,
-`get_build_diagnostics`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
+`get_build_diagnostics`, `stop_debug`, `cleanup_processes`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references`, `get_source_context`, `search_source`, `add_tracepoint`,
 `remove_tracepoint`, `get_trace_log`, `clear_trace_log`, `mark_trace_cursor`,
 `get_trace_delta`, `instrumentation_group_create`, `instrumentation_group_inspect`,
@@ -73,6 +73,22 @@ exits. Safety after an unexpected host or adapter exit is not established.
 When `terminate_debug` falls back to disconnect for an attached process, it uses
 the same retained owner and unconfirmed-detach reporting. `configurationDone` is
 sent during attach only when the adapter advertises that capability.
+
+In this source-built mode, `cleanup_processes` reads process observations by
+default. `force=true` joins existing cleanup and requires the active session's owner;
+an attached target still reports unconfirmed detach. Observed PIDs and their
+current liveness do not prove process-instance identity and never authorize
+termination. Liveness can be null; `alive_unknown` counts those observations.
+On Unix the owned proxy is labelled `adapter_guardian`, not `netcoredbg`.
+The response marks incomplete bounded observations explicitly; they do not block
+owner cleanup. `terminated` counts confirmed forced roots for that operation on
+Windows; on Unix it remains zero because the proxy does not establish the cause.
+It does not count descendants. On Windows, successful owner cleanup requires the
+owned Job's active-process count to reach zero. If termination or drain cannot be
+confirmed, the Job owner remains available for retry. `tree_terminated` and
+`tree_drained` remain null: Job accounting does not prove the state of processes
+outside that Job. Owner counts refer to native session slots, not Python's
+individual callback registrations.
 
 `debuggee_activity` observes reader-received DAP events and legacy trace entries
 over 1–30,000 ms (default 1,000) from an initially running session. It does not
