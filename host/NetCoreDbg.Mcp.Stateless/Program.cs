@@ -288,6 +288,7 @@ internal static class Program
         private const string EvaluateExpression = "evaluate_expression";
         private const string QuickEvaluate = "quick_evaluate";
         private const string SetVariable = "set_variable";
+        private const string ApplyCodeChange = "apply_code_change";
         private const string GetExceptionInfo = "get_exception_info";
         private const string GetStopContext = "get_stop_context";
         private const string GetExceptionContext = "get_exception_context";
@@ -818,12 +819,23 @@ internal static class Program
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or CleanupProcesses or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
-                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
+                or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                 : new Dictionary<string, JsonElement>(context.Params.Arguments, StringComparer.Ordinal);
+            string? encRoot = null;
+            string? encFile = null;
+            List<LegacyEncEdit>? encEdits = null;
+            if (name == ApplyCodeChange)
+            {
+                if (!TryReadLegacyEncArguments(arguments, out encFile, out encEdits))
+                    return LegacyError("Invalid source file or edits.");
+                encRoot = await ProjectRootResolver.ResolveAsync(context.Server, cancellationToken,
+                    requestProtocolVersion: context.JsonRpcRequest.Context?.ProtocolVersion).ConfigureAwait(false);
+                if (encRoot is null) return LegacyError("Project root is unavailable.");
+            }
             var cleanupRequested = name == CleanupProcesses;
             var cleanupForce = false;
             LegacyCleanupSnapshot? cleanupObservations = null;
@@ -925,7 +937,7 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or WriteMemory or ConfigureExceptions or GetStepInTargets
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ApplyCodeChange or WriteMemory or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
@@ -2462,6 +2474,14 @@ internal static class Program
                         stackRevision = ++_legacyInspectionRevision;
                     }
                 }
+                if (name == ApplyCodeChange)
+                {
+                    _legacyInspectionSessionId = null;
+                    _legacyInspectionContextId = null;
+                    _legacyInspectionMuxId = null;
+                    _legacyCurrentFrameId = null;
+                    _legacyInspectionRevision++;
+                }
                 var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression or GetStepInTargets ? _legacyInspectionContextId : null;
                 NetCoreDbgSession? inspectionSession = null;
                 if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo
@@ -2533,7 +2553,7 @@ internal static class Program
                         ? LegacyResponseWithMessage(new { state = "idle" }, "idle", "Adapter does not support terminate; used disconnect instead.")
                         : LegacyResponse(new { success = true });
                 }
-                if (compositeMayEvaluate || name == WriteMemory)
+                if (compositeMayEvaluate || name is WriteMemory or ApplyCodeChange)
                 {
                     _legacyCompositeEvaluations++;
                     compositeEvaluationHeld = true;
@@ -2548,6 +2568,26 @@ internal static class Program
                 }
                 _legacyGate.Release();
                 gateHeld = false;
+                if (name == ApplyCodeChange)
+                {
+                    var enc = await LegacyApplyCodeChangeAsync(sessionId, encRoot!, encFile!, encEdits!, cancellationToken).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (!StringComparer.Ordinal.Equals(_legacySessionId, sessionId))
+                        return LegacyError("The debug session changed; the source or runtime may have changed. Do not retry automatically.", "unknown");
+                    var state = LegacySnapshot(sessionId).State;
+                    if (!enc.Success)
+                        return LegacyError(enc.Error + (enc.BackupPath is null ? "" : $" Original backup: {enc.BackupPath}"), state);
+                    return LegacyResponseWithMessage(new
+                    {
+                        success = true,
+                        file = enc.File,
+                        module = enc.Module,
+                        deltas = new { metadata_path = enc.MetadataPath, il_path = enc.IlPath, pdb_path = enc.PdbPath },
+                        apply = enc.Apply ?? JsonSerializer.SerializeToElement(new { }),
+                        backup_path = enc.BackupPath,
+                    }, state, "Code change applied. Select a fresh stack before inspection.");
+                }
                 if (name is ReadMemory or WriteMemory or Disassemble or GetLocations)
                 {
                     var memory = name == WriteMemory
@@ -3785,6 +3825,73 @@ internal static class Program
             catch (InvalidOperationException ex) { return LegacyError(ex.Message); }
         }
 
+        private static bool TryReadLegacyEncArguments(Dictionary<string, JsonElement> arguments,
+            out string? file, out List<LegacyEncEdit>? edits)
+        {
+            file = null;
+            edits = null;
+            if (!arguments.TryGetValue("file", out var source) || source.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(file = source.GetString())
+                || !arguments.TryGetValue("edits", out var values) || values.ValueKind != JsonValueKind.Array)
+                return false;
+            var parsed = new List<LegacyEncEdit>();
+            foreach (var value in values.EnumerateArray())
+            {
+                if (value.ValueKind != JsonValueKind.Object
+                    || !value.TryGetProperty("start_line", out var start) || start.ValueKind != JsonValueKind.Number || !start.TryGetInt32(out var first)
+                    || !value.TryGetProperty("end_line", out var end) || end.ValueKind != JsonValueKind.Number || !end.TryGetInt32(out var last)
+                    || !value.TryGetProperty("new_text", out var text) || text.ValueKind != JsonValueKind.String)
+                    return false;
+                parsed.Add(new LegacyEncEdit(first, last, text.GetString()!));
+            }
+            edits = parsed;
+            return true;
+        }
+
+        private async Task<LegacyEncResult> LegacyApplyCodeChangeAsync(string sessionId, string root,
+            string file, IReadOnlyList<LegacyEncEdit> edits, CancellationToken cancellationToken)
+        {
+            if (!_sessions.TryGetValue(sessionId, out var session) || !_slots.TryGetValue(sessionId, out var slot))
+                return new(false, "No active debug session.");
+            var lease = slot.TryAcquire();
+            if (lease is null) return new(false, "No active debug session.");
+            var close = false;
+            try
+            {
+                if (!_isUsable(session)) { close = true; return new(false, "No active debug session."); }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.ApplyLegacyCodeChangeAsync(root, file, edits, operation.Token).ConfigureAwait(false);
+                close = result.RequiresDrain;
+                return result;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                close = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                close = true;
+                return new(false, "Code change outcome is unknown; do not retry automatically.", OutcomeUnknown: true, RequiresDrain: true);
+            }
+            finally
+            {
+                lease.Dispose();
+                if (close)
+                {
+                    var cleanup = slot.CloseAndDrainAsync();
+                    if (slot.IsAttached)
+                    {
+                        _ = cleanup.ContinueWith(static task => { _ = task.Exception; }, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                        await Task.WhenAny(cleanup, Task.Delay(StopTimeout)).ConfigureAwait(false);
+                        if (cleanup.IsFaulted) _ = cleanup.Exception;
+                    }
+                    else { try { await cleanup.ConfigureAwait(false); } catch (Exception) { } }
+                }
+            }
+        }
+
         private static bool HasInvalidLegacyArguments(string name, Dictionary<string, JsonElement> arguments)
         {
             foreach (var key in arguments.Keys)
@@ -3819,6 +3926,7 @@ internal static class Program
                     Disassemble => key is not ("memory_reference" or "offset" or "instruction_offset" or "instruction_count" or "resolve_symbols"),
                     GetLocations => key != "location_reference",
                     SetVariable => key is not ("variables_reference" or "name" or "value"),
+                    ApplyCodeChange => key is not ("file" or "edits"),
                     ConfigureExceptions => key != "filters",
                     GetExceptionInfo => key != "thread_id",
                     GetStopContext => key is not ("include_variables" or "include_output_tail"),
@@ -4337,7 +4445,7 @@ internal static class Program
         private static string[] LegacyActions(string state) => state switch
         {
             "idle" => ["start_debug"],
-            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "get_output", "get_output_tail", "stop_debug"],
+            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "apply_code_change", "get_output", "get_output_tail", "stop_debug"],
             "running" => ["get_debug_state", "debuggee_activity", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
             _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
         };
@@ -8714,6 +8822,7 @@ internal static class Program
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
+                Tool("apply_code_change", "Apply one same-line Edit-and-Continue delta per module and debuggee session. Windows and an EnC-enabled debugger are required; unconfirmed outcomes are not retried.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"edits":{"type":"array","items":{"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"},"new_text":{"type":"string"}},"required":["start_line","end_line","new_text"]}}},"required":["file","edits"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("cleanup_processes", "View process observations or join captured cleanup owners. PIDs do not authorize termination; attached detach remains unconfirmed.", """{"type":"object","properties":{"force":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("debuggee_activity", "Observe DAP events and trace entries during a bounded running-session window.", """{"type":"object","properties":{"window_ms":{"type":"integer","minimum":1,"maximum":30000,"default":1000}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),

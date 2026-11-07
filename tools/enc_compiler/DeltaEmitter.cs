@@ -30,13 +30,38 @@ public sealed class DeltaEmitter
         optimizationLevel: OptimizationLevel.Debug,
         allowUnsafe: true);
 
-    public async Task<DeltaEmitResult> EmitDeltaAsync(
+    public Task<DeltaEmitResult> EmitDeltaAsync(
         string projectPath,
         string filePath,
         IReadOnlyList<SourceEdit> edits,
         string? modulePath = null,
         string? outputDirectory = null,
         CancellationToken cancellationToken = default)
+    {
+        return EmitDeltaCoreAsync(projectPath, filePath, null, true, edits, modulePath, outputDirectory, cancellationToken);
+    }
+
+    public Task<DeltaEmitResult> EmitDeltaFromSourceAsync(
+        string projectPath,
+        string filePath,
+        string originalSource,
+        IReadOnlyList<SourceEdit> edits,
+        string? modulePath = null,
+        string? outputDirectory = null,
+        CancellationToken cancellationToken = default)
+    {
+        return EmitDeltaCoreAsync(projectPath, filePath, originalSource, false, edits, modulePath, outputDirectory, cancellationToken);
+    }
+
+    private async Task<DeltaEmitResult> EmitDeltaCoreAsync(
+        string projectPath,
+        string filePath,
+        string? originalSource,
+        bool readSourceFromDisk,
+        IReadOnlyList<SourceEdit> edits,
+        string? modulePath,
+        string? outputDirectory,
+        CancellationToken cancellationToken)
     {
         if (edits.Count == 0)
         {
@@ -45,7 +70,9 @@ public sealed class DeltaEmitter
 
         var projectRoot = ResolveProjectRoot(projectPath);
         var targetFile = ResolveTargetFile(projectRoot, filePath);
-        var originalSource = await File.ReadAllTextAsync(targetFile, Encoding.UTF8, cancellationToken);
+        originalSource = readSourceFromDisk
+            ? await File.ReadAllTextAsync(targetFile, Encoding.UTF8, cancellationToken)
+            : originalSource ?? throw new ArgumentNullException(nameof(originalSource));
         var editedSource = ApplyEdits(originalSource, edits);
 
         var rudeEdits = DetectRudeEdits(originalSource, editedSource);
@@ -131,9 +158,11 @@ public sealed class DeltaEmitter
         return BaselineArtifacts.FromImages(originalEmit.AssemblyBytes, originalEmit.PdbBytes);
     }
 
-    private static string ApplyEdits(string source, IReadOnlyList<SourceEdit> edits)
+    public static string ApplyEdits(string source, IReadOnlyList<SourceEdit> edits)
     {
         var lines = SplitLines(source);
+        if (source.EndsWith('\n') || source.EndsWith('\r'))
+            lines.RemoveAt(lines.Count - 1);
         foreach (var edit in edits.OrderByDescending(edit => edit.StartLine))
         {
             if (edit.StartLine < 1 || edit.EndLine < edit.StartLine || edit.EndLine > lines.Count)
