@@ -1998,7 +1998,14 @@ internal static class Program
                         if (name != "runtime_smoke_validate_probe" &&
                             (generation != _legacySessionGeneration || _legacyStarting || _legacyStopping || (_legacyHasOwner && _legacyOwner != muxId)))
                             return LegacyError("Debug session changed before runtime smoke admission.");
-                        data = name == "runtime_smoke_validate_probe" ? prepared.Data : _legacySmoke.Start(name, prepared, muxId);
+                        if (name == "runtime_smoke_validate_probe") data = prepared.Data;
+                        else
+                        {
+                            var observer = CreateLegacySmokeOutputObserver(prepared.Plan, generation, _legacySessionId, muxId);
+                            Func<JsonObject, CancellationToken, Task<JsonObject>>? runner = observer is null ? null :
+                                (plan, token) => LegacyRuntimeSmokeFileRunner.RunAsync(plan, token, observer);
+                            data = _legacySmoke.Start(name, prepared, muxId, runner);
+                        }
                     }
                     else if (name is "runtime_smoke_evidence_bundle" or "runtime_smoke_tail_events" or "runtime_smoke_mark_event_cursor" or "runtime_smoke_get_event_delta" or "runtime_smoke_cleanup_contract")
                         data = _legacySmoke.Observe(name, arguments, muxId);
@@ -2057,11 +2064,13 @@ internal static class Program
                     else
                     {
                         var plan = JsonNode.Parse(planValue.GetRawText());
+                        var observer = name == RunRuntimeSmoke
+                            ? CreateLegacySmokeOutputObserver(plan, _legacySessionGeneration, _legacySessionId, muxId) : null;
                         _legacyGate.Release();
                         gateHeld = false;
                         data = name == RuntimeSmokeValidatePlan
                             ? LegacyRuntimeSmokeFileRunner.Validate(plan)
-                            : await LegacyRuntimeSmokeFileRunner.RunAsync(plan, cancellationToken).ConfigureAwait(false);
+                            : await LegacyRuntimeSmokeFileRunner.RunAsync(plan, cancellationToken, observer).ConfigureAwait(false);
                         await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                         gateHeld = true;
                     }
@@ -3978,6 +3987,81 @@ internal static class Program
                 return LegacyEvidenceResponse(data, checkpoint: false);
             }
             catch (InvalidOperationException ex) { return LegacyError(ex.Message); }
+        }
+
+        private Func<JsonObject, CancellationToken, Task<JsonObject>>? CreateLegacySmokeOutputObserver(
+            JsonNode? plan, long generation, string? sessionId, string? owner)
+        {
+            if (!LegacyRuntimeSmokeFileRunner.UsesOutput(plan)) return null;
+            return (probe, token) => ObserveLegacySmokeOutputAsync(probe, generation, sessionId, owner, token);
+        }
+
+        private async Task<JsonObject> ObserveLegacySmokeOutputAsync(JsonObject probe, long generation,
+            string? sessionId, string? owner, CancellationToken cancellationToken)
+        {
+            var name = probe["name"]?.GetValue<string>();
+            var observed = new JsonObject
+            {
+                ["name"] = string.IsNullOrEmpty(name) ? "output.since" : name,
+                ["kind"] = "output.since",
+                ["status"] = "FAIL",
+            };
+            await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_legacySessionGeneration != generation || _legacySessionId != sessionId || _legacyStarting || _legacyStopping || _legacyAttachClosing ||
+                    (sessionId is not null && _legacyHasOwner && _legacyOwner != owner))
+                {
+                    observed["reason"] = "debug session changed before output observation";
+                    return observed;
+                }
+                DapOutputBuffer? buffer = null;
+                lock (_lifetimeGate)
+                {
+                    if (sessionId is not null)
+                    {
+                        if (!_outputs.TryGetValue(sessionId, out var lifetime))
+                        {
+                            observed["reason"] = "output is unavailable";
+                            return observed;
+                        }
+                        buffer = lifetime.Buffer;
+                    }
+                    else if (_startCleanupFailure is not null || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
+                    {
+                        observed["reason"] = "debug session cleanup is unconfirmed";
+                        return observed;
+                    }
+                }
+                var checkpoint = probe["checkpoint"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(checkpoint)) checkpoint = "default";
+                var required = probe["required"] is JsonArray requiredItems ? requiredItems.Select(item => item!.GetValue<string>()).ToArray() : [];
+                var forbidden = probe["forbidden"] is JsonArray forbiddenItems ? forbiddenItems.Select(item => item!.GetValue<string>()).ToArray() : [];
+                var maxMatches = probe["max_matches"]?.GetValue<int>() ?? 20;
+                JsonObject result;
+                try
+                {
+                    result = JsonSerializer.SerializeToNode(_legacyOutputEvidence.Assert(checkpoint, required, forbidden, false, maxMatches, buffer, cancellationToken))!.AsObject();
+                }
+                catch (InvalidOperationException exception)
+                {
+                    observed["reason"] = exception.Message;
+                    return observed;
+                }
+                var status = result["status"]?.GetValue<string>() ?? "FAIL";
+                observed["status"] = status;
+                observed["value"] = new JsonObject
+                {
+                    ["matched_line_count"] = (result["matches"] as JsonArray)?.Count ?? 0,
+                    ["missing_required"] = result["missing_required"]?.DeepClone() ?? new JsonArray(),
+                    ["forbidden_matches"] = result["forbidden_matches"]?.DeepClone() ?? new JsonArray(),
+                };
+                if (status != "PASS") observed["reason"] = result["reason"]?.DeepClone() ?? JsonValue.Create("output assertion failed");
+                if (result["evidence_refs"] is JsonArray { Count: > 0 } refs && refs[0]?["ref"] is JsonValue evidence && evidence.TryGetValue<string>(out var reference))
+                    observed["evidence_ref"] = reference;
+                return observed;
+            }
+            finally { _legacyGate.Release(); }
         }
 
         private static bool TryReadLegacyEncArguments(Dictionary<string, JsonElement> arguments,
@@ -8987,15 +9071,15 @@ internal static class Program
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
                 Tool("inspect_debug_launch_compatibility", "Inspect target and active dbgshim versions without launching. Native launch does not automatically select cached shims.", """{"type":"object","properties":{"program":{"type":"string","minLength":1}},"required":["program"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_validate_plan", "Validate an inline native file.json after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("run_runtime_smoke", "Run an admitted native file.json after-probe plan without UI actions. Other runtime-smoke scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
-                Tool("runtime_smoke_validate_probe", "Validate a Windows file.json after-probe; unsupported probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_run_probe", "Start a durable Windows file.json after-probe; unsupported probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_run_plan", "Start an admitted Windows file.json plan; plan_path and agent_mode are blocked.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]},"agent_mode":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_plan", "Validate an inline native file.json or literal output.since after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("run_runtime_smoke", "Run an admitted native file.json or literal output.since after-probe plan without UI actions. Other scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_probe", "Validate a Windows file.json or literal output.since after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_probe", "Start a durable Windows file.json or literal output.since after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_plan", "Start an admitted native file.json or literal output.since plan; plan_path and agent_mode are blocked.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]},"agent_mode":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_get_result", "Get a retained native runtime-smoke result owned by this mux client.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_wait_for_result", "Wait up to 30 seconds for an owned native runtime-smoke result; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"timeout_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000},"poll_interval_ms":{"type":"integer","minimum":0,"maximum":30000,"default":100},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128,"default":50},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_stop", "Cancel or join an owned native runtime-smoke run; an undrained run stays nonfinal.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_start", "Start an admitted Windows file.json runtime-smoke plan.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_start", "Start an admitted native file.json or literal output.since runtime-smoke plan.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_evidence_bundle", "Read bounded lifecycle evidence for an owned native runtime-smoke run; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_tail_events", "Read bounded lifecycle events for an owned native runtime-smoke run.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0,"maximum":128}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_mark_event_cursor", "Mark an owned native lifecycle cursor; additional sources and agent_mode are blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"agent_mode":{"type":"boolean","default":false},"include_debug_output":{"type":["boolean","null"]},"include_trace_source":{"type":["boolean","null"]},"include_app_diagnostics":{"type":["boolean","null"]}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),

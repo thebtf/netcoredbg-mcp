@@ -1342,15 +1342,21 @@ For long-lived orchestration, use the lifecycle family:
 consumer-mode release gate and the examples in [`docs/examples/`](docs/examples/)
 for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 
-The source-built opt-in `--legacy-compat` host supports a narrower Windows-only
-runtime-smoke path: one inline v2 case, one after-phase `file.json` probe,
-an optional `ui.noop` action, no cleanup, and an absolute path on a drive that
-Windows reports as fixed.
-JSONPath is limited to dotted identifiers; expected values are strings or null,
-and files are limited to 16 MiB. Device paths, reparse points,
-`diagnostic-latest.json`, file-based plan inputs, and other plans are refused.
+The source-built opt-in `--legacy-compat` host supports one inline v2 case with
+one after-phase probe, an optional `ui.noop` action, and no cleanup. A
+`file.json` probe is Windows-only and requires an absolute path on a drive that
+Windows reports as fixed. JSONPath is limited to dotted identifiers; expected
+values are strings or null, and files are limited to 16 MiB. Device paths,
+reparse points, `diagnostic-latest.json`, and file-based plan inputs are refused.
 Path checks are point-in-time checks, not a guarantee against concurrent
 replacement. Process metrics are reported as unavailable.
+
+An `output.since` probe uses an existing named output checkpoint and requires
+`regex=false`; patterns are literal strings. A missing or trimmed checkpoint,
+session replacement, or unavailable output cannot pass. Observations describe
+the captured session at the time of the check, not later output or state.
+Regex probes remain blocked until Python regex compatibility is established.
+The output path has not yet been verified on Linux or macOS.
 
 For this subset, `runtime_smoke_validate_probe` validates without starting a
 run. `runtime_smoke_start`, `runtime_smoke_run_probe` and `runtime_smoke_run_plan`

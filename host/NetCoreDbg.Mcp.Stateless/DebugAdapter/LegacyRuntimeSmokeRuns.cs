@@ -41,7 +41,9 @@ internal sealed class LegacyRuntimeSmokeRuns
         }
     }
 
-    public JsonObject Start(JsonObject plan, string? owner)
+    public JsonObject Start(JsonObject plan, string? owner) => StartWithRunner(plan, owner, _runner);
+
+    internal JsonObject StartWithRunner(JsonObject plan, string? owner, Func<JsonObject, CancellationToken, Task<JsonObject>> runner)
     {
         lock (_gate)
         {
@@ -67,7 +69,7 @@ internal sealed class LegacyRuntimeSmokeRuns
             AppendEvent(run, "started", "runtime smoke run started");
             _runs.Add(run.Id, run);
             _active = run;
-            _ = Task.Run(() => ExecuteAsync(run, copy));
+            _ = Task.Run(() => ExecuteAsync(run, copy, runner));
             return RunningPayload(run);
         }
     }
@@ -261,13 +263,13 @@ internal sealed class LegacyRuntimeSmokeRuns
         await run.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(StopTimeoutMs), cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task ExecuteAsync(Run run, JsonObject plan)
+    private async Task ExecuteAsync(Run run, JsonObject plan, Func<JsonObject, CancellationToken, Task<JsonObject>> runner)
     {
         JsonObject result;
         string eventKind;
         try
         {
-            result = await _runner(plan, run.Cancellation.Token).ConfigureAwait(false);
+            result = await runner(plan, run.Cancellation.Token).ConfigureAwait(false);
             eventKind = "completed";
         }
         catch (OperationCanceledException) when (run.Cancellation.IsCancellationRequested)

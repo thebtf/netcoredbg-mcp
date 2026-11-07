@@ -98,10 +98,10 @@ internal sealed class LegacyRuntimeSmokeFacade
         return new(CanRun(result) ? inlinePlan : null, result);
     }
 
-    internal JsonObject Start(string name, Prepared prepared, string? owner)
+    internal JsonObject Start(string name, Prepared prepared, string? owner, Func<JsonObject, CancellationToken, Task<JsonObject>>? runner = null)
     {
         if (prepared.Plan is null) return prepared.Data;
-        var result = _runs.Start(prepared.Plan, owner);
+        var result = runner is null ? _runs.Start(prepared.Plan, owner) : _runs.StartWithRunner(prepared.Plan, owner, runner);
         if (name != "runtime_smoke_start") result["validation"] = ValidationSummary(prepared.Data);
         if (name == "runtime_smoke_run_probe")
         {
