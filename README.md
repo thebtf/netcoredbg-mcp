@@ -1352,11 +1352,14 @@ Path checks are point-in-time checks, not a guarantee against concurrent
 replacement. Process metrics are reported as unavailable.
 
 An `output.since` probe uses an existing named output checkpoint and requires
-`regex=false`; patterns are literal strings. A missing or trimmed checkpoint,
-session replacement, or unavailable output cannot pass. Observations describe
-the captured session at the time of the check, not later output or state.
-Regex probes remain blocked until Python regex compatibility is established.
-The output path has not yet been verified on Linux or macOS.
+`regex=false`; patterns are literal strings. An `output.field` probe reads the
+first matching `field=` value on a line containing its requested `source=` and
+`reason=` markers, with optional exact or `contains:` expectations. Its checkpoint
+and locator fields must be strings or null, at most 4,096 characters each. A
+missing or trimmed checkpoint, session replacement, or unavailable output cannot pass.
+Observations describe the captured session at the time of the check, not later
+output or state. Regex probes remain blocked until Python regex compatibility is
+established. The output path has not yet been verified on Linux or macOS.
 
 For this subset, `runtime_smoke_validate_probe` validates without starting a
 run. `runtime_smoke_start`, `runtime_smoke_run_probe` and `runtime_smoke_run_plan`

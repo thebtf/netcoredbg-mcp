@@ -4000,10 +4000,11 @@ internal static class Program
             string? sessionId, string? owner, CancellationToken cancellationToken)
         {
             var name = probe["name"]?.GetValue<string>();
+            var kind = probe["kind"]!.GetValue<string>();
             var observed = new JsonObject
             {
-                ["name"] = string.IsNullOrEmpty(name) ? "output.since" : name,
-                ["kind"] = "output.since",
+                ["name"] = string.IsNullOrEmpty(name) ? kind : name,
+                ["kind"] = kind,
                 ["status"] = "FAIL",
             };
             await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -4035,6 +4036,39 @@ internal static class Program
                 }
                 var checkpoint = probe["checkpoint"]?.GetValue<string>();
                 if (string.IsNullOrEmpty(checkpoint)) checkpoint = "default";
+                if (kind == "output.field")
+                {
+                    JsonObject fieldResult;
+                    try
+                    {
+                        fieldResult = _legacyOutputEvidence.Field(checkpoint,
+                            probe["source"]?.GetValue<string>() ?? string.Empty,
+                            probe["reason"]?.GetValue<string>() ?? string.Empty,
+                            probe["field"]?.GetValue<string>() ?? string.Empty, buffer, cancellationToken);
+                    }
+                    catch (InvalidOperationException exception)
+                    {
+                        observed["reason"] = exception.Message;
+                        return observed;
+                    }
+                    foreach (var item in fieldResult) observed[item.Key] = item.Value?.DeepClone();
+                    if (fieldResult["status"]?.GetValue<string>() == "PASS" && (probe.ContainsKey("expected") || probe.ContainsKey("expect")))
+                    {
+                        var expected = probe.ContainsKey("expected") ? probe["expected"] : probe["expect"];
+                        observed["expected"] = expected?.DeepClone();
+                        var actual = fieldResult["value"]!.GetValue<string>();
+                        var matches = expected is JsonValue expectedValue && expectedValue.TryGetValue<string>(out var expectedText) &&
+                            (expectedText.StartsWith("contains:", StringComparison.Ordinal)
+                                ? actual.Contains(expectedText[9..], StringComparison.Ordinal)
+                                : string.Equals(actual, expectedText, StringComparison.Ordinal));
+                        if (!matches)
+                        {
+                            observed["status"] = "FAIL";
+                            observed["reason"] = "expected value did not match";
+                        }
+                    }
+                    return observed;
+                }
                 var required = probe["required"] is JsonArray requiredItems ? requiredItems.Select(item => item!.GetValue<string>()).ToArray() : [];
                 var forbidden = probe["forbidden"] is JsonArray forbiddenItems ? forbiddenItems.Select(item => item!.GetValue<string>()).ToArray() : [];
                 var maxMatches = probe["max_matches"]?.GetValue<int>() ?? 20;
@@ -9071,15 +9105,15 @@ internal static class Program
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
                 Tool("inspect_debug_launch_compatibility", "Inspect target and active dbgshim versions without launching. Native launch does not automatically select cached shims.", """{"type":"object","properties":{"program":{"type":"string","minLength":1}},"required":["program"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_validate_plan", "Validate an inline native file.json or literal output.since after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("run_runtime_smoke", "Run an admitted native file.json or literal output.since after-probe plan without UI actions. Other scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
-                Tool("runtime_smoke_validate_probe", "Validate a Windows file.json or literal output.since after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_run_probe", "Start a durable Windows file.json or literal output.since after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_run_plan", "Start an admitted native file.json or literal output.since plan; plan_path and agent_mode are blocked.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]},"agent_mode":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_plan", "Validate an inline native file.json or literal output.since or output.field after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("run_runtime_smoke", "Run an admitted native file.json or literal output.since or output.field after-probe plan without UI actions. Other scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_probe", "Validate a Windows file.json or literal output.since or output.field after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_probe", "Start a durable Windows file.json or literal output.since or output.field after-probe; other probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_plan", "Start an admitted native file.json or literal output.since or output.field plan; plan_path and agent_mode are blocked.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]},"agent_mode":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_get_result", "Get a retained native runtime-smoke result owned by this mux client.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_wait_for_result", "Wait up to 30 seconds for an owned native runtime-smoke result; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"timeout_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000},"poll_interval_ms":{"type":"integer","minimum":0,"maximum":30000,"default":100},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128,"default":50},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_stop", "Cancel or join an owned native runtime-smoke run; an undrained run stays nonfinal.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, IdempotentHint = true, OpenWorldHint = false }),
-                Tool("runtime_smoke_start", "Start an admitted native file.json or literal output.since runtime-smoke plan.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_start", "Start an admitted native file.json or literal output.since or output.field runtime-smoke plan.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_evidence_bundle", "Read bounded lifecycle evidence for an owned native runtime-smoke run; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_tail_events", "Read bounded lifecycle events for an owned native runtime-smoke run.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0,"maximum":128}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_mark_event_cursor", "Mark an owned native lifecycle cursor; additional sources and agent_mode are blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"agent_mode":{"type":"boolean","default":false},"include_debug_output":{"type":["boolean","null"]},"include_trace_source":{"type":["boolean","null"]},"include_app_diagnostics":{"type":["boolean","null"]}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
