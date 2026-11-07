@@ -767,7 +767,7 @@ def register_debug_tools(
                 )
 
             session.prepare_for_execution()
-            await session.client.terminate()
+            await session._request_execution(session.client.terminate)
             snapshot = await session.wait_for_stopped(timeout=10.0)
             await notify_state_changed(ctx)
             await notify_threads(ctx)

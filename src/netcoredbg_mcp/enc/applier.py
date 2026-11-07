@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +23,7 @@ async def apply_deltas(
     line_updates_path: str | None,
     *,
     timeout: float = 30.0,
+    admission: Callable[[], bool] | None = None,
 ) -> ApplyDeltasResult:
     """Send the custom netcoredbg applyDeltas DAP request."""
     arguments = {
@@ -33,7 +35,12 @@ async def apply_deltas(
     if line_updates_path:
         arguments["lineUpdatesPath"] = line_updates_path
 
-    response = await dap_client.send_request("applyDeltas", arguments, timeout=timeout)
+    if admission is None:
+        response = await dap_client.send_request("applyDeltas", arguments, timeout=timeout)
+    else:
+        response = await dap_client._send_request(
+            "applyDeltas", arguments, timeout=timeout, admission=admission
+        )
     return ApplyDeltasResult(
         success=bool(response.success),
         message=response.message,
