@@ -970,7 +970,7 @@ internal static class Program
                     }
                     if (_legacyHasOwner && _legacyOwner != muxId && !(name is (DebuggeeActivity or VerifyDebugFreshness) && _legacyOwner is null))
                         return LegacyError("Debug session is owned by another agent.");
-                    if (name != VerifyDebugFreshness && name is not ("runtime_smoke_get_result" or "runtime_smoke_wait_for_result"))
+                    if (name != VerifyDebugFreshness && !LegacyRuntimeSmokeFacade.IsReadOnly(name))
                     {
                         _legacyHasOwner = true;
                         _legacyOwner = muxId;
@@ -1987,7 +1987,7 @@ internal static class Program
                 if (LegacyRuntimeSmokeFacade.IsTool(name))
                 {
                     JsonObject data;
-                    if (name is "runtime_smoke_validate_probe" or "runtime_smoke_run_probe" or "runtime_smoke_run_plan")
+                    if (name is "runtime_smoke_validate_probe" or "runtime_smoke_run_probe" or "runtime_smoke_run_plan" or "runtime_smoke_start")
                     {
                         var generation = _legacySessionGeneration;
                         _legacyGate.Release();
@@ -2000,6 +2000,8 @@ internal static class Program
                             return LegacyError("Debug session changed before runtime smoke admission.");
                         data = name == "runtime_smoke_validate_probe" ? prepared.Data : _legacySmoke.Start(name, prepared, muxId);
                     }
+                    else if (name is "runtime_smoke_evidence_bundle" or "runtime_smoke_tail_events" or "runtime_smoke_mark_event_cursor" or "runtime_smoke_get_event_delta" or "runtime_smoke_cleanup_contract")
+                        data = _legacySmoke.Observe(name, arguments, muxId);
                     else
                     {
                         if (!arguments.TryGetValue("run_id", out var runIdValue) || runIdValue.ValueKind != JsonValueKind.String ||
@@ -2020,11 +2022,13 @@ internal static class Program
                     }
                     cancellationToken.ThrowIfCancellationRequested();
                     var state = LegacySnapshot().State;
-                    var next = name == "runtime_smoke_validate_probe" && data["can_run"]?.GetValue<bool>() == true
-                        ? new[] { "runtime_smoke_run_probe", "runtime_smoke_validate_plan" }
-                        : data["run_id"] is not null
-                            ? new[] { "runtime_smoke_wait_for_result", "runtime_smoke_get_result", "runtime_smoke_stop" }
-                            : new[] { "runtime_smoke_validate_probe", "runtime_smoke_validate_plan" };
+                    var next = data["next_actions"] is JsonArray proposed
+                        ? proposed.Select(static item => item!.GetValue<string>()).ToArray()
+                        : name == "runtime_smoke_validate_probe" && data["can_run"]?.GetValue<bool>() == true
+                            ? new[] { "runtime_smoke_run_probe", "runtime_smoke_validate_plan" }
+                            : data["run_id"] is not null
+                                ? new[] { "runtime_smoke_wait_for_result", "runtime_smoke_get_result", "runtime_smoke_stop" }
+                                : new[] { "runtime_smoke_validate_probe", "runtime_smoke_validate_plan" };
                     var response = Result(new { state, next_actions = next, message = "Native runtime smoke result.", data }, false);
                     return response.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
                         ? response : LegacyError("Runtime smoke result exceeds 256 KiB.", state);
@@ -8991,6 +8995,12 @@ internal static class Program
                 Tool("runtime_smoke_get_result", "Get a retained native runtime-smoke result owned by this mux client.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_wait_for_result", "Wait up to 30 seconds for an owned native runtime-smoke result; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"timeout_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000},"poll_interval_ms":{"type":"integer","minimum":0,"maximum":30000,"default":100},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128,"default":50},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_stop", "Cancel or join an owned native runtime-smoke run; an undrained run stays nonfinal.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_start", "Start an admitted Windows file.json runtime-smoke plan.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_evidence_bundle", "Read bounded lifecycle evidence for an owned native runtime-smoke run; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_tail_events", "Read bounded lifecycle events for an owned native runtime-smoke run.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"after_cursor":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0,"maximum":128}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_mark_event_cursor", "Mark an owned native lifecycle cursor; additional sources and agent_mode are blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"agent_mode":{"type":"boolean","default":false},"include_debug_output":{"type":["boolean","null"]},"include_trace_source":{"type":["boolean","null"]},"include_app_diagnostics":{"type":["boolean","null"]}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_get_event_delta", "Read lifecycle events after an owned cursor; additional sources and agent_mode are blocked.", """{"type":"object","properties":{"cursor":{"type":"object"},"event_limit":{"type":"integer","minimum":0,"maximum":128},"agent_mode":{"type":"boolean","default":false}},"required":["cursor"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_cleanup_contract", "Check native runtime-smoke cleanup; unconfirmed cleanup remains blocked.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),

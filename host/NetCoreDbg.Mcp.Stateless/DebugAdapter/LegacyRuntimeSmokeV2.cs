@@ -404,7 +404,6 @@ internal static class LegacyRuntimeSmokeV2
     private static JsonArray Strings(IEnumerable<string> values) { var result = new JsonArray(); foreach (string value in values) result.Add(value); return result; }
     private static bool Contains(string[] choices, JsonNode? value)
     {
-        if (value is JsonArray or JsonObject) throw new ArgumentException($"unhashable type: '{PythonType(value)}'");
         return IsString(value) && choices.Contains(PyString(value), StringComparer.Ordinal);
     }
     private static string PythonType(JsonNode? value) => value switch

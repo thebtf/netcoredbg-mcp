@@ -15,6 +15,7 @@ internal sealed class LegacyRuntimeSmokeRuns
     private readonly Queue<string> _completed = new();
     private Run? _active;
     private bool _closed;
+    private Run? _cleanupUnconfirmed;
 
     internal LegacyRuntimeSmokeRuns() : this(LegacyRuntimeSmokeFileRunner.RunAsync) { }
     internal LegacyRuntimeSmokeRuns(Func<JsonObject, CancellationToken, Task<JsonObject>> runner) => _runner = runner;
@@ -46,6 +47,8 @@ internal sealed class LegacyRuntimeSmokeRuns
         {
             if (_closed)
                 return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke registry is closed", ["run_created"] = false, ["final"] = false };
+            if (_cleanupUnconfirmed is not null)
+                return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke cleanup is unconfirmed", ["run_created"] = false, ["final"] = false };
             if (_active is not null)
             {
                 var blocked = new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke run already active", ["run_created"] = false, ["final"] = false };
@@ -73,6 +76,97 @@ internal sealed class LegacyRuntimeSmokeRuns
     {
         lock (_gate)
             return Find(runId, owner) is Run run ? Payload(run) : NotFound(runId);
+    }
+
+    public JsonObject TailEvents(string runId, string? owner, int afterCursor, int limit)
+    {
+        lock (_gate)
+        {
+            Run? run = Find(runId, owner);
+            return run is null ? NotFound(runId) : Tail(run, afterCursor, limit);
+        }
+    }
+
+    public JsonObject EvidenceBundle(string runId, string? owner, int afterCursor, int limit)
+    {
+        lock (_gate)
+        {
+            Run? run = Find(runId, owner);
+            return run is null ? MissingBundle(runId, afterCursor, limit) : Bundle(run, afterCursor, limit);
+        }
+    }
+
+    public JsonObject MarkEventCursor(string runId, string? owner)
+    {
+        lock (_gate)
+        {
+            Run? run = Find(runId, owner);
+            if (run is null) return MissingDelta(runId, 0, 0);
+            return new JsonObject
+            {
+                ["status"] = "PASS",
+                ["reason"] = "runtime smoke event cursor marked",
+                ["run_id"] = run.Id,
+                ["cursor"] = Cursor(run, run.Events.Count),
+                ["final"] = run.Result is not null,
+                ["next_actions"] = new JsonArray("runtime_smoke_get_event_delta", "runtime_smoke_evidence_bundle", "runtime_smoke_tail_events")
+            };
+        }
+    }
+
+    public JsonObject GetEventDelta(string runId, string? owner, int afterCursor, int limit)
+    {
+        lock (_gate)
+        {
+            Run? run = Find(runId, owner);
+            if (run is null) return MissingDelta(runId, afterCursor, limit);
+            afterCursor = Math.Max(0, afterCursor);
+            limit = Math.Clamp(limit, 0, 128);
+            JsonObject tail = Tail(run, afterCursor, limit);
+            var events = (JsonArray)tail["events"]!;
+            int continuation = events.Count > 0 ? events[events.Count - 1]!["cursor"]!.GetValue<int>() : run.Events.Count;
+            return new JsonObject
+            {
+                ["status"] = "PASS",
+                ["reason"] = "runtime smoke event delta read",
+                ["run_id"] = run.Id,
+                ["events"] = events.DeepClone(),
+                ["event_cursor"] = EventCursor(afterCursor, run.Events.Count, limit),
+                ["cursor"] = Cursor(run, continuation),
+                ["final"] = run.Result is not null,
+                ["next_actions"] = new JsonArray("runtime_smoke_get_event_delta", "runtime_smoke_mark_event_cursor", "runtime_smoke_evidence_bundle", "runtime_smoke_tail_events")
+            };
+        }
+    }
+
+    public JsonObject CleanupContract(string? owner)
+    {
+        lock (_gate)
+        {
+            bool active = _active is not null;
+            bool unconfirmed = _cleanupUnconfirmed is not null;
+            string status = active ? "BLOCKED" : unconfirmed ? "FAIL" : "PASS";
+            string reason = active ? "runtime smoke run is still active" :
+                unconfirmed ? "runtime smoke cleanup is unconfirmed" : "runtime smoke cleanup contract already clean";
+            var response = new JsonObject
+            {
+                ["status"] = status,
+                ["reason"] = reason,
+                ["contaminated"] = unconfirmed,
+                ["scope"] = "current_host_process",
+                ["cleanup_contract"] = new JsonObject
+                {
+                    ["status"] = status,
+                    ["required_before"] = unconfirmed,
+                    ["attempted"] = new JsonArray(),
+                    ["failures"] = new JsonArray()
+                }
+            };
+            if (_active is Run run && SameOwner(run, owner)) response["run_id"] = run.Id;
+            else if (_cleanupUnconfirmed is Run failed && SameOwner(failed, owner)) response["run_id"] = failed.Id;
+            if (unconfirmed) response["next_step"] = "Inspect the failed run and close the native host after owned work drains; a new host does not prove previous cleanup.";
+            return response;
+        }
     }
 
     public async Task<JsonObject> WaitForResultAsync(string runId, string? owner, int timeoutMs, int pollIntervalMs, int afterCursor, int eventLimit, CancellationToken cancellationToken)
@@ -223,6 +317,8 @@ internal sealed class LegacyRuntimeSmokeRuns
 
         lock (_gate)
         {
+            string? cleanupStatus = Text((result["cleanup"] as JsonObject)?["status"]);
+            if (cleanupStatus != "PASS") _cleanupUnconfirmed = run;
             run.Status = eventKind == "stopped" ? "STOPPED" : Text(result["status"]) ?? "FAIL";
             result["run_id"] = run.Id;
             result["lifecycle_status"] = run.Status;
@@ -243,7 +339,7 @@ internal sealed class LegacyRuntimeSmokeRuns
                     ["oldest_cursor"] = 1,
                     ["dropped_count"] = 0,
                     ["final"] = true,
-                    ["cleanup"] = null,
+                    ["cleanup"] = cleanupStatus is { Length: <= 512 } ? new JsonObject { ["status"] = cleanupStatus } : null,
                     ["evidence_refs"] = new JsonArray()
                 };
                 eventKind = "failed";
@@ -319,6 +415,65 @@ internal sealed class LegacyRuntimeSmokeRuns
         ["reason"] = "runtime smoke run not found",
         ["run_id"] = runId
     };
+
+    private static JsonObject Tail(Run run, int afterCursor, int limit)
+    {
+        afterCursor = Math.Max(0, afterCursor);
+        limit = Math.Clamp(limit, 0, 128);
+        var events = new JsonArray();
+        foreach (JsonObject item in run.Events)
+        {
+            if (item["cursor"]!.GetValue<int>() > afterCursor && events.Count < limit)
+                events.Add(item.DeepClone());
+        }
+        return new JsonObject
+        {
+            ["status"] = run.Status,
+            ["run_id"] = run.Id,
+            ["events"] = events,
+            ["next_cursor"] = run.Events.Count,
+            ["oldest_cursor"] = 1,
+            ["dropped_count"] = 0,
+            ["stale_cursor"] = false,
+            ["final"] = run.Result is not null
+        };
+    }
+
+    private static JsonObject Cursor(Run run, int afterCursor) => new()
+    {
+        ["run_id"] = run.Id,
+        ["after_cursor"] = afterCursor,
+        ["next_cursor"] = afterCursor,
+        ["oldest_cursor"] = 1,
+        ["dropped_count"] = 0,
+        ["stale_cursor"] = false
+    };
+
+    private static JsonObject EventCursor(int afterCursor, int highWatermark, int limit) => new()
+    {
+        ["after_cursor"] = afterCursor,
+        ["next_cursor"] = highWatermark,
+        ["oldest_cursor"] = 1,
+        ["dropped_count"] = 0,
+        ["stale_cursor"] = false,
+        ["limit"] = limit
+    };
+
+    private static JsonObject MissingDelta(string runId, int afterCursor, int limit)
+    {
+        afterCursor = Math.Max(0, afterCursor);
+        limit = Math.Clamp(limit, 0, 128);
+        return new JsonObject
+        {
+            ["status"] = "FAIL",
+            ["reason"] = "runtime smoke run not found",
+            ["run_id"] = runId,
+            ["events"] = new JsonArray(),
+            ["event_cursor"] = new JsonObject { ["after_cursor"] = afterCursor, ["next_cursor"] = afterCursor, ["oldest_cursor"] = null, ["dropped_count"] = 0, ["stale_cursor"] = false, ["limit"] = limit },
+            ["final"] = true,
+            ["next_actions"] = new JsonArray("runtime_smoke_run_plan")
+        };
+    }
 
     private static JsonObject Bundle(Run run, int afterCursor, int eventLimit)
     {
