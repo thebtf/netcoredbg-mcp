@@ -1091,6 +1091,16 @@ For .NET 6+ targets, a built `.exe` is accepted when its matching `.dll` and
 `inspect_debug_launch_compatibility(program)` before launch when you need to
 inspect the selected runtime and shim without starting the process.
 
+The source-built opt-in `--legacy-compat` host also provides this read-only
+diagnostic. It reports the shim beside the configured absolute debugger and a
+cached candidate, but native launch does not select or replace a cached shim.
+Matching major versions are a heuristic, not proof of the loaded shim or of
+runtime compatibility. A mismatch or unavailable version produces `unknown`,
+not `compatible_after_swap`.
+Relative diagnostic paths use the selected project root and links are resolved;
+native launch passes the supplied path to the debugger, so resolution can differ.
+Python remains the installed default.
+
 ## Desktop UI and visual evidence
 
 While a GUI debuggee is `RUNNING`, use UI tools to observe and operate it. Once
