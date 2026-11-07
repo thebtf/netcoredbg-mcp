@@ -813,7 +813,11 @@ preserving all checked values may be indistinguishable.
 Discovery and invoke share one session-owned helper admission/lifecycle. Each
 operation uses a separate one-shot helper with a single 10-second deadline and
 at most two further seconds for cleanup. Unconfirmed cleanup is reported and
-keeps admission closed until the retained helper's exit is confirmed. The EXE
+keeps admission closed until the retained helper's exit and output drains are
+confirmed. A launched-session stop reports `DEBUG_SESSION_CLEANUP_UNCONFIRMED`;
+retrying stop or a failed shutdown rejoins the retained owner without repeating a
+completed debugger stop or attach drain. Attached-session stop still reports
+unconfirmed detach. A host crash is not proven safe. The EXE
 or dotnet-hosted DLL helper is created atomically inside a
 host-owned Windows kill-on-close Job using `PROC_THREAD_ATTRIBUTE_JOB_LIST`;
 there is no unassigned suspended-child interval. This action requires that
