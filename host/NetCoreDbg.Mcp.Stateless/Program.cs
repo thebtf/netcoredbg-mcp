@@ -343,7 +343,7 @@ internal static class Program
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
         private readonly object _lifetimeGate = new();
         private readonly Dictionary<string, OutputLifetime> _outputs = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, (SessionSlot Slot, OutputLifetime Output)> _ownedSlots = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)> _ownedSlots = new(StringComparer.Ordinal);
         private int _starts;
         private TaskCompletionSource<bool>? _startsDrained;
         private Exception? _startCleanupFailure;
@@ -1656,7 +1656,7 @@ internal static class Program
                             if (_outputs.ContainsKey(attachToken) || _ownedSlots.ContainsKey(attachToken))
                                 throw new InvalidOperationException("The debug-session token is already registered.");
                             _outputs.Add(attachToken, attachOutput);
-                            _ownedSlots.Add(attachToken, (attachSlot, attachOutput));
+                            _ownedSlots.Add(attachToken, (attachSlot, attachOutput, attached));
                             attachRegistered = true;
                             attachLease = attachSlot.TryAcquire() ?? throw new InvalidOperationException("The attach owner is closing.");
                         }
@@ -4799,7 +4799,7 @@ internal static class Program
                     }
 
                     _outputs.Add(token, output);
-                    _ownedSlots.Add(token, (slot, output));
+                    _ownedSlots.Add(token, (slot, output, session));
                     registeredSlot = slot;
                     registeredToken = token;
                     session.RetirementRequested += retiringSession => OnRetirementRequested(token, retiringSession);
@@ -6769,6 +6769,7 @@ internal static class Program
             }
 
             OutputLifetime? retainedOutput;
+            Task? close = null;
             lock (_lifetimeGate)
             {
                 if (_shutdownRequested)
@@ -6776,7 +6777,7 @@ internal static class Program
                     return NotFound();
                 }
 
-                _outputs.Remove(sessionId!, out retainedOutput);
+                _outputs.TryGetValue(sessionId!, out retainedOutput);
                 if (retainedOutput is null && _ownedSlots.ContainsKey(sessionId!))
                 {
                     return NotFound();
@@ -6784,9 +6785,9 @@ internal static class Program
 
                 if (retainedOutput is not null && _ownedSlots.TryGetValue(sessionId!, out var ownership))
                 {
-                    // Revocation and control closure share the publication/admission gate.
-                    // Close publishes its completion before calling back into this registry.
-                    _ = ownership.Slot.CloseAndDrainAsync();
+                    // The same slot owns each cleanup attempt; a retry never repeats a completed stop.
+                    close = ownership.Slot.CloseAndDrainAsync();
+                    _ = CompleteRetirementAsync(sessionId!, ownership.Session, ownership.Slot, retainedOutput, close);
                 }
             }
 
@@ -6794,11 +6795,23 @@ internal static class Program
             {
                 try
                 {
+                    if (close is not null) await close.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var state = await retainedOutput.Cleanup.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    lock (_lifetimeGate)
+                        if (_outputs.TryGetValue(sessionId!, out var current) && ReferenceEquals(current, retainedOutput))
+                            _outputs.Remove(sessionId!);
                     return StopSuccess(state);
+                }
+                catch (SessionCleanupUnconfirmedException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Error("debug_session_cleanup_unconfirmed", "DEBUG_SESSION_CLEANUP_UNCONFIRMED");
                 }
                 catch (Exception) when (!cancellationToken.IsCancellationRequested)
                 {
+                    lock (_lifetimeGate)
+                        if (_outputs.TryGetValue(sessionId!, out var current) && ReferenceEquals(current, retainedOutput))
+                            _outputs.Remove(sessionId!);
                     return NotFound();
                 }
             }
@@ -6840,19 +6853,24 @@ internal static class Program
         public ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
             SessionSlot[] slots;
+            KeyValuePair<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)>[] owned;
             Task<DapSessionState>[] outputCleanup;
             Task startsDrained;
             TaskCompletionSource<bool> completion;
+            CancellationToken shutdownToken;
             lock (_lifetimeGate)
             {
                 _shutdownRequested = true;
                 RegisterStartShutdownCancellation(cancellationToken);
+                if (_shutdownTask is { IsFaulted: true } previous && previous.Exception?.InnerException is SessionCleanupUnconfirmedException)
+                    _shutdownTask = null;
                 if (_shutdownTask is not null)
                 {
                     return new ValueTask(_shutdownTask);
                 }
 
-                slots = _ownedSlots.Values.Select(static ownership => ownership.Slot)
+                owned = _ownedSlots.ToArray();
+                slots = owned.Select(static ownership => ownership.Value.Slot)
                     .Concat(_slots.Values).Distinct().ToArray();
                 outputCleanup = _ownedSlots.Values.Select(static ownership => ownership.Output)
                     .Concat(_outputs.Values).Distinct().Select(static output => output.Cleanup.Task).ToArray();
@@ -6862,14 +6880,18 @@ internal static class Program
                     : (_startsDrained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
                 completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _shutdownTask = completion.Task;
+                shutdownToken = _startShutdownDisposed ? cancellationToken : _startShutdown.Token;
             }
 
-            _ = DisposeCoreAsync(slots, outputCleanup, startsDrained, _startShutdown.Token, completion);
+            var closes = slots.ToDictionary(static slot => slot, slot => slot.CloseAndDrainAsync(shutdownToken));
+            foreach (var entry in owned)
+                _ = CompleteRetirementAsync(entry.Key, entry.Value.Session, entry.Value.Slot, entry.Value.Output, closes[entry.Value.Slot]);
+            _ = DisposeCoreAsync(closes.Values, outputCleanup, startsDrained, shutdownToken, completion);
             return new ValueTask(completion.Task);
         }
 
         private async Task DisposeCoreAsync(
-            SessionSlot[] slots,
+            IEnumerable<Task> closes,
             Task<DapSessionState>[] outputCleanup,
             Task startsDrained,
             CancellationToken cancellationToken,
@@ -6880,8 +6902,8 @@ internal static class Program
             {
                 try
                 {
-                    await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))
-                        .Concat(outputCleanup).Append(startsDrained)).ConfigureAwait(false);
+                    await Task.WhenAll(closes.Append(startsDrained)).ConfigureAwait(false);
+                    await Task.WhenAll(outputCleanup).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -6962,8 +6984,10 @@ internal static class Program
         private void DisposeStartShutdownCancellation(out Exception? startCleanupFailure, out CancellationToken shutdownCancellation)
         {
             List<(CancellationToken Token, CancellationTokenRegistration Registration)>? registrations;
+            bool disposeShutdown;
             lock (_lifetimeGate)
             {
+                disposeShutdown = !_startShutdownDisposed;
                 _startShutdownDisposed = true;
                 startCleanupFailure = _startCleanupFailure;
                 registrations = _startShutdownRegistrations;
@@ -6983,7 +7007,7 @@ internal static class Program
             }
             finally
             {
-                _startShutdown.Dispose();
+                if (disposeShutdown) _startShutdown.Dispose();
             }
 
             shutdownCancellation = default;
@@ -7074,29 +7098,31 @@ internal static class Program
             string token,
             NetCoreDbgSession session,
             SessionSlot slot,
-            OutputLifetime output)
+            OutputLifetime output,
+            Task? close = null)
         {
             DapSessionState? state = null;
             Exception? failure = null;
             try
             {
-                await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                await (close ?? slot.CloseAndDrainAsync()).ConfigureAwait(false);
                 state = session.State;
+            }
+            catch (SessionCleanupUnconfirmedException)
+            {
+                // Keep this exact slot and its pending output until a later cleanup attempt succeeds.
+                return;
             }
             catch (Exception exception)
             {
                 failure = exception;
             }
-            finally
+            lock (_lifetimeGate)
             {
-                lock (_lifetimeGate)
-                {
+                if (_ownedSlots.TryGetValue(token, out var current) && ReferenceEquals(current.Slot, slot))
                     _ownedSlots.Remove(token);
-                }
             }
 
-            // The retained task carries only a value snapshot or the cleanup failure,
-            // never the slot's resource-owning delegates or an async cleanup state machine.
             if (failure is OperationCanceledException cancellation)
             {
                 output.Cleanup.TrySetCanceled(cancellation.CancellationToken);
@@ -7192,6 +7218,9 @@ internal static class Program
             await session.StopForOwnerAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
+        private sealed class SessionCleanupUnconfirmedException(Exception inner)
+            : InvalidOperationException("Debug session cleanup is unconfirmed.", inner) { }
+
         private sealed class SessionSlot
         {
             private readonly object _gate = new();
@@ -7204,6 +7233,8 @@ internal static class Program
             private CancellationTokenRegistration? _cancellationRegistration;
             private CancellationToken _externalCloseCancellation;
             private Task? _closeTask;
+            private Task? _launchStopTask;
+            private Task? _attachDrainTask;
             private TaskCompletionSource<bool>? _drained;
             private int _leases;
             private bool _closed;
@@ -7245,7 +7276,9 @@ internal static class Program
                 TaskCompletionSource<bool> completion;
                 lock (_gate)
                 {
-                    if (_attachDrain is not null && _closeTask is { IsFaulted: true }) _closeTask = null;
+                    if (_closeTask is { IsFaulted: true } previous
+                        && (_attachDrain is not null || previous.Exception?.InnerException is SessionCleanupUnconfirmedException))
+                        _closeTask = null;
                     if (_closeTask is not null)
                     {
                         RegisterCancellation(cancellationToken);
@@ -7289,8 +7322,17 @@ internal static class Program
                 if (_attachDrain is not null)
                 {
                     await drained.ConfigureAwait(false);
-                    await _attachDrain().ConfigureAwait(false);
-                    await _dispose().ConfigureAwait(false);
+                    try
+                    {
+                        if (_attachDrainTask is null || _attachDrainTask.IsFaulted || _attachDrainTask.IsCanceled)
+                            _attachDrainTask = _attachDrain();
+                        await _attachDrainTask.ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new SessionCleanupUnconfirmedException(exception);
+                    }
+                    await DisposeForCloseAsync().ConfigureAwait(false);
                     _remove();
                     lock (_gate) _abortDisposed = true;
                     _abort.Dispose();
@@ -7298,34 +7340,27 @@ internal static class Program
                 }
                 try
                 {
-                    _remove();
-                    var drainExpired = await Task.WhenAny(drained, Task.Delay(_drainTimeout)).ConfigureAwait(false) != drained;
-                    if (drainExpired)
-                    {
-                        _abort.Cancel();
-                    }
-
-                    await drained.ConfigureAwait(false);
-                    await _stop(_abort.IsCancellationRequested ? _abort.Token : CancellationToken.None).ConfigureAwait(false);
-                    lock (_gate)
-                    {
-                        _externalCloseCancellation.ThrowIfCancellationRequested();
-                    }
+                    await (_launchStopTask ??= StopLaunchedOnceAsync(drained)).ConfigureAwait(false);
                 }
                 finally
                 {
                     try
                     {
-                        await _dispose().ConfigureAwait(false);
+                        await DisposeForCloseAsync().ConfigureAwait(false);
                     }
                     finally
                     {
-                        CancellationTokenRegistration? registration;
+                        CancellationTokenRegistration? registration = null;
+                        bool disposeAbort;
                         lock (_gate)
                         {
-                            _abortDisposed = true;
-                            registration = _cancellationRegistration;
-                            _cancellationRegistration = null;
+                            disposeAbort = !_abortDisposed;
+                            if (disposeAbort)
+                            {
+                                _abortDisposed = true;
+                                registration = _cancellationRegistration;
+                                _cancellationRegistration = null;
+                            }
                         }
 
                         try
@@ -7336,10 +7371,26 @@ internal static class Program
                         }
                         finally
                         {
-                            _abort.Dispose();
+                            if (disposeAbort) _abort.Dispose();
                         }
                     }
                 }
+            }
+
+            private async Task StopLaunchedOnceAsync(Task drained)
+            {
+                _remove();
+                var drainExpired = await Task.WhenAny(drained, Task.Delay(_drainTimeout)).ConfigureAwait(false) != drained;
+                if (drainExpired) _abort.Cancel();
+                await drained.ConfigureAwait(false);
+                await _stop(_abort.IsCancellationRequested ? _abort.Token : CancellationToken.None).ConfigureAwait(false);
+                lock (_gate) _externalCloseCancellation.ThrowIfCancellationRequested();
+            }
+
+            private async Task DisposeForCloseAsync()
+            {
+                try { await _dispose().ConfigureAwait(false); }
+                catch (Exception exception) { throw new SessionCleanupUnconfirmedException(exception); }
             }
 
             private void RegisterCancellation(CancellationToken cancellationToken)

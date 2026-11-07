@@ -43,6 +43,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private JsonObject? _captureStabilityObservation;
     private readonly NativeSceneStabilityCoordinator _stabilityCoordinator;
     private int _disposed;
+    private bool _cleanupComplete;
 
     internal NativeSceneSessionBinding(
         string debugSessionId,
@@ -398,19 +399,16 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
-
-        if (_session is { } session)
+        var firstDisposal = Interlocked.Exchange(ref _disposed, 1) == 0;
+        if (firstDisposal && _session is { } session)
             session.NativeUiInvokeAuthorityRevoked -= OnUiInvokeAuthorityRevoked;
-
-        await _uiInvoke.DisposeAsync().ConfigureAwait(false);
+        _uiInvoke.Retire();
 
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (_cleanupComplete) return;
+            await _uiInvoke.DisposeAsync().ConfigureAwait(false);
             await DisposeBridgeAsync().ConfigureAwait(false);
             await _probeChannel.DisposeAsync().ConfigureAwait(false);
             if (_artifactStore is { } store)
@@ -425,6 +423,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     await store.DisposeAsync().ConfigureAwait(false);
                 }
             }
+            _cleanupComplete = true;
         }
         finally
         {
