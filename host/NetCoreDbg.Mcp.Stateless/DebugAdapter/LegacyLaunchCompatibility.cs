@@ -16,13 +16,7 @@ internal static class LegacyLaunchCompatibility
 
     internal static object Inspect(string projectRoot, string program, string? debuggerPath)
     {
-        if (!Directory.Exists(projectRoot)) throw new ArgumentException("Resolved project root is unavailable.");
-        var requestedPath = Path.GetFullPath(program, Path.GetFullPath(projectRoot));
-        if (!NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(requestedPath, out var targetPath, requireExistingFile: true))
-            throw new ArgumentException("Program path is unavailable.");
-        var extension = Path.GetExtension(targetPath);
-        if (!extension.Equals(".dll", StringComparison.OrdinalIgnoreCase) && !extension.Equals(".exe", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Program must be a .NET assembly (.dll/.exe).");
+        var targetPath = ResolveProgram(projectRoot, program, out var linksResolved);
 
         var target = InspectTarget(targetPath);
         var active = InspectActive(debuggerPath);
@@ -55,9 +49,9 @@ internal static class LegacyLaunchCompatibility
             warning = "Target and adjacent dbgshim major versions differ; native launch does not select a cached candidate, and the loaded shim is not verified.";
         }
         if (!Path.IsPathFullyQualified(program))
-            warning = (warning is null ? "" : warning + " ") + "The diagnostic resolves a relative program against the project root; native launch passes the supplied path to the debugger.";
-        if (!string.Equals(requestedPath, targetPath, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-            warning = (warning is null ? "" : warning + " ") + "The diagnostic resolves links; native launch passes the supplied path to the debugger.";
+            warning = (warning is null ? "" : warning + " ") + "The diagnostic resolves a relative program against the project root; native launch resolves it against the server working directory.";
+        if (linksResolved)
+            warning = (warning is null ? "" : warning + " ") + "The diagnostic resolves links; native pre-build launch may resolve them differently.";
 
         return new
         {
@@ -71,6 +65,81 @@ internal static class LegacyLaunchCompatibility
             mutationPerformed = false,
             warning,
         };
+    }
+
+    internal static string ResolveProgram(string baseDirectory, string program, out bool linksResolved)
+    {
+        var basePath = OperatingSystem.IsWindows() ? Path.GetFullPath(baseDirectory) : ResolvePosixPath(Environment.CurrentDirectory, baseDirectory);
+        if (!Directory.Exists(basePath)) throw new ArgumentException("Resolved base directory is unavailable.");
+        var requested = Path.GetFullPath(program, basePath);
+        string canonical;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(requested, out canonical, requireExistingFile: true))
+                throw new ArgumentException("Program path is unavailable.");
+        }
+        else
+        {
+            // POSIX resolves links before parent components, including through missing intermediate paths.
+            canonical = ResolvePosixPath(basePath, program);
+            if (!File.Exists(canonical)) throw new ArgumentException("Program path is unavailable.");
+        }
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        linksResolved = !string.Equals(requested, canonical, comparison);
+        if (!DapBuildCoordinator.TryResolveBuiltProgram(canonical, out var effective))
+            throw new ArgumentException("Program must be a .NET assembly (.dll/.exe).");
+        if (string.Equals(canonical, effective, comparison)) return canonical;
+        string resolved;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(effective!, out resolved, requireExistingFile: true))
+                throw new ArgumentException("Resolved program path is unavailable.");
+        }
+        else
+        {
+            resolved = ResolvePosixPath(basePath, effective!);
+            if (!File.Exists(resolved)) throw new ArgumentException("Resolved program path is unavailable.");
+        }
+        linksResolved |= !string.Equals(effective, resolved, comparison);
+        return resolved;
+    }
+
+    private static string ResolvePosixPath(string basePath, string path)
+    {
+        var resolved = Path.IsPathRooted(path) ? "/" : basePath;
+        var pending = new Stack<(string? Component, string? LinkKey)>();
+        var seen = new Dictionary<string, string?>(StringComparer.Ordinal);
+        void Push(string value)
+        {
+            var parts = value.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            for (var index = parts.Length - 1; index >= 0; index--) pending.Push((parts[index], null));
+        }
+        Push(path);
+        while (pending.TryPop(out var part))
+        {
+            if (part.LinkKey is { } linkKey) { seen[linkKey] = resolved; continue; }
+            var component = part.Component!;
+            if (component == ".") continue;
+            if (component == "..") { resolved = Path.GetDirectoryName(resolved) ?? "/"; continue; }
+            var candidate = Path.Combine(resolved, component);
+            string? link;
+            try { link = new FileInfo(candidate).LinkTarget; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { link = null; }
+            if (link is null) { resolved = candidate; continue; }
+            if (seen.TryGetValue(candidate, out var previous))
+            {
+                if (previous is not null) { resolved = previous; continue; }
+                var unresolved = candidate;
+                foreach (var remaining in pending)
+                    if (remaining.Component is { } name) unresolved = Path.Combine(unresolved, name);
+                return Path.GetFullPath(unresolved);
+            }
+            seen[candidate] = null;
+            pending.Push((null, candidate));
+            if (Path.IsPathRooted(link)) resolved = "/";
+            Push(link);
+        }
+        return Path.GetFullPath(resolved);
     }
 
     private static TargetEvidence InspectTarget(string program)
