@@ -1417,19 +1417,23 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
     internal Task<DapEvaluateResult> EvaluateExpressionAsync(
         string inspectionContextId, int frameId, string expression, CancellationToken cancellationToken) =>
-        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken);
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken, null);
+
+    internal Task<DapEvaluateResult> EvaluateExpressionForSmokeAsync(
+        string inspectionContextId, int frameId, string expression, Action onWriteStarted, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken, onWriteStarted);
 
     internal Task<DapEvaluateResult> EvaluateTracepointAsync(
         string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool> admissionFinished,
         long breakpointRevision, CancellationToken cancellationToken) =>
-        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, admissionFinished, breakpointRevision, cancellationToken);
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, admissionFinished, breakpointRevision, cancellationToken, null);
 
     private async Task<DapEvaluateResult> EvaluateExpressionCoreAsync(
         string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool>? admissionFinished,
-        long? breakpointRevision, CancellationToken cancellationToken)
+        long? breakpointRevision, CancellationToken cancellationToken, Action? onWriteStarted)
     {
         var response = await SendInspectionRequestAsync(
-            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken, admissionFinished, breakpointRevision).ConfigureAwait(false);
+            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken, admissionFinished, breakpointRevision, onWriteStarted).ConfigureAwait(false);
         if (response is null)
         {
             return DapEvaluateResult.Refused;
@@ -3133,7 +3137,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         object arguments,
         string inspectionContextId,
         CancellationToken cancellationToken,
-        TaskCompletionSource<bool>? admissionFinished = null, long? breakpointRevision = null)
+        TaskCompletionSource<bool>? admissionFinished = null, long? breakpointRevision = null, Action? onWriteStarted = null)
     {
         PendingRequest? request = null;
         try
@@ -3157,7 +3161,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             }
 
             request = await BeginRequestAsync(command, arguments, _requestTimeout, cancellationToken,
-                inspectionContextId: inspectionContextId).ConfigureAwait(false);
+                inspectionContextId: inspectionContextId, onWriteStarted: onWriteStarted).ConfigureAwait(false);
         }
         finally
         {
@@ -3195,7 +3199,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         PauseRecord? pause = null,
         bool trackLoadedSourcesWrite = false,
         InitialBreakpointRequest? initialBreakpoints = null,
-        Action<PendingRequest>? requestCreated = null)
+        Action<PendingRequest>? requestCreated = null,
+        Action? onWriteStarted = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -3207,7 +3212,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         continueExecution?.SetRequestSequence(sequence);
         breakpointUpdate?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
-            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause, initialBreakpoints);
+            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause, initialBreakpoints, onWriteStarted);
         requestCreated?.Invoke(request);
         if (pause is not null)
         {
@@ -6353,7 +6358,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         ContinueRecord? continueExecution = null,
         BreakpointUpdate? breakpointUpdate = null,
         PauseRecord? pause = null,
-        InitialBreakpointRequest? initialBreakpoints = null)
+        InitialBreakpointRequest? initialBreakpoints = null,
+        Action? onWriteStarted = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
@@ -6368,7 +6374,11 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         private int _committedWrite;
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
-        public void MarkWriteStarted() => Volatile.Write(ref _writeStarted, 1);
+        public void MarkWriteStarted()
+        {
+            Volatile.Write(ref _writeStarted, 1);
+            onWriteStarted?.Invoke();
+        }
         public void CommitWrite() => Volatile.Write(ref _committedWrite, 1);
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }

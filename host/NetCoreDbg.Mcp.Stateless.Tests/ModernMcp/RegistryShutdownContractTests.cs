@@ -553,6 +553,178 @@ public sealed class RegistryShutdownContractTests
         }
     }
 
+    [Fact]
+    public async Task LegacyRuntimeSmoke_EvaluateUsesCurrentFrameAndReportsCancelledOutcomeUnknown()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"));
+        harness.EnableLegacyCompat();
+        const string owner = "smoke-evaluate-owner";
+        JsonObject Probe(string expression, string? expected = null)
+        {
+            var probe = new JsonObject { ["kind"] = "debug.evaluate", ["phase"] = "after", ["expression"] = expression };
+            if (expected is not null) probe["expected"] = expected;
+            return probe;
+        }
+        JsonObject Plan(JsonObject probe) => new()
+        {
+            ["schema"] = "netcoredbg.runtime_smoke.v2",
+            ["cases"] = new JsonArray(new JsonObject
+            {
+                ["id"] = "evaluate",
+                ["transitions"] = new JsonArray(new JsonObject
+                {
+                    ["settle"] = new JsonObject { ["idle_ms"] = 0 },
+                    ["probes"] = new JsonArray(probe),
+                }),
+            }),
+        };
+        var started = false;
+        Task<CallToolResult>? stop = null;
+        SemaphoreSlim? admission = null;
+        var admissionHeld = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "evaluate-launch", owner));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyWithMetaAsync("get_threads", new JsonObject(), "evaluate-barrier", owner);
+            var blocked = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(Probe("6 * 7", "42")) }, "evaluate-no-frame", owner));
+            Assert.Equal("BLOCKED", blocked["data"]?["status"]?.GetValue<string>());
+            Assert.DoesNotContain(await harness.Fixture.ReadTranscriptAsync(), item => item.Kind == "request" && item.Command == "evaluate");
+            var stack = Content(await harness.CallLegacyWithMetaAsync("get_call_stack", new JsonObject(), "evaluate-stack", owner));
+            Assert.NotEmpty(Assert.IsType<JsonArray>(stack["data"]?["frames"]));
+            var result = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(Probe("6 * 7", "42")) }, "evaluate-sync", owner));
+            Assert.Equal("PASS", result["data"]?["status"]?.GetValue<string>());
+            Assert.Equal("42", result["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0]?["value"]?.GetValue<string>());
+            var mismatch = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                new JsonObject { ["plan"] = Plan(Probe("6 * 7", "43")) }, "evaluate-mismatch", owner));
+            Assert.Equal("FAIL", mismatch["data"]?["status"]?.GetValue<string>());
+
+            admission = harness.LegacySessionAdmissionGate;
+            await admission.WaitAsync(observation.Token);
+            admissionHeld = true;
+            var beforeDispatch = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe",
+                new JsonObject { ["probe"] = Probe("6 * 7", "42") }, "evaluate-before-dispatch", owner));
+            var beforeDispatchId = Assert.IsType<string>(beforeDispatch["data"]?["run_id"]?.GetValue<string>());
+            await harness.WaitForLegacyCompositeEvaluationAsync(observation.Token);
+            var cancelledBeforeDispatch = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_stop",
+                new JsonObject { ["run_id"] = beforeDispatchId }, "evaluate-cancel-before-dispatch", owner));
+            Assert.True(cancelledBeforeDispatch["data"]?["final"]?.GetValue<bool>());
+            Assert.Equal("PASS", cancelledBeforeDispatch["data"]?["cleanup"]?["status"]?.GetValue<string>());
+            Assert.Equal(2, (await harness.Fixture.ReadTranscriptAsync()).Count(item => item.Kind == "request" && item.Command == "evaluate"));
+            admission.Release();
+            admissionHeld = false;
+            var clean = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_cleanup_contract", new JsonObject(), "evaluate-clean", owner));
+            Assert.Equal("PASS", clean["data"]?["status"]?.GetValue<string>());
+
+            var durable = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe",
+                new JsonObject { ["probe"] = Probe("fixture:hold") }, "evaluate-durable", owner));
+            var runId = Assert.IsType<string>(durable["data"]?["run_id"]?.GetValue<string>());
+            await harness.Fixture.WaitForTranscriptKindAsync("evaluate-response-gated", observation.Token);
+            stop = harness.CallLegacyWithMetaAsync("runtime_smoke_stop", new JsonObject { ["run_id"] = runId }, "evaluate-stop-run", owner);
+            var events = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_tail_events",
+                new JsonObject { ["run_id"] = runId }, "evaluate-stop-events", owner));
+            Assert.Contains(Assert.IsType<JsonArray>(events["data"]?["events"]), item => item?["kind"]?.GetValue<string>() == "stop_requested");
+            harness.Fixture.ReleaseStackTraceResponse();
+            var stopped = Content(await stop.WaitAsync(TimeSpan.FromSeconds(15)));
+            Assert.True(stopped["data"]?["final"]?.GetValue<bool>());
+            Assert.NotEqual("PASS", stopped["data"]?["status"]?.GetValue<string>());
+            Assert.Contains("may have executed", stopped["data"]?["reason"]?.GetValue<string>() ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.NotEqual("PASS", stopped["data"]?["cleanup"]?["status"]?.GetValue<string>());
+            var requests = (await harness.Fixture.ReadTranscriptAsync()).Where(item => item.Kind == "request" && item.Command == "evaluate").ToArray();
+            Assert.Equal(3, requests.Length);
+        }
+        finally
+        {
+            if (admissionHeld) admission!.Release();
+            harness.Fixture.ReleaseStackTraceResponse();
+            if (stop is not null) await Record.ExceptionAsync(async () => await stop.WaitAsync(TimeSpan.FromSeconds(15)));
+            if (started) await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "evaluate-final-stop", owner).WaitAsync(TimeSpan.FromSeconds(15)));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyRuntimeSmoke_EvaluateBudgetExpiryDoesNotClaimCleanOutcome(bool direct)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"));
+        harness.EnableLegacyCompat();
+        const string owner = "smoke-evaluate-timeout-owner";
+        var started = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "evaluate-timeout-launch", owner));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyWithMetaAsync("get_threads", new JsonObject(), "evaluate-timeout-barrier", owner);
+            var stack = Content(await harness.CallLegacyWithMetaAsync("get_call_stack", new JsonObject(), "evaluate-timeout-stack", owner));
+            Assert.NotEmpty(Assert.IsType<JsonArray>(stack["data"]?["frames"]));
+            var probe = new JsonObject { ["kind"] = "debug.evaluate", ["phase"] = "after", ["expression"] = "fixture:timeout" };
+            JsonObject finished;
+            if (direct)
+            {
+                var plan = new JsonObject
+                {
+                    ["schema"] = "netcoredbg.runtime_smoke.v2",
+                    ["budgets"] = new JsonObject { ["max_actions"] = 1, ["max_elapsed_seconds"] = 5 },
+                    ["cases"] = new JsonArray(new JsonObject
+                    {
+                        ["id"] = "evaluate",
+                        ["transitions"] = new JsonArray(new JsonObject
+                        {
+                            ["settle"] = new JsonObject { ["idle_ms"] = 0 },
+                            ["probes"] = new JsonArray(probe.DeepClone()),
+                        }),
+                    }),
+                };
+                finished = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                    new JsonObject { ["plan"] = plan }, "evaluate-timeout-direct", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            }
+            else
+            {
+                var run = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe", new JsonObject
+                {
+                    ["probe"] = probe.DeepClone(),
+                }, "evaluate-timeout-start", owner));
+                var runId = Assert.IsType<string>(run["data"]?["run_id"]?.GetValue<string>());
+                finished = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_wait_for_result",
+                    new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 15000 }, "evaluate-timeout-wait", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+                Assert.True(finished["data"]?["final"]?.GetValue<bool>());
+            }
+            Assert.Equal("IMPASSE", finished["data"]?["status"]?.GetValue<string>());
+            Assert.Contains("may have executed", finished["data"]?["reason"]?.GetValue<string>() ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.NotEqual("PASS", finished["data"]?["cleanup"]?["status"]?.GetValue<string>());
+            Assert.Single(await harness.Fixture.ReadTranscriptAsync(), item => item.Kind == "request" && item.Command == "evaluate");
+            var cleanup = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_cleanup_contract", new JsonObject(), "evaluate-timeout-cleanup", owner));
+            Assert.Equal("FAIL", cleanup["data"]?["status"]?.GetValue<string>());
+            Assert.True(cleanup["data"]?["contaminated"]?.GetValue<bool>());
+            var next = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe",
+                new JsonObject { ["probe"] = probe.DeepClone() }, "evaluate-timeout-next", owner));
+            Assert.Equal("BLOCKED", next["data"]?["status"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (started) await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "evaluate-timeout-stop", owner).WaitAsync(TimeSpan.FromSeconds(15)));
+        }
+    }
+
     [Theory]
     [InlineData("ready", "PASS")]
     [InlineData("not-ready", "FAIL")]
@@ -3487,6 +3659,21 @@ public sealed class RegistryShutdownContractTests
                 var sessions = registry.GetType().GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
                 var session = sessions.GetType().GetProperty("Item")!.GetValue(sessions, [LegacySessionId])!;
                 return Assert.IsType<SemaphoreSlim>(session.GetType().GetField("_callStackAdmissionGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session));
+            }
+        }
+
+        public async Task WaitForLegacyCompositeEvaluationAsync(CancellationToken cancellationToken)
+        {
+            var field = registry.GetType().GetField("_legacyCompositeEvaluations", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            while (true)
+            {
+                await LegacyGate.WaitAsync(cancellationToken);
+                try
+                {
+                    if ((int)field.GetValue(registry)! > 0) return;
+                }
+                finally { LegacyGate.Release(); }
+                await Task.Delay(10, cancellationToken);
             }
         }
 

@@ -4,6 +4,13 @@ using System.Text.Json.Nodes;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
+internal sealed class LegacyRuntimeSmokeEffect
+{
+    private int _evaluationDispatched;
+    internal void MarkEvaluationDispatched() => Interlocked.Exchange(ref _evaluationDispatched, 1);
+    internal bool EvaluationDispatched => Volatile.Read(ref _evaluationDispatched) != 0;
+}
+
 internal sealed class LegacyRuntimeSmokeRuns
 {
     private const int MaxCompletedRuns = 8;
@@ -16,6 +23,8 @@ internal sealed class LegacyRuntimeSmokeRuns
     private Run? _active;
     private bool _closed;
     private Run? _cleanupUnconfirmed;
+    private TaskCompletionSource? _directCompletion;
+    private bool _directCleanupUnconfirmed;
 
     internal LegacyRuntimeSmokeRuns() : this(LegacyRuntimeSmokeFileRunner.RunAsync) { }
     internal LegacyRuntimeSmokeRuns(Func<JsonObject, CancellationToken, Task<JsonObject>> runner) => _runner = runner;
@@ -26,6 +35,7 @@ internal sealed class LegacyRuntimeSmokeRuns
         internal readonly long Started = Stopwatch.GetTimestamp();
         internal readonly string? Owner;
         internal readonly string PlanName;
+        internal readonly LegacyRuntimeSmokeEffect? Effect;
         internal readonly CancellationTokenSource Cancellation = new();
         internal readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly List<JsonObject> Events = new();
@@ -34,27 +44,28 @@ internal sealed class LegacyRuntimeSmokeRuns
         internal int CancelUsers;
         internal bool CancellationDisposed;
 
-        internal Run(string? owner, string planName)
+        internal Run(string? owner, string planName, LegacyRuntimeSmokeEffect? effect)
         {
             Owner = owner;
             PlanName = planName;
+            Effect = effect;
         }
     }
 
     public JsonObject Start(JsonObject plan, string? owner) => StartWithRunner(plan, owner, _runner);
 
-    internal JsonObject StartWithRunner(JsonObject plan, string? owner, Func<JsonObject, CancellationToken, Task<JsonObject>> runner)
+    internal JsonObject StartWithRunner(JsonObject plan, string? owner, Func<JsonObject, CancellationToken, Task<JsonObject>> runner, LegacyRuntimeSmokeEffect? effect = null)
     {
         lock (_gate)
         {
             if (_closed)
                 return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke registry is closed", ["run_created"] = false, ["final"] = false };
-            if (_cleanupUnconfirmed is not null)
+            if (_cleanupUnconfirmed is not null || _directCleanupUnconfirmed)
                 return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke cleanup is unconfirmed", ["run_created"] = false, ["final"] = false };
-            if (_active is not null)
+            if (_active is not null || _directCompletion is not null)
             {
                 var blocked = new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke run already active", ["run_created"] = false, ["final"] = false };
-                if (SameOwner(_active, owner))
+                if (_active is not null && SameOwner(_active, owner))
                 {
                     blocked["active_run_id"] = _active.Id;
                     blocked["active_status"] = _active.Status;
@@ -65,12 +76,46 @@ internal sealed class LegacyRuntimeSmokeRuns
             var copy = (JsonObject)plan.DeepClone();
             string planName = Text(copy["name"]) ?? Text(copy["id"]) ?? "runtime-smoke";
             if (planName.Length > 512) planName = planName[..512] + "…";
-            var run = new Run(owner, planName);
+            var run = new Run(owner, planName, effect);
             AppendEvent(run, "started", "runtime smoke run started");
             _runs.Add(run.Id, run);
             _active = run;
             _ = Task.Run(() => ExecuteAsync(run, copy, runner));
             return RunningPayload(run);
+        }
+    }
+
+    internal async Task<JsonObject> RunDirectAsync(JsonNode? plan, Func<JsonObject, CancellationToken, Task<JsonObject>>? observer,
+        LegacyRuntimeSmokeEffect? effect, CancellationToken cancellationToken)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            if (_closed) return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke registry is closed" };
+            if (_cleanupUnconfirmed is not null || _directCleanupUnconfirmed)
+                return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke cleanup is unconfirmed" };
+            if (_active is not null || _directCompletion is not null)
+                return new JsonObject { ["status"] = "BLOCKED", ["reason"] = "runtime smoke run already active" };
+            _directCompletion = completion;
+        }
+
+        JsonObject? result = null;
+        try
+        {
+            result = await LegacyRuntimeSmokeFileRunner.RunAsync(plan, cancellationToken, observer, effect).ConfigureAwait(false);
+            return result;
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if ((result is null && effect?.EvaluationDispatched == true) ||
+                    (result is not null && Text((result["cleanup"] as JsonObject)?["status"]) != "PASS") ||
+                    (cancellationToken.IsCancellationRequested && effect?.EvaluationDispatched == true))
+                    _directCleanupUnconfirmed = true;
+                _directCompletion = null;
+                completion.TrySetResult();
+            }
         }
     }
 
@@ -145,8 +190,8 @@ internal sealed class LegacyRuntimeSmokeRuns
     {
         lock (_gate)
         {
-            bool active = _active is not null;
-            bool unconfirmed = _cleanupUnconfirmed is not null;
+            bool active = _active is not null || _directCompletion is not null;
+            bool unconfirmed = _cleanupUnconfirmed is not null || _directCleanupUnconfirmed;
             string status = active ? "BLOCKED" : unconfirmed ? "FAIL" : "PASS";
             string reason = active ? "runtime smoke run is still active" :
                 unconfirmed ? "runtime smoke cleanup is unconfirmed" : "runtime smoke cleanup contract already clean";
@@ -166,7 +211,7 @@ internal sealed class LegacyRuntimeSmokeRuns
             };
             if (_active is Run run && SameOwner(run, owner)) response["run_id"] = run.Id;
             else if (_cleanupUnconfirmed is Run failed && SameOwner(failed, owner)) response["run_id"] = failed.Id;
-            if (unconfirmed) response["next_step"] = "Inspect the failed run and close the native host after owned work drains; a new host does not prove previous cleanup.";
+            if (unconfirmed) response["next_step"] = "Inspect the failed runtime smoke result and close the native host after owned work drains; a new host does not prove previous cleanup.";
             return response;
         }
     }
@@ -245,11 +290,13 @@ internal sealed class LegacyRuntimeSmokeRuns
     public async Task CloseAsync(CancellationToken cancellationToken)
     {
         Run? run;
+        Task? direct;
         bool cancel = false;
         lock (_gate)
         {
             _closed = true;
             run = _active;
+            direct = _directCompletion?.Task;
             if (run is not null && run.Status != "STOPPING")
             {
                 run.Status = "STOPPING";
@@ -258,9 +305,9 @@ internal sealed class LegacyRuntimeSmokeRuns
                 cancel = true;
             }
         }
-        if (run is null) return;
-        if (cancel) Cancel(run);
-        await run.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(StopTimeoutMs), cancellationToken).ConfigureAwait(false);
+        if (cancel) Cancel(run!);
+        if (run is not null) await run.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(StopTimeoutMs), cancellationToken).ConfigureAwait(false);
+        if (direct is not null) await direct.WaitAsync(TimeSpan.FromMilliseconds(StopTimeoutMs), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ExecuteAsync(Run run, JsonObject plan, Func<JsonObject, CancellationToken, Task<JsonObject>> runner)
@@ -274,9 +321,11 @@ internal sealed class LegacyRuntimeSmokeRuns
         }
         catch (OperationCanceledException) when (run.Cancellation.IsCancellationRequested)
         {
+            var unknownEffect = run.Effect?.EvaluationDispatched == true;
+            var reason = unknownEffect ? "runtime smoke stopped; evaluation may have executed. Do not retry automatically." : "runtime smoke run stopped";
             var cleanup = new JsonObject
             {
-                ["status"] = "PASS",
+                ["status"] = unknownEffect ? "FAIL" : "PASS",
                 ["attempted"] = new JsonArray(),
                 ["failures"] = new JsonArray(),
                 ["failed_case_cleanups"] = new JsonArray(),
@@ -289,7 +338,7 @@ internal sealed class LegacyRuntimeSmokeRuns
             result = new JsonObject
             {
                 ["status"] = "IMPASSE",
-                ["reason"] = "runtime smoke run stopped",
+                ["reason"] = reason,
                 ["elapsed_ms"] = elapsed,
                 ["action_count"] = 0,
                 ["completed_steps"] = new JsonArray(),
@@ -301,7 +350,7 @@ internal sealed class LegacyRuntimeSmokeRuns
                 ["compact"] = new JsonObject
                 {
                     ["status"] = "IMPASSE",
-                    ["reason"] = "runtime smoke run stopped",
+                    ["reason"] = reason,
                     ["elapsed_ms"] = elapsed,
                     ["action_count"] = 0,
                     ["case_count"] = 0,
@@ -313,7 +362,7 @@ internal sealed class LegacyRuntimeSmokeRuns
         }
         catch (Exception)
         {
-            result = new JsonObject { ["status"] = "FAIL", ["reason"] = "runtime smoke execution failed", ["cleanup"] = null, ["evidence_refs"] = new JsonArray() };
+            result = new JsonObject { ["status"] = "FAIL", ["reason"] = run.Effect?.EvaluationDispatched == true ? "runtime smoke failed; evaluation may have executed. Do not retry automatically." : "runtime smoke execution failed", ["cleanup"] = null, ["evidence_refs"] = new JsonArray() };
             eventKind = "failed";
         }
 
