@@ -1908,7 +1908,7 @@ internal static class Program
                     _legacyLaunchConfig = launchConfig;
                     _legacyResolvedLaunch = resolvedLaunch;
                     ScheduleLegacyTrace(traceGeneration);
-                    return LegacyResponse(new { success = true, program = program.GetString() });
+                    return LegacyResponse(new { success = true, program = resolvedLaunch!.Program });
                 }
                 if (name == GetBuildDiagnostics)
                 {
@@ -5018,6 +5018,12 @@ internal static class Program
                         return Error("start_debug_program_unavailable", "START_DEBUG_PROGRAM_UNAVAILABLE");
                     if (launchOptions?.WorkingDirectory is { } builtWorkingDirectory && !Directory.Exists(builtWorkingDirectory))
                         return Error("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE");
+                }
+                if (argumentsOverride is not null && !preBuild.Enabled)
+                {
+                    try { program = LegacyLaunchCompatibility.ResolveProgram(Environment.CurrentDirectory, program!, out _); }
+                    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
+                    { return Error("start_debug_program_unavailable", "START_DEBUG_PROGRAM_UNAVAILABLE"); }
                 }
 
                 if (profile.Environment is not null)

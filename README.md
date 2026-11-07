@@ -1097,8 +1097,10 @@ cached candidate, but native launch does not select or replace a cached shim.
 Matching major versions are a heuristic, not proof of the loaded shim or of
 runtime compatibility. A mismatch or unavailable version produces `unknown`,
 not `compatible_after_swap`.
-Relative diagnostic paths use the selected project root and links are resolved;
-native launch passes the supplied path to the debugger, so resolution can differ.
+Relative diagnostic paths use the selected project root, while legacy launch
+resolves them against the server working directory. Both resolve existing targets
+and select a matching `.dll` for a no-build `.exe` launch; pre-build link
+resolution may differ.
 Python remains the installed default.
 
 ## Desktop UI and visual evidence

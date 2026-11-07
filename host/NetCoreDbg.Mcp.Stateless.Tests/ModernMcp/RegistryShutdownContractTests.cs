@@ -167,6 +167,111 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyLaunchCompatibility_ResolvesExecutableToManagedAssembly()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var executable = Path.ChangeExtension(harness.ProgramPath, ".exe");
+        await File.WriteAllBytesAsync(executable, []);
+        await File.WriteAllTextAsync(Path.ChangeExtension(executable, ".runtimeconfig.json"), """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"8.0.0"}}}""");
+
+        var response = Content(await harness.CallLegacyAsync("inspect_debug_launch_compatibility",
+            new JsonObject { ["program"] = executable }, "launch-compatibility-exe"));
+        Assert.Equal(harness.ProgramPath, response["data"]?["program"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyStartDebug_ResolvesRelativeExecutableToManagedAssembly()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var executable = Path.ChangeExtension(harness.ProgramPath, ".exe");
+        await File.WriteAllBytesAsync(executable, []);
+        await File.WriteAllTextAsync(Path.ChangeExtension(executable, ".runtimeconfig.json"), "{}");
+        var relative = Path.GetRelativePath(Environment.CurrentDirectory, executable);
+        try
+        {
+            var response = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = relative,
+                ["pre_build"] = false,
+            }, "launch-resolved-target").WaitAsync(ObservationTimeout));
+            Assert.True(response["data"]?["success"]?.GetValue<bool>());
+            Assert.Equal(harness.ProgramPath, response["data"]?["program"]?.GetValue<string>());
+            var launch = Assert.Single(await harness.Fixture.ReadTranscriptAsync(), entry => entry.Command == "launch");
+            using var payload = JsonDocument.Parse(Assert.IsType<string>(launch.RawPayload));
+            Assert.Equal(harness.ProgramPath, payload.RootElement.GetProperty("arguments").GetProperty("program").GetString());
+        }
+        finally
+        {
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "launch-resolved-stop").WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Theory]
+    [InlineData("missing.dll", false)]
+    [InlineData("invalid.txt", true)]
+    public async Task LegacyStartDebug_RejectsInvalidTargetBeforeStartingAdapter(string name, bool createFile)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, name);
+        if (createFile) await File.WriteAllBytesAsync(path, []);
+        try
+        {
+            var response = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = path,
+                ["pre_build"] = false,
+            }, "launch-invalid-target").WaitAsync(ObservationTimeout));
+            Assert.NotNull(response["error"]);
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        }
+        finally
+        {
+            await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "launch-invalid-stop").WaitAsync(TimeSpan.FromSeconds(20)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyLaunchTarget_PosixLinkBeforeParentUsesRealTarget()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var workspace = Path.Combine(scratch, "workspace");
+            var release = Path.Combine(scratch, "releases", "v1");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(Path.Combine(release, "bin"));
+            await File.WriteAllBytesAsync(Path.Combine(workspace, "App.dll"), []);
+            await File.WriteAllBytesAsync(Path.Combine(release, "App.dll"), []);
+            Directory.CreateSymbolicLink(Path.Combine(workspace, "current"), Path.Combine(release, "bin"));
+            Directory.CreateSymbolicLink(Path.Combine(workspace, "missing-target"), Path.Combine(release, "missing", "..", "bin"));
+            Directory.CreateSymbolicLink(Path.Combine(workspace, "loop"), "loop");
+
+            var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+            var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyLaunchCompatibility", throwOnError: true)!;
+            var resolve = type.GetMethod("ResolveProgram", BindingFlags.Static | BindingFlags.NonPublic)!;
+            object?[] arguments = [workspace, Path.Combine("current", "..", "App.dll"), false];
+            var target = Assert.IsType<string>(resolve.Invoke(null, arguments));
+
+            Assert.Equal(Path.Combine(release, "App.dll"), target);
+            Assert.True(Assert.IsType<bool>(arguments[2]));
+            object?[] missing = [workspace, Path.Combine("old-build", "..", "App.dll"), false];
+            Assert.Equal(Path.Combine(workspace, "App.dll"), Assert.IsType<string>(resolve.Invoke(null, missing)));
+            object?[] missingLink = [workspace, Path.Combine("missing-target", "..", "App.dll"), false];
+            Assert.Equal(Path.Combine(release, "App.dll"), Assert.IsType<string>(resolve.Invoke(null, missingLink)));
+            object?[] loop = [workspace, Path.Combine("loop", "..", "App.dll"), false];
+            Assert.Equal(Path.Combine(workspace, "App.dll"), Assert.IsType<string>(resolve.Invoke(null, loop)));
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
     public async Task LegacyCleanupProcesses_StatusAndAccessChecksDoNotMutateSession()
     {
         await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SpawnDescendant: true, LifecycleMode: "all-stop"));
