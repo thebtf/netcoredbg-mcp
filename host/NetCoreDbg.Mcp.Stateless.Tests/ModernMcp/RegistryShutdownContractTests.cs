@@ -60,6 +60,200 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task StopDebug_ObserverTerminationFailureRetainsOwnerUntilRetry()
+    {
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true));
+        Process? target = null;
+        Process? observer = null;
+        string? token = null;
+        try
+        {
+            var started = Content(await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "observer-retry-start").WaitAsync(ObservationTimeout));
+            Assert.Equal("start_debug_success", started["kind"]?.GetValue<string>());
+            token = Assert.IsType<string>(started["debugSessionId"]?.GetValue<string>());
+            var slot = harness.OwnedSlot(token);
+            Assert.NotNull(slot);
+            var binding = harness.SceneBinding(token);
+            var bindingType = binding.GetType();
+            var processField = bindingType.GetField("_bridgeProcess", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var terminateField = bindingType.GetField("_terminateBridge", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            target = harness.Fixture.StartOwnedTarget();
+            _ = target.SafeHandle;
+            var startTime = target.StartTime.ToUniversalTime();
+            observer = Process.GetProcessById(target.Id);
+            var handle = observer.SafeHandle;
+            Assert.Equal(startTime, observer.StartTime.ToUniversalTime());
+            Assert.False(target.HasExited);
+            var attempts = 0;
+            Action<Process> terminate = process =>
+            {
+                Assert.Same(observer, process);
+                if (Interlocked.Increment(ref attempts) == 1)
+                    throw new InvalidOperationException("controlled observer termination failure");
+                process.Kill();
+            };
+            terminateField.SetValue(binding, terminate);
+            processField.SetValue(binding, observer);
+
+            var first = await harness.CallAsync("stop_debug", SessionArguments(token), "observer-retry-first").WaitAsync(ObservationTimeout);
+            Assert.True(first.IsError == true);
+            Assert.Equal("DEBUG_SESSION_CLEANUP_UNCONFIRMED", Content(first)["error"]?.GetValue<string>());
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.Same(observer, processField.GetValue(binding));
+            Assert.False(handle.IsClosed);
+            Assert.False(target.HasExited);
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            var afterFirst = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(afterFirst, static entry => entry.Kind == "request" && entry.Command == "terminate");
+            Assert.Single(afterFirst, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+
+            var retry = await harness.CallAsync("stop_debug", SessionArguments(token), "observer-retry-second").WaitAsync(ObservationTimeout);
+            Assert.False(retry.IsError == true);
+            Assert.Equal("stop_debug_success", Content(retry)["kind"]?.GetValue<string>());
+            Assert.Equal(2, Volatile.Read(ref attempts));
+            Assert.True(target.HasExited);
+            Assert.True(handle.IsClosed);
+            Assert.Null(harness.OwnedSlot(token));
+            var afterRetry = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(afterRetry, static entry => entry.Kind == "request" && entry.Command == "terminate");
+            Assert.Single(afterRetry, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+        }
+        finally
+        {
+            if (target is not null) await Record.ExceptionAsync(() => FixtureProcess.StopOwnedTargetAsync(target));
+            if (token is not null) await Record.ExceptionAsync(async () => await harness.CallAsync("stop_debug", SessionArguments(token), "observer-retry-cleanup").WaitAsync(ObservationTimeout));
+            if (observer is not null) Record.Exception(observer.Dispose);
+            if (target is not null) Record.Exception(target.Dispose);
+            await Record.ExceptionAsync(async () => await harness.DisposeAsync().AsTask().WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Fact]
+    public async Task StopDebug_ObserverExitConfirmedDespiteTerminationException()
+    {
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true));
+        Process? target = null;
+        Process? observer = null;
+        string? token = null;
+        try
+        {
+            var started = Content(await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "observer-exit-race-start").WaitAsync(ObservationTimeout));
+            Assert.Equal("start_debug_success", started["kind"]?.GetValue<string>());
+            token = Assert.IsType<string>(started["debugSessionId"]?.GetValue<string>());
+            Assert.NotNull(harness.OwnedSlot(token));
+            var binding = harness.SceneBinding(token);
+            var bindingType = binding.GetType();
+            var processField = bindingType.GetField("_bridgeProcess", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var terminateField = bindingType.GetField("_terminateBridge", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            target = harness.Fixture.StartOwnedTarget();
+            _ = target.SafeHandle;
+            var startTime = target.StartTime.ToUniversalTime();
+            observer = Process.GetProcessById(target.Id);
+            var handle = observer.SafeHandle;
+            Assert.Equal(startTime, observer.StartTime.ToUniversalTime());
+            Assert.False(target.HasExited);
+            var attempts = 0;
+            var exitConfirmed = false;
+            Action<Process> terminate = process =>
+            {
+                Assert.Same(observer, process);
+                Interlocked.Increment(ref attempts);
+                process.Kill();
+                exitConfirmed = process.WaitForExit(3000);
+                if (!exitConfirmed) throw new TimeoutException("controlled observer did not exit");
+                throw new InvalidOperationException("controlled failure after observer exit");
+            };
+            terminateField.SetValue(binding, terminate);
+            processField.SetValue(binding, observer);
+
+            var stopped = await harness.CallAsync("stop_debug", SessionArguments(token), "observer-exit-race-stop").WaitAsync(ObservationTimeout);
+            Assert.False(stopped.IsError == true);
+            Assert.Equal("stop_debug_success", Content(stopped)["kind"]?.GetValue<string>());
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            Assert.True(exitConfirmed);
+            Assert.True(target.HasExited);
+            Assert.True(handle.IsClosed);
+            Assert.Null(harness.OwnedSlot(token));
+            var transcript = await harness.Fixture.ReadTranscriptAsync();
+            Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "terminate");
+            Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+        }
+        finally
+        {
+            if (target is not null) await Record.ExceptionAsync(() => FixtureProcess.StopOwnedTargetAsync(target));
+            if (token is not null) await Record.ExceptionAsync(async () => await harness.CallAsync("stop_debug", SessionArguments(token), "observer-exit-race-cleanup").WaitAsync(ObservationTimeout));
+            if (observer is not null) Record.Exception(observer.Dispose);
+            if (target is not null) Record.Exception(target.Dispose);
+            await Record.ExceptionAsync(async () => await harness.DisposeAsync().AsTask().WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Theory]
+    [InlineData("CaptureNativeSceneAsync", "capture_native_scene")]
+    [InlineData("CaptureElementAsync", "capture_element_snapshot")]
+    public async Task Capture_RetainedObserverRefusesBeforeCoordinator(string method, string tool)
+    {
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            SupportsTerminate: true, SuppressLifecycleEvents: true));
+        Process? target = null;
+        Process? observer = null;
+        string? token = null;
+        try
+        {
+            var started = Content(await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "observer-capture-start").WaitAsync(ObservationTimeout));
+            Assert.Equal("start_debug_success", started["kind"]?.GetValue<string>());
+            token = Assert.IsType<string>(started["debugSessionId"]?.GetValue<string>());
+            var slot = harness.OwnedSlot(token);
+            Assert.NotNull(slot);
+            var binding = harness.SceneBinding(token);
+            var bindingType = binding.GetType();
+            var processField = bindingType.GetField("_bridgeProcess", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var terminateField = bindingType.GetField("_terminateBridge", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var coordinatorField = bindingType.GetField("_captureCoordinator", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            target = harness.Fixture.StartOwnedTarget();
+            _ = target.SafeHandle;
+            var startTime = target.StartTime.ToUniversalTime();
+            observer = Process.GetProcessById(target.Id);
+            var handle = observer.SafeHandle;
+            Assert.Equal(startTime, observer.StartTime.ToUniversalTime());
+            Assert.False(target.HasExited);
+            Action<Process> terminate = process =>
+            {
+                Assert.Same(observer, process);
+                throw new InvalidOperationException("controlled observer termination failure");
+            };
+            terminateField.SetValue(binding, terminate);
+            processField.SetValue(binding, observer);
+            Assert.Null(coordinatorField.GetValue(binding));
+
+            var capture = bindingType.GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null, types: [typeof(JsonElement), typeof(CancellationToken)], modifiers: null)!;
+            var request = JsonSerializer.SerializeToElement(new JsonObject { ["sceneRequest"] = new JsonObject(), ["element"] = new JsonObject() });
+            var result = await Assert.IsAssignableFrom<Task<JsonObject>>(capture.Invoke(binding, [request, CancellationToken.None])).WaitAsync(ObservationTimeout);
+            Assert.Equal("tool_error", result["kind"]?.GetValue<string>());
+            Assert.Equal(tool, result["tool"]?.GetValue<string>());
+            Assert.Equal("OBSERVER_UNAVAILABLE", result["code"]?.GetValue<string>());
+            Assert.Null(coordinatorField.GetValue(binding));
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.Same(observer, processField.GetValue(binding));
+            Assert.False(handle.IsClosed);
+            Assert.False(target.HasExited);
+            Assert.Null(result["artifacts"]);
+            Assert.Null(result["captureId"]);
+        }
+        finally
+        {
+            if (target is not null) await Record.ExceptionAsync(() => FixtureProcess.StopOwnedTargetAsync(target));
+            if (token is not null) await Record.ExceptionAsync(async () => await harness.CallAsync("stop_debug", SessionArguments(token), "observer-capture-cleanup").WaitAsync(ObservationTimeout));
+            if (observer is not null) Record.Exception(observer.Dispose);
+            if (target is not null) Record.Exception(target.Dispose);
+            await Record.ExceptionAsync(async () => await harness.DisposeAsync().AsTask().WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Fact]
     public async Task StopDebug_RealUiHelperDrainRetainsOwnerUntilRetry()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -1369,10 +1563,15 @@ public sealed class RegistryShutdownContractTests
             }
         }
 
-        public object UiOwner(string token)
+        public object SceneBinding(string token)
         {
             var bindings = registry.GetType().GetField("_nativeSceneBindings", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
-            var binding = bindings.GetType().GetProperty("Item")!.GetValue(bindings, [token])!;
+            return bindings.GetType().GetProperty("Item")!.GetValue(bindings, [token])!;
+        }
+
+        public object UiOwner(string token)
+        {
+            var binding = SceneBinding(token);
             return binding.GetType().GetField("_uiInvoke", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(binding)!;
         }
 

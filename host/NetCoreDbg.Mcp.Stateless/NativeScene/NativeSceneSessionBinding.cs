@@ -17,6 +17,10 @@ internal sealed record NativeSceneTargetIdentity(
     string? AssemblyVersion,
     string? ProbeVersion);
 
+internal sealed class NativeSceneObserverCleanupException(Exception inner)
+    : InvalidOperationException("Native scene observer cleanup is unconfirmed.", inner)
+{ }
+
 internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 {
     private const string ArtifactSchemaVersion = "native-scene-artifact/1";
@@ -38,6 +42,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     private NativeSceneBridgeClient? _bridgeClient;
     private Process? _bridgeProcess;
+    private readonly Action<Process> _terminateBridge = static process => process.Kill(entireProcessTree: true);
     private NativeSceneArtifactStore? _artifactStore;
     private NativeSceneCaptureCoordinator? _captureCoordinator;
     private JsonObject? _captureStabilityObservation;
@@ -221,9 +226,21 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 };
             }
 
+            if (_bridgeProcess is not null) await DisposeBridgeAsync().ConfigureAwait(false);
+
             return isElement
                 ? await GetOrCreateCaptureCoordinator().CaptureElementAsync(request, contract, cancellationToken).ConfigureAwait(false)
                 : await GetOrCreateCaptureCoordinator().CaptureNativeSceneAsync(request, contract, cancellationToken).ConfigureAwait(false);
+        }
+        catch (NativeSceneObserverCleanupException)
+        {
+            return new JsonObject
+            {
+                ["kind"] = "tool_error",
+                ["tool"] = isElement ? "capture_element_snapshot" : "capture_native_scene",
+                ["code"] = "OBSERVER_UNAVAILABLE",
+                ["message"] = "Native-scene observer cleanup is unconfirmed.",
+            };
         }
         finally
         {
@@ -252,6 +269,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         {
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             entered = true;
+            if (_bridgeProcess is not null) await DisposeBridgeAsync().ConfigureAwait(false);
             if (!SupportsVisualEvidence || _session is not { } session || !session.TryGetNativeSceneCaptureTargetIdentity(out var targetIdentity))
             {
                 return NativeSceneVisualEvidenceResult.CandidateMismatch();
@@ -347,6 +365,10 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     await staged.AbortAsync(CancellationToken.None).ConfigureAwait(false);
                 }
             }
+        }
+        catch (NativeSceneObserverCleanupException)
+        {
+            return NativeSceneVisualEvidenceResult.ObserverUnavailable();
         }
         catch (OperationCanceledException)
         {
@@ -587,77 +609,47 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("The local native-scene observer process did not start.");
-        try
-        {
-            _bridgeProcess = process;
-            _bridgeClient = new NativeSceneBridgeClient(
-                pipeName,
-                BridgeTimeout,
-                BridgeTimeout,
-                BridgeTimeout,
-                MaximumBridgeRequestBytes,
-                MaximumBridgeResponseBytes);
-        }
-        catch
-        {
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-            }
-            catch (Exception)
-            {
-            }
-            finally
-            {
-                process.Dispose();
-                _bridgeProcess = null;
-            }
-
-            throw;
-        }
+        _bridgeProcess = process;
+        _bridgeClient = new NativeSceneBridgeClient(
+            pipeName,
+            BridgeTimeout,
+            BridgeTimeout,
+            BridgeTimeout,
+            MaximumBridgeRequestBytes,
+            MaximumBridgeResponseBytes);
     }
 
     private async ValueTask DisposeBridgeAsync()
     {
         var client = _bridgeClient;
-        var process = _bridgeProcess;
         _bridgeClient = null;
-        _bridgeProcess = null;
-
         if (client is not null)
         {
-            try
-            {
-                await client.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-            }
+            try { await client.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception) { }
         }
 
-        if (process is null)
-        {
-            return;
-        }
-
+        var process = _bridgeProcess;
+        if (process is null) return;
         try
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
-                using var timeout = new CancellationTokenSource(BridgeTimeout);
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                try { _terminateBridge(process); }
+                catch (Exception) when (process.HasExited) { }
+                if (!process.HasExited)
+                {
+                    using var timeout = new CancellationTokenSource(BridgeTimeout);
+                    await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                }
             }
-        }
-        catch (Exception)
-        {
-        }
-        finally
-        {
+            if (!process.HasExited) throw new InvalidOperationException("Observer exit is unconfirmed.");
             process.Dispose();
+            _bridgeProcess = null;
+        }
+        catch (Exception exception)
+        {
+            throw new NativeSceneObserverCleanupException(exception);
         }
     }
 

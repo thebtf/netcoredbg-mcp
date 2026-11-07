@@ -850,6 +850,13 @@ is started and no identity is inferred. Artifacts keep their original bytes and
 provenance when read through either revision. These source-built tools do not
 change the installed Python default or the published read-only preview.
 
+If a native-scene observer's exit cannot be confirmed, the host retains its
+process owner and refuses further scene, element, or visual captures until a
+cleanup retry confirms that root process has exited. The affected capture returns
+`OBSERVER_UNAVAILABLE` rather than publishing an artifact. Stop also reports
+unconfirmed cleanup. This confirms only the observer root's exit, not descendant
+cleanup or safety after a host crash.
+
 On Windows, the source-built host identifies the local process from its DAP
 `process` event through one non-inheritable handle with
 `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. It reads the executable image

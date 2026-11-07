@@ -806,6 +806,48 @@ public sealed class NativeSceneAtomicityTests
     }
 
     [Fact]
+    public async Task GuardedObserverCleanupFailure_ReturnsErrorWithoutCommittingArtifacts()
+    {
+        await using var artifacts = ArtifactStoreTestScope.Create();
+        var probeCalls = 0;
+        var guardedCalls = 0;
+        var revalidationCalls = 0;
+        var cleanupFailure = NativeSceneAtomicityReflection.CreateObserverCleanupException();
+        var result = await NativeSceneAtomicityReflection.CaptureNativeSceneAsync(
+            artifacts.Store,
+            new JsonObject { ["sceneRequest"] = new JsonObject() },
+            _ =>
+            {
+                probeCalls++;
+                return Task.FromResult<JsonObject?>(null);
+            },
+            (_, _, _) =>
+            {
+                guardedCalls++;
+                return Task.FromException<JsonObject?>(cleanupFailure);
+            },
+            static _ => { },
+            (_, _) =>
+            {
+                revalidationCalls++;
+                return Task.FromResult(new JsonObject { ["status"] = "STABLE" });
+            });
+
+        Assert.Equal(1, probeCalls);
+        Assert.Equal(1, guardedCalls);
+        Assert.Equal("tool_error", Text(result["kind"]));
+        AssertSchemaValid("capture_native_scene", result);
+        Assert.Equal("capture_native_scene", Text(result["tool"]));
+        Assert.Equal("OBSERVER_UNAVAILABLE", Text(result["code"]));
+        Assert.Null(result["artifacts"]);
+        Assert.Null(result["captureId"]);
+        Assert.Equal(0, revalidationCalls);
+        Assert.Equal(0, artifacts.Store.StagedArtifactMetadataCount);
+        Assert.Equal(0, artifacts.Store.CommittedArtifactMetadataCount);
+        Assert.Empty(Directory.EnumerateFiles(artifacts.Root, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task GuardedUiaCyclicGraphs_AreUnobservableAndNeverCommitArtifactAuthority()
     {
         await using var artifacts = ArtifactStoreTestScope.Create();
@@ -1544,6 +1586,14 @@ internal static class NativeSceneAtomicityReflection
         Assert.False(coordinatorType.IsPublic, "NativeSceneCaptureCoordinator must remain an internal host authority.");
         RequireTaskOfJsonObjectMethod(coordinatorType, "CaptureElementAsync", typeof(JsonElement), typeof(CancellationToken));
         RequireTaskOfJsonObjectMethod(coordinatorType, "CaptureNativeSceneAsync", typeof(JsonElement), typeof(CancellationToken));
+    }
+
+    public static Exception CreateObserverCleanupException()
+    {
+        var type = LoadHostAssembly().GetType("NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneObserverCleanupException", throwOnError: true)!;
+        var constructor = type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null, types: [typeof(Exception)], modifiers: null)!;
+        return Assert.IsAssignableFrom<Exception>(constructor.Invoke([new InvalidOperationException("controlled observer cleanup failure")]));
     }
 
     public static RawProbeChannelDriver CreateRawProbeChannel() =>
