@@ -271,6 +271,302 @@ public sealed class RegistryShutdownContractTests
         finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
     }
 
+    [Theory]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","cases":[{"id":"case-1","transitions":[]}]}""", "PASS", true, 1, 0, "")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","cases":"nope"}""", "INVALID_SETUP", false, 0, 0, "cases must be a list")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","cases":[]}""", "INVALID_SETUP", false, 0, 0, "runtime smoke v2 plan has no cases to execute")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v1","steps":[{"op":"ui.invoke"}]}""", "INVALID_SETUP", false, 0, 0, "steps[0].selector is required for op ui.invoke")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","generate":{"template":"state-only-file-json","matrix":[{"id":"sample","path":"state.json","jsonpath":"$.ok"}]}}""", "PASS", true, 1, 1, "")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","cases":[{"id":"x","transitions":[{"probes":[{"kind":"ui.text","name":"same"},{"kind":"ui.text","name":"same"}]}]}]}""", "INVALID_SETUP", false, 1, 0, "cases[0].transitions[0] has duplicate probe path for before: ui.text.same")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","cases":[{"id":"x","transitions":[]}],"budgets":{"max_actions":true}}""", "INVALID_SETUP", false, 1, 0, "budgets.max_actions must be an integer")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","generate":{"template":"state-only-file-json","id_pattern":"{missing}","matrix":[{"id":"x","path":"x.json","jsonpath":"$.ok"}]}}""", "INVALID_SETUP", false, 0, 0, "generate.matrix[0]: unknown placeholder: missing")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","generate":{"template":"state-only-file-json","id_pattern":"{id","matrix":[{"id":"x","path":"x.json","jsonpath":"$.ok"}]}}""", "INVALID_SETUP", false, 0, 0, "generate.matrix[0]: malformed template '{id': expected '}' before end of string")]
+    [InlineData("""{"schema":"netcoredbg.runtime_smoke.v2","generate":{"template":"state-only-file-json","id_pattern":"{id:{width}}","matrix":[{"id":"x","width":3,"path":"x.json","jsonpath":"$.ok"}]}}""", "INVALID_SETUP", false, 0, 0, "generate.matrix[0]: unsupported placeholder syntax: id")]
+    [InlineData("""{"steps":[{"op":"ui.get_property","selector":{},"property":"\u001c"}]}""", "INVALID_SETUP", false, 0, 0, "steps[0].property must be a non-empty string for op ui.get_property")]
+    [InlineData("""{"steps":[{"op":"ui.list.toggle_item_child","selector":{},"item":{},"child":{"name":"\u001c"}}]}""", "INVALID_SETUP", false, 0, 0, "steps[0].child must include automation_id, name, or control_type for op ui.list.toggle_item_child")]
+    public void LegacyRuntimeSmokeValidation_MatchesPlanReadiness(string json, string status, bool canRun, int caseCount, int generatedCount, string expectedError)
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeValidation", throwOnError: true)!;
+        var validate = type.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var result = Assert.IsType<JsonObject>(validate.Invoke(null, [JsonNode.Parse(json)]));
+
+        Assert.Equal(status, result["status"]?.GetValue<string>());
+        Assert.Equal(canRun, result["can_run"]?.GetValue<bool>());
+        Assert.Equal(caseCount, result["case_count"]?.GetValue<int>());
+        Assert.Equal(generatedCount, result["generated_case_count"]?.GetValue<int>());
+        var errors = Assert.IsType<JsonArray>(result["validation_errors"]);
+        if (expectedError.Length == 0) Assert.Empty(errors);
+        else Assert.Contains(errors, item => item?.GetValue<string>() == expectedError);
+        Assert.Contains(result["accepted_schema_values"]!.AsArray(), item => item?.GetValue<string>() == "netcoredbg.runtime_smoke.v2");
+    }
+
+    [Theory]
+    [InlineData("ready", "PASS")]
+    [InlineData("not-ready", "FAIL")]
+    public async Task LegacyRuntimeSmoke_FileJsonAfterOnlyReportsObservedAndExpected(string expected, string status)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "smoke-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var plan = FileJsonSmokePlan(path, expected);
+
+        var validation = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan",
+            new JsonObject { ["plan"] = plan.DeepClone() }, "smoke-validate"));
+        Assert.Null(validation["error"]);
+        Assert.True(validation["data"]?["can_run"]?.GetValue<bool>());
+
+        var response = Content(await harness.CallLegacyAsync("run_runtime_smoke",
+            new JsonObject { ["plan"] = plan.DeepClone() }, "smoke-run"));
+        Assert.Null(response["error"]);
+        var data = Assert.IsType<JsonObject>(response["data"]);
+        Assert.Equal(status, data["status"]?.GetValue<string>());
+        Assert.Equal(0, data["action_count"]?.GetValue<int>());
+        var smokeCase = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(data["cases"])));
+        var transition = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(smokeCase["transitions"])));
+        Assert.Empty(Assert.IsType<JsonArray>(transition["actions"]));
+        var probes = Assert.IsType<JsonObject>(transition["probes"]);
+        Assert.Empty(Assert.IsType<JsonArray>(probes["before"]));
+        var probe = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(probes["after"])));
+        Assert.Equal(status, probe["status"]?.GetValue<string>());
+        Assert.Equal("ready", probe["value"]?.GetValue<string>());
+        Assert.Equal(expected, probe["expected"]?.GetValue<string>());
+        Assert.Equal("file.json.run_id", probe["path"]?.GetValue<string>());
+        Assert.Equal($"file:{Path.GetFileName(path)}:$.run_id", probe["evidence_ref"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData("action")]
+    [InlineData("cleanup")]
+    [InlineData("baseline")]
+    [InlineData("jsonpath")]
+    [InlineData("numeric")]
+    public async Task LegacyRuntimeSmoke_UnsupportedPlanIsBlockedBeforeExecution(string unsupported)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "smoke-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var plan = FileJsonSmokePlan(path, "ready");
+        var transition = plan["cases"]![0]!["transitions"]![0]!;
+        switch (unsupported)
+        {
+            case "action":
+                transition["action"] = new JsonObject { ["kind"] = "ui.invoke", ["selector"] = new JsonObject { ["automation_id"] = Guid.NewGuid().ToString("N") } };
+                break;
+            case "cleanup":
+                plan["cleanup"] = new JsonObject { ["steps"] = new JsonArray(new JsonObject { ["kind"] = "debug.stop" }) };
+                break;
+            case "baseline":
+                plan["baseline"] = new JsonObject { ["steps"] = new JsonArray(new JsonObject { ["kind"] = "debug.stop" }) };
+                break;
+            case "jsonpath":
+                transition["probes"]![0]!["jsonpath"] = "$['run_id']";
+                break;
+            case "numeric":
+                transition["probes"]![0]!["expected"] = 9007199254740992L;
+                break;
+        }
+
+        var validation = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan",
+            new JsonObject { ["plan"] = plan.DeepClone() }, "smoke-unsupported-validate"));
+        Assert.Equal("BLOCKED", validation["data"]?["status"]?.GetValue<string>());
+        Assert.False(validation["data"]?["can_run"]?.GetValue<bool>());
+
+        var response = Content(await harness.CallLegacyAsync("run_runtime_smoke",
+            new JsonObject { ["plan"] = plan.DeepClone() }, "smoke-unsupported-run"));
+        Assert.Equal("BLOCKED", response["data"]?["status"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        Assert.Equal("""{"run_id":"ready"}""", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_NativeValidationDoesNotReportPythonEnvironmentLimits()
+    {
+        var previous = Environment.GetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES");
+        try
+        {
+            Environment.SetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES", "not-a-number");
+            await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+            harness.EnableLegacyCompat();
+            var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "smoke-state.json");
+            var response = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan",
+                new JsonObject { ["plan"] = FileJsonSmokePlan(path, "ready") }, "smoke-native-limits"));
+            var guardrail = response["data"]?["evidence_contract"]?["diagnostics"]?["tracepoint_guardrail"];
+            Assert.Null(response["error"]);
+            Assert.Null(guardrail?["runtime_limits"]);
+            Assert.Contains("not derived from Python", guardrail?["runtime_limits_note"]?.GetValue<string>());
+        }
+        finally { Environment.SetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES", previous); }
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    public async Task LegacyRuntimeSmoke_FileFailuresAreNotReportedAsPass(string failure)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "smoke-state.json");
+        if (failure == "malformed") await File.WriteAllTextAsync(path, "{invalid");
+        var response = Content(await harness.CallLegacyAsync("run_runtime_smoke",
+            new JsonObject { ["plan"] = FileJsonSmokePlan(path, "ready") }, "smoke-file-failure"));
+        Assert.Equal("FAIL", response["data"]?["status"]?.GetValue<string>());
+        Assert.Equal("FAIL", response["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0]?["status"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_PlanPathIsExplicitlyBlocked()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var response = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan",
+            new JsonObject { ["plan_path"] = "plan.json" }, "smoke-plan-path"));
+        Assert.Equal("BLOCKED", response["data"]?["status"]?.GetValue<string>());
+        Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData("runtime_smoke_validate_plan")]
+    [InlineData("run_runtime_smoke")]
+    public async Task LegacyRuntimeSmoke_InvalidStepArgumentsReturnValidationErrors(string tool)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var plan = JsonNode.Parse("""{"schema":"netcoredbg.runtime_smoke.v1","steps":[{"op":"ui.invoke","args":1}]}""")!;
+        var response = Content(await harness.CallLegacyAsync(tool, new JsonObject { ["plan"] = plan }, "smoke-invalid-args"));
+        Assert.Equal("INVALID_SETUP", response["data"]?["status"]?.GetValue<string>());
+        Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+        Assert.Contains(response["data"]?["validation_errors"]?.AsArray() ?? [], item => item?.GetValue<string>() == "steps[0].args must be an object");
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_CompactEvidenceHonorsAdvertisedLimits()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "smoke-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var plan = FileJsonSmokePlan(path, "ready");
+        plan["cases"]![0]!["id"] = new string('x', 40000);
+        var response = Content(await harness.CallLegacyAsync("run_runtime_smoke", new JsonObject { ["plan"] = plan }, "smoke-compact"));
+        Assert.Equal("PASS", response["data"]?["status"]?.GetValue<string>());
+        var compact = Assert.IsType<JsonObject>(response["data"]?["compact"]);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(compact.ToJsonString()) <= 32768);
+        var evidence = Assert.IsType<JsonObject>(compact["evidence_refs"]?[0]);
+        Assert.Null(evidence["case_id"]);
+        Assert.Equal(40000, evidence["case_id_length"]?.GetValue<int>());
+        Assert.Contains(evidence["omitted_fields"]?.AsArray() ?? [], item => item?.GetValue<string>() == "case_id");
+    }
+
+    private static JsonObject FileJsonSmokePlan(string path, string expected) => new()
+    {
+        ["schema"] = "netcoredbg.runtime_smoke.v2",
+        ["cases"] = new JsonArray(new JsonObject
+        {
+            ["id"] = "state-only",
+            ["transitions"] = new JsonArray(new JsonObject
+            {
+                ["settle"] = new JsonObject { ["idle_ms"] = 0 },
+                ["probes"] = new JsonArray(new JsonObject
+                {
+                    ["kind"] = "file.json",
+                    ["phase"] = "after",
+                    ["name"] = "run_id",
+                    ["path"] = path,
+                    ["jsonpath"] = "$.run_id",
+                    ["expected"] = expected,
+                }),
+            }),
+        }),
+    };
+
+    [Fact]
+    public void LegacyRuntimeSmokeValidation_UsesPairArgumentsAfterShapeError()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeValidation", throwOnError: true)!;
+        var validate = type.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var plan = JsonNode.Parse("""{"schema":"netcoredbg.runtime_smoke.v1","steps":[{"op":"ui.invoke","args":[["selector",{"automation_id":"x"}]]}]}""");
+        var result = Assert.IsType<JsonObject>(validate.Invoke(null, [plan]));
+        var error = Assert.Single(Assert.IsType<JsonArray>(result["validation_errors"]));
+        Assert.Equal("steps[0].args must be an object", error?.GetValue<string>());
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeValidation_ReportsConfiguredNumericLimits()
+    {
+        var previousEntries = Environment.GetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES");
+        var previousInterval = Environment.GetEnvironmentVariable("NETCOREDBG_RATE_LIMIT_INTERVAL");
+        try
+        {
+            Environment.SetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES", "10_000");
+            Environment.SetEnvironmentVariable("NETCOREDBG_RATE_LIMIT_INTERVAL", "1_0");
+            var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+            var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeValidation", throwOnError: true)!;
+            var validate = type.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var result = Assert.IsType<JsonObject>(validate.Invoke(null, [new JsonObject()]));
+            var limits = result["evidence_contract"]?["diagnostics"]?["tracepoint_guardrail"]?["runtime_limits"];
+            Assert.Equal(10000, limits?["max_trace_entries"]?.GetValue<int>());
+            Assert.Equal(10.0, limits?["rate_limit_interval_seconds"]?.GetValue<double>());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NETCOREDBG_MAX_TRACE_ENTRIES", previousEntries);
+            Environment.SetEnvironmentVariable("NETCOREDBG_RATE_LIMIT_INTERVAL", previousInterval);
+        }
+    }
+
+    [Theory]
+    [InlineData("NETCOREDBG_MAX_TRACE_ENTRIES")]
+    [InlineData("NETCOREDBG_RATE_LIMIT_INTERVAL")]
+    public void LegacyRuntimeSmokeValidation_RejectsControlSeparatorsInNumericSettings(string name)
+    {
+        var previous = Environment.GetEnvironmentVariable(name);
+        try
+        {
+            Environment.SetEnvironmentVariable(name, "\u001c1000");
+            var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+            var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeValidation", throwOnError: true)!;
+            var validate = type.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var exception = Assert.Throws<TargetInvocationException>(() => validate.Invoke(null, [new JsonObject()]));
+            Assert.IsType<FormatException>(exception.InnerException);
+        }
+        finally { Environment.SetEnvironmentVariable(name, previous); }
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeV2_GeneratedGridRetainsRequestedAssertion()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeV2", throwOnError: true)!;
+        var generate = type.GetMethod("Generate", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var plan = JsonNode.Parse("""{"schema":"netcoredbg.runtime_smoke.v2","generate":{"template":"setting-ab-row-effect","matrix":[{"id":"media_enabled","control":"mediaToggle","setting_expression":"Settings.MediaEnabled","value":true,"row_index":750,"grid":"mediaGrid","row_expected":{"Title":"Clip 750","Enabled":true},"columns":"Title","realize":true}]}}""")!.AsObject();
+        var errors = new List<string>();
+        var cases = Assert.IsAssignableFrom<IReadOnlyList<JsonObject>>(generate.Invoke(null, [plan, errors]));
+        Assert.Empty(errors);
+        var grid = cases[0]["transitions"]?[0]?["probes"]?[1];
+        Assert.Equal("mediaGrid", grid?["selector"]?["automation_id"]?.GetValue<string>());
+        Assert.Equal("Clip 750", grid?["rows"]?[0]?["Title"]?.GetValue<string>());
+        Assert.True(grid?["rows"]?[0]?["Enabled"]?.GetValue<bool>());
+        Assert.Equal("Title", grid?["columns"]?[0]?.GetValue<string>());
+    }
+
     [Fact]
     public async Task LegacyCleanupProcesses_StatusAndAccessChecksDoNotMutateSession()
     {

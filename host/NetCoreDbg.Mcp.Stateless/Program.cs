@@ -304,6 +304,8 @@ internal static class Program
         private const string GetBuildDiagnostics = "get_build_diagnostics";
         private const string VerifyDebugFreshness = "verify_debug_freshness";
         private const string InspectLaunchCompatibility = "inspect_debug_launch_compatibility";
+        private const string RuntimeSmokeValidatePlan = "runtime_smoke_validate_plan";
+        private const string RunRuntimeSmoke = "run_runtime_smoke";
         private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
         private const string StepInto = "step_into";
@@ -820,7 +822,7 @@ internal static class Program
             if (name is not (StartDebug or AttachDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or CleanupProcesses or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
-                or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations or InspectLaunchCompatibility
+                or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations or InspectLaunchCompatibility or RuntimeSmokeValidatePlan or RunRuntimeSmoke
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
@@ -939,7 +941,7 @@ internal static class Program
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
                     or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ApplyCodeChange or WriteMemory or ConfigureExceptions or GetStepInTargets
-                    or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" || consumesOutput || compositeMayEvaluate;
+                    or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" or RunRuntimeSmoke || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -1949,6 +1951,46 @@ internal static class Program
                         return LegacyError("Debug session changed before diagnostics completed.");
                     cancellationToken.ThrowIfCancellationRequested();
                     return parsed;
+                }
+                if (name is RuntimeSmokeValidatePlan or RunRuntimeSmoke)
+                {
+                    var hasPlan = arguments.TryGetValue("plan", out var planValue) && planValue.ValueKind != JsonValueKind.Null;
+                    var hasPath = arguments.TryGetValue("plan_path", out var pathValue) && pathValue.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(pathValue.GetString());
+                    if ((hasPlan && planValue.ValueKind != JsonValueKind.Object) ||
+                        (arguments.ContainsKey("plan_path") && pathValue.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)))
+                        return LegacyError("Unsupported or invalid argument.");
+                    JsonObject data;
+                    if ((name == RuntimeSmokeValidatePlan && hasPlan == hasPath) || (name == RunRuntimeSmoke && !hasPlan))
+                    {
+                        data = LegacyRuntimeSmokeValidation.ValidateNative(null);
+                        data["validation_errors"] = new JsonArray("provide exactly one runtime smoke plan input: plan or plan_path");
+                        data["accepted_input"] = new JsonObject { ["plan"] = "inline JSON object", ["plan_path"] = "path to a UTF-8 JSON or YAML object plan file" };
+                    }
+                    else if (hasPath)
+                    {
+                        data = LegacyRuntimeSmokeValidation.ValidateNative(null);
+                        data["status"] = "BLOCKED";
+                        data["can_run"] = false;
+                        data["validation_errors"] = new JsonArray("Native plan_path loading is not supported; provide an inline plan.");
+                    }
+                    else
+                    {
+                        var plan = JsonNode.Parse(planValue.GetRawText());
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        data = name == RuntimeSmokeValidatePlan
+                            ? LegacyRuntimeSmokeFileRunner.Validate(plan)
+                            : await LegacyRuntimeSmokeFileRunner.RunAsync(plan, cancellationToken).ConfigureAwait(false);
+                        await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        gateHeld = true;
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var state = LegacySnapshot().State;
+                    var next = name == RuntimeSmokeValidatePlan && data["can_run"]?.GetValue<bool>() == true
+                        ? new[] { "run_runtime_smoke" } : new[] { "runtime_smoke_validate_plan" };
+                    var response = Result(new { state, next_actions = next, message = "Native runtime smoke result.", data }, false);
+                    return response.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
+                        ? response : LegacyError("Runtime smoke result exceeds 256 KiB.", state);
                 }
                 if (name == InspectLaunchCompatibility)
                 {
@@ -3925,6 +3967,8 @@ internal static class Program
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
                     InspectLaunchCompatibility => key != "program",
+                    RuntimeSmokeValidatePlan => key is not ("plan" or "plan_path"),
+                    RunRuntimeSmoke => key != "plan",
                     AttachDebug => key != "process_id",
                     CleanupProcesses => key != "force",
                     RestartDebug => key != "rebuild",
@@ -8852,6 +8896,8 @@ internal static class Program
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
                 Tool("inspect_debug_launch_compatibility", "Inspect target and active dbgshim versions without launching. Native launch does not automatically select cached shims.", """{"type":"object","properties":{"program":{"type":"string","minLength":1}},"required":["program"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_plan", "Validate an inline native file.json after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("run_runtime_smoke", "Run an admitted native file.json after-probe plan without UI actions. Other runtime-smoke scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
