@@ -1009,6 +1009,10 @@ class SessionManager:
         """Handle stopped event."""
         body = StoppedEventBody.from_dict(event.body)
         self._state.stopped_events += 1
+        # A stop preceding an execution reply cannot resolve that request.
+        for token, acknowledged in list(self._state._enc_execution_pending.items()):
+            if acknowledged:
+                del self._state._enc_execution_pending[token]
         if body.reason.value == "step":
             self._state.step_stops += 1
         self._state.last_stop_at = time.monotonic()
@@ -1255,7 +1259,9 @@ class SessionManager:
             return True
 
         try:
-            response = await self._client.continue_execution(thread_id, admission=admit_continue)
+            response = await self._request_execution(
+                lambda: self._client.continue_execution(thread_id, admission=admit_continue)
+            )
         except BaseException:
             if admitted_revision is not None:
                 state, stopped, continued, _, generation = token
@@ -1650,6 +1656,24 @@ class SessionManager:
             return f"name:{key}"
         return "<unknown-source>"
 
+    async def _request_execution(
+        self, send: Callable[[], Awaitable[DAPResponse]]
+    ) -> DAPResponse:
+        """Keep EnC out of unresolved execution requests for this debuggee."""
+        state = self._state
+        if state._enc_apply_lock.locked():
+            raise RuntimeError("An Edit-and-Continue operation is in progress")
+        token = object()
+        state._enc_execution_pending[token] = False
+        try:
+            response = await send()
+        except BaseException:
+            state._enc_execution_pending.pop(token, None)
+            state._enc_execution_unknown = True
+            raise
+        state._enc_execution_pending[token] = True
+        return response
+
     def prepare_for_execution(self) -> None:
         """Prepare for an execution command by creating a fresh event.
 
@@ -1783,7 +1807,7 @@ class SessionManager:
             # Resume (always — even if evaluate failed)
             try:
                 self.prepare_for_execution()
-                await self._client.continue_execution(tid)
+                await self._request_execution(lambda: self._client.continue_execution(tid))
             except Exception:
                 # If resume fails, leave paused (safe state) — agent can inspect
                 pass
@@ -2920,7 +2944,7 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread to continue")
 
-        response = await self._client.continue_execution(tid)
+        response = await self._request_execution(lambda: self._client.continue_execution(tid))
         if response.success:
             self._set_state(DebugState.RUNNING)
         return {"success": response.success, "threadId": tid}
@@ -2932,7 +2956,7 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stepping")
 
-        response = await self._client.step_over(tid)
+        response = await self._request_execution(lambda: self._client.step_over(tid))
         return {"success": response.success, "threadId": tid}
 
     async def step_in(
@@ -2944,7 +2968,9 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stepping")
 
-        response = await self._client.step_in(tid, target_id=target_id)
+        response = await self._request_execution(
+            lambda: self._client.step_in(tid, target_id=target_id)
+        )
         return {"success": response.success, "threadId": tid}
 
     async def get_step_in_targets(self, frame_id: int | None = None) -> list[dict[str, Any]]:
@@ -2967,7 +2993,7 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stepping")
 
-        response = await self._client.step_out(tid)
+        response = await self._request_execution(lambda: self._client.step_out(tid))
         return {"success": response.success, "threadId": tid}
 
     async def pause(self, thread_id: int | None = None) -> dict[str, Any]:

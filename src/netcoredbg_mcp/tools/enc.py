@@ -37,7 +37,11 @@ def register_enc_tools(
         file: str,
         edits: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Apply source edits to a stopped debug session using Edit-and-Continue."""
+        """Apply source edits to a stopped debug session using Edit-and-Continue.
+
+        One delta attempt is allowed per module per debuggee session. An uncertain
+        result retains source edits and requires a debugging restart before retry.
+        """
         access_error = check_session_access(ctx)
         if access_error:
             return build_error_response(access_error, state=session.state.state)
@@ -66,16 +70,67 @@ async def apply_code_change_to_session(
     apply: ApplyFn = apply_deltas,
 ) -> dict[str, Any]:
     """Validate, compile, and apply source edits to a stopped debug session."""
-    if session.state.state != DebugState.STOPPED:
-        return build_error_response(
-            "apply_code_change requires STOPPED state (break mode).",
-            state=session.state.state,
+    state = session.state
+    async with state._enc_apply_lock:
+        if session.state is not state or state.state != DebugState.STOPPED:
+            return build_error_response(
+                "apply_code_change requires the current STOPPED session (break mode).",
+                state=session.state.state,
+            )
+        return await _apply_code_change_locked(
+            session, project_root, file, edits, compiler=compiler, apply=apply
         )
+
+
+async def _apply_code_change_locked(
+    session: Any,
+    project_root: str | Path,
+    file: str | Path,
+    edits: list[dict[str, Any]],
+    *,
+    compiler: CompilerFn,
+    apply: ApplyFn,
+) -> dict[str, Any]:
+    state = session.state
 
     enc_support = detect_enc_support(session.netcoredbg_path)
     if not enc_support["supported"]:
         return build_error_response(
             f"{enc_support['error']} Run `netcoredbg-mcp setup --enc` and restart debugging.",
+            state=session.state.state,
+        )
+
+    client = session.client
+    execution_revision = getattr(session, "_execution_revision", None)
+    generation = getattr(session, "_active_dap_run", None)
+    execution_event = getattr(session, "_execution_event", None)
+    continued_events = state.continued_events
+    stopped_events = state.stopped_events
+
+    def is_current(expected_state: DebugState) -> bool:
+        return (
+            session.state is state
+            and session.client is client
+            and state.state == expected_state
+            and state.continued_events == continued_events
+            and state.stopped_events == stopped_events
+            and state.transport_terminal is None
+            and state.exit_code is None
+            and not state.execution_outcome_unknown
+            and not state._enc_execution_pending
+            and not state._enc_execution_unknown
+            and (
+                execution_event is None
+                or (session._execution_event is execution_event and execution_event.is_set())
+            )
+            and getattr(session, "_execution_revision", None) == execution_revision
+            and getattr(session, "_active_dap_run", None) == generation
+            and getattr(session, "_stopping_dap_run", None) is None
+        )
+
+    if not is_current(DebugState.STOPPED):
+        return build_error_response(
+            "Execution is pending or unconfirmed; wait for a later stop or restart debugging.",
             state=session.state.state,
         )
 
@@ -85,6 +140,7 @@ async def apply_code_change_to_session(
         source_edits = [_parse_edit(edit) for edit in edits]
         _validate_source_edit_ranges(target_file, source_edits)
         _validate_line_updates_compatible_edits(source_edits)
+        original_bytes = target_file.read_bytes()
     except Exception as exc:
         return build_error_response(str(exc), state=session.state.state)
 
@@ -94,6 +150,15 @@ async def apply_code_change_to_session(
         target_module = _resolve_target_module(session, target_file)
     except Exception as exc:
         target_module_error = exc
+
+    module_name = _module_file_name(target_module) if target_module is not None else None
+    module_key = module_name.casefold() if module_name is not None else None
+    if module_key is not None and module_key in state._enc_attempted_modules:
+        return build_error_response(
+            "An Edit-and-Continue delta was already attempted for this module. "
+            "Restart debugging before applying another change.",
+            state=session.state.state,
+        )
 
     delta = await asyncio.to_thread(
         compiler,
@@ -117,41 +182,67 @@ async def apply_code_change_to_session(
     if target_module is None:
         assert target_module_error is not None
         return build_error_response(str(target_module_error), state=session.state.state)
-    module_name = _module_file_name(target_module)
+    assert module_name is not None and module_key is not None
 
-    original_source = target_file.read_text(encoding="utf-8")
-    source_applied = False
-    _apply_source_edits(target_file, source_edits)
-    source_applied = True
+    try:
+        if not is_current(DebugState.STOPPED):
+            raise RuntimeError("Debug session changed while compiling the delta.")
+        if target_file.read_bytes() != original_bytes:
+            raise RuntimeError("Source file changed while compiling the delta.")
+        metadata_path = _require_delta_path(delta.metadata_delta_path, "metadata")
+        il_path = _require_delta_path(delta.il_delta_path, "il")
+        pdb_path = _require_delta_path(delta.pdb_delta_path, "pdb")
+        line_updates_path = _ensure_empty_line_updates_file(delta, source_edits)
+    except Exception as exc:
+        return build_error_response(str(exc), state=session.state.state)
+
+    try:
+        _apply_source_edits(target_file, source_edits)
+    except Exception as exc:
+        return build_error_response(
+            f"Could not write source edits; the file may have changed: {exc}",
+            state=session.state.state,
+        )
 
     previous_state = session.begin_applying_changes()
-    apply_error: Exception | None = None
+    # A failed response or cancellation may follow a partial runtime mutation.
+    state._enc_attempted_modules.add(module_key)
     apply_result = None
+    apply_error: Exception | None = None
+    result_current = False
     try:
-        line_updates_path = _ensure_empty_line_updates_file(delta, source_edits)
         apply_result = await apply(
-            session.client,
+            client,
             dll_name=module_name,
-            metadata_path=_require_delta_path(delta.metadata_delta_path, "metadata"),
-            il_path=_require_delta_path(delta.il_delta_path, "il"),
-            pdb_path=_require_delta_path(delta.pdb_delta_path, "pdb"),
+            metadata_path=metadata_path,
+            il_path=il_path,
+            pdb_path=pdb_path,
             line_updates_path=line_updates_path,
+            admission=lambda: is_current(DebugState.APPLYING_CHANGES),
         )
+        result_current = is_current(DebugState.APPLYING_CHANGES)
     except Exception as exc:
         apply_error = exc
     finally:
-        session.finish_applying_changes(previous_state)
+        if session.state is state:
+            session.finish_applying_changes(previous_state)
 
-    if apply_error is not None:
-        if source_applied:
-            _restore_source(target_file, original_source)
-        return build_error_response(str(apply_error), state=session.state.state)
-
-    assert apply_result is not None
-    if not apply_result.success:
-        _restore_source(target_file, original_source)
+    if (
+        apply_error is not None
+        or apply_result is None
+        or not apply_result.success
+        or not result_current
+    ):
+        if apply_error is not None:
+            detail = str(apply_error)
+        elif apply_result is not None and not apply_result.success:
+            detail = apply_result.message
+        else:
+            detail = None
         return build_error_response(
-            apply_result.message or "netcoredbg applyDeltas request failed.",
+            f"{detail or 'The delta application could not be confirmed.'} "
+            "The runtime outcome is unknown; source edits were retained. "
+            "Restart debugging before applying another change.",
             state=session.state.state,
         )
 
@@ -237,10 +328,6 @@ def _apply_source_edits(target_file: Path, edits: list[SourceEdit]) -> None:
         replacement = _replacement_lines(edit.new_text)
         lines[edit.start_line - 1 : edit.end_line] = replacement
     target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _restore_source(target_file: Path, content: str) -> None:
-    target_file.write_text(content, encoding="utf-8")
 
 
 def _module_file_name(module: ModuleInfo) -> str:

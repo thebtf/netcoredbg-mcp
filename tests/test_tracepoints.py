@@ -395,6 +395,11 @@ def _make_session(evaluate_result: str = "42", *, success: bool = True) -> Magic
     session._client.evaluate = AsyncMock(return_value=response)
     session._client.continue_execution = AsyncMock()
     session.prepare_for_execution = MagicMock()
+
+    async def request_execution(send):
+        return await send()
+
+    session._request_execution = request_execution
     session.get_stack_trace = AsyncMock(return_value=[MagicMock(id=10)])
     return session
 
