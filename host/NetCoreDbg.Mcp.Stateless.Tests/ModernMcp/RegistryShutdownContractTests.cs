@@ -421,6 +421,25 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyRuntimeSmoke_RejectsUnmountedDriveBeforeFileAccess()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var mounted = DriveInfo.GetDrives().Select(drive => char.ToUpperInvariant(drive.Name[0])).ToHashSet();
+        var letter = Enumerable.Range('C', 'Z' - 'C' + 1).Select(code => (char)code).FirstOrDefault(candidate => !mounted.Contains(candidate));
+        Assert.NotEqual('\0', letter);
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var plan = FileJsonSmokePlan($"{letter}:\\not-mounted\\state.json", "ready");
+        foreach (var tool in new[] { "runtime_smoke_validate_plan", "run_runtime_smoke" })
+        {
+            var response = Content(await harness.CallLegacyAsync(tool, new JsonObject { ["plan"] = plan.DeepClone() }, "smoke-unmounted-" + tool));
+            Assert.Equal("BLOCKED", response["data"]?["status"]?.GetValue<string>());
+            Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+        }
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
     public async Task LegacyRuntimeSmoke_PlanPathIsExplicitlyBlocked()
     {
         await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
@@ -486,6 +505,336 @@ public sealed class RegistryShutdownContractTests
                 }),
             }),
         }),
+    };
+
+    [Fact]
+    public async Task LegacyRuntimeSmokeProbe_ValidatesFileObservationWithoutCreatingRun()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var response = Content(await harness.CallLegacyAsync("runtime_smoke_validate_probe",
+            new JsonObject { ["probe"] = FileJsonSmokeProbe(path), ["phase"] = "after" }, "durable-probe-validate"));
+        Assert.Null(response["error"]);
+        Assert.True(response["data"]?["can_run"]?.GetValue<bool>());
+        Assert.False(response["data"]?["run_created"]?.GetValue<bool>());
+        Assert.Equal("ui.noop", response["data"]?["generated_plan"]?["action_kind"]?.GetValue<string>());
+        Assert.Null(response["data"]?["run_id"]);
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData("runtime_smoke_validate_probe")]
+    [InlineData("runtime_smoke_run_probe")]
+    public async Task LegacyRuntimeSmokeProbe_RejectsUnsupportedProbeWithoutRun(string tool)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var arguments = new JsonObject
+        {
+            ["probe"] = new JsonObject { ["kind"] = "ui.text", ["name"] = "unsupported", ["selector"] = new JsonObject { ["automation_id"] = Guid.NewGuid().ToString("N") } },
+            ["phase"] = "after",
+        };
+        if (tool == "runtime_smoke_run_probe")
+        {
+            var validation = Content(await harness.CallLegacyAsync("runtime_smoke_validate_probe",
+                arguments.DeepClone().AsObject(), "durable-unsupported-probe-validation"));
+            Assert.Contains(validation["data"]?["status"]?.GetValue<string>(), new[] { "BLOCKED", "INVALID_SETUP" });
+            Assert.False(validation["data"]?["can_run"]?.GetValue<bool>());
+        }
+        var response = Content(await harness.CallLegacyAsync(tool, arguments, "durable-unsupported-probe"));
+        Assert.Contains(response["data"]?["status"]?.GetValue<string>(), new[] { "BLOCKED", "INVALID_SETUP" });
+        Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+        Assert.False(response["data"]?["run_created"]?.GetValue<bool>());
+        Assert.Null(response["data"]?["run_id"]);
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData("runtime_smoke_run_probe")]
+    [InlineData("runtime_smoke_run_plan")]
+    public async Task LegacyRuntimeSmoke_DurableFileRunReturnsFinalEvidenceAndStopIsIdempotent(string tool)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var arguments = tool == "runtime_smoke_run_probe"
+            ? new JsonObject { ["probe"] = FileJsonSmokeProbe(path), ["phase"] = "after" }
+            : new JsonObject { ["plan"] = FileJsonSmokePlan(path, "ready") };
+        var started = Content(await harness.CallLegacyAsync(tool, arguments, "durable-start"));
+        Assert.Null(started["error"]);
+        Assert.Equal("RUNNING", started["data"]?["status"]?.GetValue<string>());
+        if (tool == "runtime_smoke_run_probe") Assert.True(started["data"]?["run_created"]?.GetValue<bool>());
+        var runId = Assert.IsType<string>(started["data"]?["run_id"]?.GetValue<string>());
+        Assert.NotEmpty(runId);
+
+        var waited = Content(await harness.CallLegacyAsync("runtime_smoke_wait_for_result",
+            new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "durable-wait").WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Null(waited["error"]);
+        Assert.True(waited["data"]?["final"]?.GetValue<bool>());
+        Assert.Equal("PASS", waited["data"]?["status"]?.GetValue<string>());
+        var result = Content(await harness.CallLegacyAsync("runtime_smoke_get_result",
+            new JsonObject { ["run_id"] = runId }, "durable-result"));
+        Assert.Null(result["error"]);
+        Assert.True(result["data"]?["final"]?.GetValue<bool>());
+        Assert.Equal("PASS", result["data"]?["status"]?.GetValue<string>());
+        var probe = result["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0];
+        Assert.Equal("PASS", probe?["status"]?.GetValue<string>());
+        Assert.Equal("ready", probe?["value"]?.GetValue<string>());
+        Assert.Equal("ready", probe?["expected"]?.GetValue<string>());
+        var first = Content(await harness.CallLegacyAsync("runtime_smoke_stop", new JsonObject { ["run_id"] = runId }, "durable-stop"));
+        var second = Content(await harness.CallLegacyAsync("runtime_smoke_stop", new JsonObject { ["run_id"] = runId }, "durable-stop-again"));
+        Assert.Null(first["error"]);
+        Assert.Null(second["error"]);
+        Assert.Equal("PASS", first["data"]?["status"]?.GetValue<string>());
+        Assert.Equal(first["data"]?["status"]?.GetValue<string>(), second["data"]?["status"]?.GetValue<string>());
+        Assert.Equal(runId, second["data"]?["run_id"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_DurablePlanBlocksUiActionBeforeRun()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var plan = FileJsonSmokePlan(path, "ready");
+        plan["cases"]![0]!["transitions"]![0]!["action"] = new JsonObject
+        {
+            ["kind"] = "ui.invoke",
+            ["selector"] = new JsonObject { ["automation_id"] = Guid.NewGuid().ToString("N") },
+        };
+        var validation = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan",
+            new JsonObject { ["plan"] = plan.DeepClone() }, "durable-unsupported-plan-validation"));
+        Assert.Equal("BLOCKED", validation["data"]?["status"]?.GetValue<string>());
+        Assert.False(validation["data"]?["can_run"]?.GetValue<bool>());
+        var response = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = plan }, "durable-unsupported-plan"));
+        Assert.Equal("BLOCKED", response["data"]?["status"]?.GetValue<string>());
+        Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+        Assert.Null(response["data"]?["run_id"]);
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        Assert.Equal("""{"run_id":"ready"}""", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_DurableRunIsIsolatedByMuxOwner()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var started = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_probe",
+            new JsonObject { ["probe"] = FileJsonSmokeProbe(path), ["phase"] = "after" }, "mux-smoke-start", "smoke-owner"));
+        Assert.Equal("RUNNING", started["data"]?["status"]?.GetValue<string>());
+        var runId = Assert.IsType<string>(started["data"]?["run_id"]?.GetValue<string>());
+        foreach (var tool in new[] { "runtime_smoke_get_result", "runtime_smoke_stop" })
+        {
+            var denied = Content(await harness.CallLegacyWithMetaAsync(tool, new JsonObject { ["run_id"] = runId }, "mux-foreign-" + tool, "smoke-other"));
+            Assert.True(denied["error"] is not null || denied["data"]?["status"]?.GetValue<string>() is "BLOCKED" or "NOT_FOUND" ||
+                (denied["data"]?["status"]?.GetValue<string>() == "FAIL" && denied["data"]?["reason"]?.GetValue<string>() == "runtime smoke run not found"));
+            Assert.Null(denied["data"]?["cases"]);
+        }
+        var waited = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_wait_for_result",
+            new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "mux-owner-wait", "smoke-owner").WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(waited["data"]?["final"]?.GetValue<bool>());
+        Assert.Equal("PASS", waited["data"]?["status"]?.GetValue<string>());
+        var ownerResult = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_get_result",
+            new JsonObject { ["run_id"] = runId }, "mux-owner-result", "smoke-owner"));
+        Assert.Equal("ready", ownerResult["data"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]?[0]?["value"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData("budgets", "false")]
+    [InlineData("name", "42")]
+    [InlineData("phase", "false")]
+    [InlineData("debug_preflight", "\"yes\"")]
+    [InlineData("tracepoint_guard", "[]")]
+    public async Task LegacyRuntimeSmokeProbe_InvalidOptionTypesCannotStart(string key, string json)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        var arguments = new JsonObject { ["probe"] = FileJsonSmokeProbe(path), [key] = JsonNode.Parse(json) };
+        foreach (var tool in new[] { "runtime_smoke_validate_probe", "runtime_smoke_run_probe" })
+        {
+            var response = Content(await harness.CallLegacyAsync(tool, arguments.DeepClone().AsObject(), "smoke-invalid-" + key + tool));
+            Assert.Equal("INVALID_SETUP", response["data"]?["status"]?.GetValue<string>());
+            Assert.False(response["data"]?["can_run"]?.GetValue<bool>());
+            Assert.False(response["data"]?["run_created"]?.GetValue<bool>());
+            Assert.Null(response["data"]?["run_id"]);
+        }
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_RejectedRestartDoesNotCancelRun()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<JsonObject> Run(JsonObject _, CancellationToken token)
+        {
+            using var registration = token.Register(() => cancelled.TrySetResult(true));
+            entered.TrySetResult(true);
+            await release.Task;
+            token.ThrowIfCancellationRequested();
+            return new JsonObject { ["status"] = "PASS" };
+        }
+        var (runs, _) = ControlledSmokeRuns(Run);
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        harness.ReplaceSmokeRuns(runs);
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        var started = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = FileJsonSmokePlan(path, "ready") }, "restart-smoke-start"));
+        var runId = Assert.IsType<string>(started["data"]?["run_id"]?.GetValue<string>());
+        try
+        {
+            await entered.Task.WaitAsync(ObservationTimeout);
+            var rejected = Content(await harness.CallLegacyAsync("restart_debug", new JsonObject { ["rebuild"] = "invalid" }, "restart-invalid").WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("Invalid rebuild.", rejected["error"]?.GetValue<string>());
+            Assert.False(cancelled.Task.IsCompleted);
+            var current = Content(await harness.CallLegacyAsync("runtime_smoke_get_result", new JsonObject { ["run_id"] = runId }, "restart-smoke-current"));
+            Assert.Equal("RUNNING", current["data"]?["status"]?.GetValue<string>());
+        }
+        finally { release.TrySetResult(true); }
+        var finished = Content(await harness.CallLegacyAsync("runtime_smoke_wait_for_result", new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "restart-smoke-finished"));
+        Assert.Equal("PASS", finished["data"]?["status"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_DebugStopReportsUndrainedRun()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<JsonObject> Run(JsonObject _, CancellationToken token)
+        {
+            using var registration = token.Register(() => cancelled.TrySetResult(true));
+            entered.TrySetResult(true);
+            await release.Task;
+            token.ThrowIfCancellationRequested();
+            return new JsonObject { ["status"] = "PASS" };
+        }
+        var (runs, _) = ControlledSmokeRuns(Run);
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        harness.ReplaceSmokeRuns(runs);
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "durable-state.json");
+        var started = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = FileJsonSmokePlan(path, "ready") }, "stop-smoke-start"));
+        var runId = Assert.IsType<string>(started["data"]?["run_id"]?.GetValue<string>());
+        try
+        {
+            await entered.Task.WaitAsync(ObservationTimeout);
+            var stopped = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "stop-debug-pending").WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(cancelled.Task.IsCompleted);
+            Assert.Contains("runtime smoke is still draining", stopped["error"]?.GetValue<string>());
+            Assert.Equal("idle", stopped["state"]?.GetValue<string>());
+            var current = Content(await harness.CallLegacyAsync("runtime_smoke_get_result", new JsonObject { ["run_id"] = runId }, "stop-smoke-current"));
+            Assert.False(current["data"]?["final"]?.GetValue<bool>());
+        }
+        finally { release.TrySetResult(true); }
+        var finished = Content(await harness.CallLegacyAsync("runtime_smoke_wait_for_result", new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "stop-smoke-finished"));
+        Assert.Equal("IMPASSE", finished["data"]?["status"]?.GetValue<string>());
+        var retried = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "stop-debug-drained"));
+        Assert.True(retried["data"]?["success"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_StoppedRunWaitsForActualDrain()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<JsonObject> Run(JsonObject _, CancellationToken token)
+        {
+            entered.TrySetResult(true);
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) { cancelled.TrySetResult(true); await release.Task; throw; }
+            return new JsonObject { ["status"] = "PASS" };
+        }
+        var (registry, type) = ControlledSmokeRuns(Run);
+        var start = Assert.IsType<JsonObject>(type.GetMethod("Start")!.Invoke(registry, [new JsonObject(), "owner"]));
+        var runId = Assert.IsType<string>(start["run_id"]?.GetValue<string>());
+        await entered.Task.WaitAsync(ObservationTimeout);
+        using var waitCancellation = new CancellationTokenSource();
+        var wait = Assert.IsAssignableFrom<Task<JsonObject>>(type.GetMethod("WaitForResultAsync")!.Invoke(registry,
+            [runId, "owner", 5000, 100, 0, 50, waitCancellation.Token]));
+        waitCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await wait);
+        var running = Assert.IsType<JsonObject>(type.GetMethod("GetResult")!.Invoke(registry, [runId, "owner"]));
+        Assert.Equal("RUNNING", running["status"]?.GetValue<string>());
+        var stop = Assert.IsAssignableFrom<Task<JsonObject>>(type.GetMethod("StopAsync")!.Invoke(registry, [runId, "owner", CancellationToken.None]));
+        try
+        {
+            await cancelled.Task.WaitAsync(ObservationTimeout);
+            Assert.False(stop.IsCompleted);
+            var stopping = Assert.IsType<JsonObject>(type.GetMethod("GetResult")!.Invoke(registry, [runId, "owner"]));
+            Assert.Equal("STOPPING", stopping["status"]?.GetValue<string>());
+            Assert.False(stopping["final"]?.GetValue<bool>());
+            var overlapping = Assert.IsType<JsonObject>(type.GetMethod("Start")!.Invoke(registry, [new JsonObject(), "other"]));
+            Assert.Equal("BLOCKED", overlapping["status"]?.GetValue<string>());
+            Assert.Null(overlapping["active_run_id"]);
+        }
+        finally { release.TrySetResult(true); }
+        var final = await stop.WaitAsync(ObservationTimeout);
+        Assert.Equal("IMPASSE", final["status"]?.GetValue<string>());
+        Assert.Equal("STOPPED", final["lifecycle_status"]?.GetValue<string>());
+        Assert.True(final["final"]?.GetValue<bool>());
+        Assert.Equal("PASS", final["cleanup"]?["status"]?.GetValue<string>());
+        await Assert.IsAssignableFrom<Task>(type.GetMethod("CloseAsync")!.Invoke(registry, [CancellationToken.None]));
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_HostCloseWaitsForActualDrain()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<JsonObject> Run(JsonObject _, CancellationToken token)
+        {
+            entered.TrySetResult(true);
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+            catch (OperationCanceledException) { cancelled.TrySetResult(true); await release.Task; throw; }
+            return new JsonObject { ["status"] = "PASS" };
+        }
+        var (registry, type) = ControlledSmokeRuns(Run);
+        _ = type.GetMethod("Start")!.Invoke(registry, [new JsonObject(), "owner"]);
+        await entered.Task.WaitAsync(ObservationTimeout);
+        var close = Assert.IsAssignableFrom<Task>(type.GetMethod("CloseAsync")!.Invoke(registry, [CancellationToken.None]));
+        try
+        {
+            await cancelled.Task.WaitAsync(ObservationTimeout);
+            Assert.False(close.IsCompleted);
+        }
+        finally { release.TrySetResult(true); }
+        await close.WaitAsync(ObservationTimeout);
+        var refused = Assert.IsType<JsonObject>(type.GetMethod("Start")!.Invoke(registry, [new JsonObject(), "owner"]));
+        Assert.Equal("BLOCKED", refused["status"]?.GetValue<string>());
+    }
+
+    private static (object Registry, Type Type) ControlledSmokeRuns(Func<JsonObject, CancellationToken, Task<JsonObject>> runner)
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeRuns", throwOnError: true)!;
+        var constructor = type.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(Func<JsonObject, CancellationToken, Task<JsonObject>>)], null);
+        Assert.NotNull(constructor);
+        return (constructor.Invoke([runner]), type);
+    }
+
+    private static JsonObject FileJsonSmokeProbe(string path) => new()
+    {
+        ["kind"] = "file.json",
+        ["name"] = "run_id",
+        ["path"] = path,
+        ["jsonpath"] = "$.run_id",
+        ["expected"] = "ready",
     };
 
     [Fact]
@@ -565,6 +914,93 @@ public sealed class RegistryShutdownContractTests
         Assert.Equal("Clip 750", grid?["rows"]?[0]?["Title"]?.GetValue<string>());
         Assert.True(grid?["rows"]?[0]?["Enabled"]?.GetValue<bool>());
         Assert.Equal("Title", grid?["columns"]?[0]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeProbe_BuildsRunnableSingleProbePlan()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeProbe", throwOnError: true)!;
+        var build = type.GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var probe = new JsonObject { ["kind"] = "process.metric", ["name"] = "process_memory", ["pid"] = 123 };
+        var options = new JsonObject { ["name"] = "ready-probe", ["phase"] = "both" };
+        var result = Assert.IsType<JsonObject>(build.Invoke(null, [probe, options]));
+
+        Assert.Equal("netcoredbg.runtime_smoke.v2", result["plan"]?["schema"]?.GetValue<string>());
+        Assert.Equal("ready-probe", result["generated_plan"]?["plan_name"]?.GetValue<string>());
+        Assert.Equal("ui.noop", result["generated_plan"]?["action_kind"]?.GetValue<string>());
+        Assert.Equal("process.metric", result["probe"]?["kind"]?.GetValue<string>());
+        Assert.Equal("both", result["generated_plan"]?["probe_phase"]?.GetValue<string>());
+        Assert.Equal("both", result["plan"]?["cases"]?[0]?["transitions"]?[0]?["probes"]?[0]?["phase"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeProbe_PreservesTracepointCleanupOrder()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeProbe", throwOnError: true)!;
+        var build = type.GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var probe = new JsonObject { ["kind"] = "debug.tracepoint", ["file"] = "src/Foo.cs", ["line"] = 22, ["expression"] = "x" };
+        var options = new JsonObject
+        {
+            ["name"] = "trace-case",
+            ["debug_preflight"] = true,
+            ["tracepoint_guard"] = new JsonObject { ["cleanup"] = new JsonObject { ["operations"] = new JsonArray("debug.tracepoint.remove", "debug.trace_log.clear") } },
+        };
+        var result = Assert.IsType<JsonObject>(build.Invoke(null, [probe, options]));
+
+        var cleanup = Assert.IsType<JsonArray>(result["plan"]?["cases"]?[0]?["cleanup"]);
+        Assert.Equal("debug.trace_log.clear", cleanup[0]?["kind"]?.GetValue<string>());
+        Assert.Equal("Foo.cs:22", cleanup[1]?["id"]?.GetValue<string>());
+        var reported = Assert.IsType<JsonArray>(result["generated_plan"]?["tracepoint_guard"]?["cleanup_operations"]);
+        Assert.Equal("debug.tracepoint.remove", reported[0]?.GetValue<string>());
+        Assert.Equal("debug.trace_log.clear", reported[1]?.GetValue<string>());
+        Assert.Equal("debug_hygiene_preflight", result["plan"]?["baseline"]?["steps"]?[0]?["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeProbe_PreservesSupplementaryLettersInEvidencePath()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeProbe", throwOnError: true)!;
+        var build = type.GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var result = Assert.IsType<JsonObject>(build.Invoke(null,
+            [new JsonObject { ["kind"] = "app_diagnostics" }, new JsonObject { ["name"] = "probe-𐐀-x" }]));
+
+        Assert.Equal(".agent/runtime-smoke/app-diagnostics/probe-𐐀-x",
+            result["generated_plan"]?["diagnostic_launch"]?["evidence"]?["directory"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeProbe_ReportsMalformedGuardConversion()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeProbe", throwOnError: true)!;
+        var build = type.GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var exception = Assert.Throws<TargetInvocationException>(() => build.Invoke(null,
+            [new JsonObject { ["kind"] = "debug.tracepoint" }, new JsonObject { ["tracepoint_guard"] = new JsonObject { ["cleanup"] = "abc" } }]));
+        Assert.Equal("dictionary update sequence element #0 has length 1; 2 is required", exception.InnerException?.Message);
+    }
+
+    [Fact]
+    public void LegacyRuntimeSmokeProbe_UsesPythonRepresentationForNonPrintableKind()
+    {
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var type = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyRuntimeSmokeProbe", throwOnError: true)!;
+        var build = type.GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var result = Assert.IsType<JsonObject>(build.Invoke(null,
+            [new JsonObject { ["kind"] = new JsonArray("\u200b") }, new JsonObject()]));
+        Assert.Equal("['\\u200b']", result["generated_plan"]?["probe_kind"]?.GetValue<string>());
     }
 
     [Fact]
@@ -2528,6 +2964,12 @@ public sealed class RegistryShutdownContractTests
             return name => observe.Invoke(generation, [name]);
         }
         public void EnableLegacyCompat() => registry.GetType().GetProperty("LegacyCompat", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(registry, true);
+        public void ReplaceSmokeRuns(object runs)
+        {
+            var field = registry.GetType().GetField("_legacySmoke", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var constructor = field.FieldType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [runs.GetType()], null)!;
+            field.SetValue(registry, constructor.Invoke([runs]));
+        }
         public ValueTask<ReadResourceResult> ReadResourceAsync(string uri, CancellationToken cancellationToken) =>
             (ValueTask<ReadResourceResult>)registry.GetType().GetMethod("ReadLegacyResourceAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(registry, [uri, cancellationToken])!;

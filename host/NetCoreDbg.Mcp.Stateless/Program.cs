@@ -373,6 +373,7 @@ internal static class Program
         internal bool LegacyCompat { get; init; }
         private readonly SemaphoreSlim _legacyGate = new(1, 1);
         private readonly LegacyOutputEvidence _legacyOutputEvidence = new();
+        private readonly LegacyRuntimeSmokeFacade _legacySmoke = new();
         private readonly SemaphoreSlim _legacyLifecycle = new(1, 1);
         private readonly SemaphoreSlim _legacyBreakpointGate = new(1, 1);
         // Identity survives option changes; incarnation fences observations from earlier revisions.
@@ -823,7 +824,7 @@ internal static class Program
                 or PauseExecution or ContinueExecution or StopDebug or CleanupProcesses or RestartDebug or TerminateDebug or GetOutput or GetOutputTail or GetBuildDiagnostics or SearchOutput or DebuggeeActivity or VerifyDebugFreshness or "output_checkpoint" or "output_assert_since"
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or GetTraceLog or ClearTraceLog or MarkTraceCursor or GetTraceDelta or GetScopes or GetVariables or EvaluateExpression or QuickEvaluate
                 or SetVariable or ApplyCodeChange or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or WriteMemory or Disassemble or GetLocations or InspectLaunchCompatibility or RuntimeSmokeValidatePlan or RunRuntimeSmoke
-                or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
+                or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object") && !LegacyRuntimeSmokeFacade.IsTool(name))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -911,6 +912,7 @@ internal static class Program
             var gateHeld = false;
             var breakpointHeld = false;
             var compositeEvaluationHeld = false;
+            var smokeDrainPending = false;
             TaskCompletionSource<bool>? traceResumePending = null;
             var traceResumeRevision = 0L;
             try
@@ -941,7 +943,7 @@ internal static class Program
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or AttachDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
                     or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or HygienePreflight or AddTracepoint or RemoveTracepoint or GroupCreate or GroupInspect or GroupClear or ClearTraceLog or EvaluateExpression or QuickEvaluate or SetVariable or ApplyCodeChange or WriteMemory or ConfigureExceptions or GetStepInTargets
-                    or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" or RunRuntimeSmoke || consumesOutput || compositeMayEvaluate;
+                    or "create_snapshot" or "analyze_collection" or "summarize_object" or "output_checkpoint" or "output_assert_since" or RunRuntimeSmoke || LegacyRuntimeSmokeFacade.RequiresOwner(name) || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -968,7 +970,7 @@ internal static class Program
                     }
                     if (_legacyHasOwner && _legacyOwner != muxId && !(name is (DebuggeeActivity or VerifyDebugFreshness) && _legacyOwner is null))
                         return LegacyError("Debug session is owned by another agent.");
-                    if (name != VerifyDebugFreshness)
+                    if (name != VerifyDebugFreshness && name is not ("runtime_smoke_get_result" or "runtime_smoke_wait_for_result"))
                     {
                         _legacyHasOwner = true;
                         _legacyOwner = muxId;
@@ -977,6 +979,22 @@ internal static class Program
                 }
                 if (_legacyAttachClosing && mutation && name != StopDebug)
                     return LegacyError("Attach cleanup is unconfirmed; only owner stop can re-enter it.", "unknown");
+                if (name == StopDebug)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    JsonObject? smokeStop = null;
+                    _legacyStopping = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    try { smokeStop = await _legacySmoke.StopActiveAsync(muxId, CancellationToken.None).ConfigureAwait(false); }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStopping = false;
+                    }
+                    smokeDrainPending = smokeStop?["final"]?.GetValue<bool>() == false;
+                }
                 if (cleanupRequested)
                 {
                     if (_legacyStarting || _legacyStopping) return LegacyError("A debug session transition is in progress.");
@@ -1571,6 +1589,20 @@ internal static class Program
                     if (rebuild && (!_legacyLaunchConfig.TryGetValue("build_project", out var project)
                         || project.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(project.GetString())))
                         return LegacyError("Cannot rebuild on restart: no build_project in saved configuration");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    JsonObject? smokeStop = null;
+                    _legacyStopping = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    try { smokeStop = await _legacySmoke.StopActiveAsync(muxId, CancellationToken.None).ConfigureAwait(false); }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStopping = false;
+                    }
+                    if (smokeStop?["final"]?.GetValue<bool>() == false)
+                        return LegacyError("Runtime smoke is still draining; restart was not attempted.");
                     var restartArguments = new Dictionary<string, JsonElement>(_legacyLaunchConfig, StringComparer.Ordinal);
                     if (rebuild) restartArguments["pre_build"] = JsonSerializer.SerializeToElement(true);
                     if (_legacySessionId is { } previous)
@@ -1952,6 +1984,51 @@ internal static class Program
                     cancellationToken.ThrowIfCancellationRequested();
                     return parsed;
                 }
+                if (LegacyRuntimeSmokeFacade.IsTool(name))
+                {
+                    JsonObject data;
+                    if (name is "runtime_smoke_validate_probe" or "runtime_smoke_run_probe" or "runtime_smoke_run_plan")
+                    {
+                        var generation = _legacySessionGeneration;
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        var prepared = await Task.Run(() => _legacySmoke.Prepare(name, arguments), cancellationToken).ConfigureAwait(false);
+                        await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        gateHeld = true;
+                        if (name != "runtime_smoke_validate_probe" &&
+                            (generation != _legacySessionGeneration || _legacyStarting || _legacyStopping || (_legacyHasOwner && _legacyOwner != muxId)))
+                            return LegacyError("Debug session changed before runtime smoke admission.");
+                        data = name == "runtime_smoke_validate_probe" ? prepared.Data : _legacySmoke.Start(name, prepared, muxId);
+                    }
+                    else
+                    {
+                        if (!arguments.TryGetValue("run_id", out var runIdValue) || runIdValue.ValueKind != JsonValueKind.String ||
+                            string.IsNullOrEmpty(runIdValue.GetString()) || runIdValue.GetString()!.Length > 128)
+                            return LegacyError("A valid run_id is required.");
+                        var runId = runIdValue.GetString()!;
+                        if (name == "runtime_smoke_get_result") data = _legacySmoke.GetResult(runId, muxId);
+                        else
+                        {
+                            _legacyGate.Release();
+                            gateHeld = false;
+                            data = name == "runtime_smoke_wait_for_result"
+                                ? await _legacySmoke.WaitAsync(runId, muxId, arguments, cancellationToken).ConfigureAwait(false)
+                                : await _legacySmoke.StopAsync(runId, muxId, cancellationToken).ConfigureAwait(false);
+                            await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                            gateHeld = true;
+                        }
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var state = LegacySnapshot().State;
+                    var next = name == "runtime_smoke_validate_probe" && data["can_run"]?.GetValue<bool>() == true
+                        ? new[] { "runtime_smoke_run_probe", "runtime_smoke_validate_plan" }
+                        : data["run_id"] is not null
+                            ? new[] { "runtime_smoke_wait_for_result", "runtime_smoke_get_result", "runtime_smoke_stop" }
+                            : new[] { "runtime_smoke_validate_probe", "runtime_smoke_validate_plan" };
+                    var response = Result(new { state, next_actions = next, message = "Native runtime smoke result.", data }, false);
+                    return response.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
+                        ? response : LegacyError("Runtime smoke result exceeds 256 KiB.", state);
+                }
                 if (name is RuntimeSmokeValidatePlan or RunRuntimeSmoke)
                 {
                     var hasPlan = arguments.TryGetValue("plan", out var planValue) && planValue.ValueKind != JsonValueKind.Null;
@@ -2274,7 +2351,9 @@ internal static class Program
                         gateHeld = true;
                         _legacyStopping = false;
                     }
-                    return LegacyCleanupResult(cleanupObservations!, true);
+                    return smokeDrainPending
+                        ? LegacyCleanupResult(cleanupObservations!, false, "Debugger cleanup finished; runtime smoke is still draining.")
+                        : LegacyCleanupResult(cleanupObservations!, true);
                 }
                 if (name == StopDebug && _legacySessionId is null)
                 {
@@ -2289,6 +2368,7 @@ internal static class Program
                         _legacyOutputEvidence.Clear();
                     }
                     ClearLegacyGroupsAfterConfirmedStop();
+                    if (smokeDrainPending) return LegacyError("Debugger is idle; runtime smoke is still draining.", "idle");
                     return LegacyResponse(new { success = true });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
@@ -2446,14 +2526,14 @@ internal static class Program
                         idleGeneration.Observe("thread");
                         _legacyResources.Publish(idleGeneration);
                         return cleanupForce
-                            ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown")
-                            : LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach.", "unknown");
+                            ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; adapter cleanup completed without proving detach." + (smokeDrainPending ? " Runtime smoke is still draining." : ""), "unknown")
+                            : LegacyError("CLR detach is unconfirmed; adapter cleanup completed without proving detach." + (smokeDrainPending ? " Runtime smoke is still draining." : ""), "unknown");
                     }
                     else if (close.IsFaulted) _ = close.Exception;
                     _legacyResources.Restore(retiredAttachResources);
                     return cleanupForce
-                        ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown")
-                        : LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup.", "unknown");
+                        ? LegacyCleanupResult(cleanupObservations!, false, "CLR detach is unconfirmed; the attach owner is retained until safe cleanup." + (smokeDrainPending ? " Runtime smoke is still draining." : ""), "unknown")
+                        : LegacyError("CLR detach is unconfirmed; the attach owner is retained until safe cleanup." + (smokeDrainPending ? " Runtime smoke is still draining." : ""), "unknown");
                 }
                 var targetedStep = false;
                 if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)
@@ -2615,6 +2695,10 @@ internal static class Program
                     if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
                     idleGeneration.Observe("thread");
                     _legacyResources.Publish(idleGeneration);
+                    if (smokeDrainPending)
+                        return cleanupForce
+                            ? LegacyCleanupResult(cleanupObservations!, false, "Debugger stopped; runtime smoke is still draining.", "idle")
+                            : LegacyError("Debugger stopped; runtime smoke is still draining.", "idle");
                     if (cleanupForce) return LegacyCleanupResult(cleanupObservations!, true);
                     return terminateFallback
                         ? LegacyResponseWithMessage(new { state = "idle" }, "idle", "Adapter does not support terminate; used disconnect instead.")
@@ -3961,6 +4045,7 @@ internal static class Program
 
         private static bool HasInvalidLegacyArguments(string name, Dictionary<string, JsonElement> arguments)
         {
+            if (LegacyRuntimeSmokeFacade.IsTool(name)) return !LegacyRuntimeSmokeFacade.ValidArguments(name, arguments);
             foreach (var key in arguments.Keys)
             {
                 var invalid = name switch
@@ -7213,7 +7298,8 @@ internal static class Program
             var closes = slots.ToDictionary(static slot => slot, slot => slot.CloseAndDrainAsync(shutdownToken));
             foreach (var entry in owned)
                 _ = CompleteRetirementAsync(entry.Key, entry.Value.Session, entry.Value.Slot, entry.Value.Output, closes[entry.Value.Slot]);
-            _ = DisposeCoreAsync(closes.Values, outputCleanup, startsDrained, shutdownToken, completion);
+            var smokeCleanup = _legacySmoke.CloseAsync(shutdownToken);
+            _ = DisposeCoreAsync(closes.Values, outputCleanup, startsDrained, smokeCleanup, shutdownToken, completion);
             return new ValueTask(completion.Task);
         }
 
@@ -7221,6 +7307,7 @@ internal static class Program
             IEnumerable<Task> closes,
             Task<DapSessionState>[] outputCleanup,
             Task startsDrained,
+            Task smokeCleanup,
             CancellationToken cancellationToken,
             TaskCompletionSource<bool> completion)
         {
@@ -7229,7 +7316,7 @@ internal static class Program
             {
                 try
                 {
-                    await Task.WhenAll(closes.Append(startsDrained)).ConfigureAwait(false);
+                    await Task.WhenAll(closes.Append(startsDrained).Append(smokeCleanup)).ConfigureAwait(false);
                     await Task.WhenAll(outputCleanup).ConfigureAwait(false);
                 }
                 finally
@@ -8898,6 +8985,12 @@ internal static class Program
                 Tool("inspect_debug_launch_compatibility", "Inspect target and active dbgshim versions without launching. Native launch does not automatically select cached shims.", """{"type":"object","properties":{"program":{"type":"string","minLength":1}},"required":["program"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("runtime_smoke_validate_plan", "Validate an inline native file.json after-probe plan. Other plans and plan_path loading are blocked; Python remains the full implementation.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("run_runtime_smoke", "Run an admitted native file.json after-probe plan without UI actions. Other runtime-smoke scenarios are blocked.", """{"type":"object","properties":{"plan":{"type":"object"}},"required":["plan"],"additionalProperties":false}""", new ToolAnnotations { OpenWorldHint = false }),
+                Tool("runtime_smoke_validate_probe", "Validate a Windows file.json after-probe; unsupported probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_probe", "Start a durable Windows file.json after-probe; unsupported probes and agent_mode are blocked.", """{"type":"object","properties":{"probe":{"type":"object"},"name":{"type":["string","null"]},"phase":{"type":"string","default":"after"},"budgets":{"type":["object","null"]},"debug_preflight":{"type":"boolean","default":false},"tracepoint_guard":{"type":["object","null"]},"agent_mode":{"type":"boolean","default":false}},"required":["probe"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_run_plan", "Start an admitted Windows file.json plan; plan_path and agent_mode are blocked.", """{"type":"object","properties":{"plan":{"type":["object","null"]},"plan_path":{"type":["string","null"]},"agent_mode":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_get_result", "Get a retained native runtime-smoke result owned by this mux client.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_wait_for_result", "Wait up to 30 seconds for an owned native runtime-smoke result; agent_mode is blocked.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1},"timeout_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000},"poll_interval_ms":{"type":"integer","minimum":0,"maximum":30000,"default":100},"after_cursor":{"type":"integer","minimum":0},"event_limit":{"type":"integer","minimum":0,"maximum":128,"default":50},"agent_mode":{"type":"boolean","default":false}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
+                Tool("runtime_smoke_stop", "Cancel or join an owned native runtime-smoke run; an undrained run stays nonfinal.", """{"type":"object","properties":{"run_id":{"type":"string","minLength":1}},"required":["run_id"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("attach_debug", "Attach to an existing Windows process. Stop reports unconfirmed CLR detach; do not attach to a process that cannot be lost.", """{"type":"object","properties":{"process_id":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["process_id"],"additionalProperties":false}"""),
                 Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),

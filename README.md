@@ -1343,15 +1343,22 @@ consumer-mode release gate and the examples in [`docs/examples/`](docs/examples/
 for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 
 The source-built opt-in `--legacy-compat` host supports a narrower Windows-only
-`runtime_smoke_validate_plan` / `run_runtime_smoke` path: one inline v2 case,
-one after-phase `file.json` probe, no action or cleanup, and an absolute
-drive-letter path. JSONPath is limited to dotted identifiers; expected values
-are strings or null, and files are limited to 16 MiB. Device paths, reparse
-points, `diagnostic-latest.json`, file-based plan inputs, and other plans are
-refused. Path checks are point-in-time checks, not a guarantee against concurrent
-replacement. Process metrics are reported as unavailable. Durable lifecycle,
-UI scenarios, and cross-platform file observation still require the Python path;
-Python remains the installed default.
+runtime-smoke path: one inline v2 case, one after-phase `file.json` probe,
+an optional `ui.noop` action, no cleanup, and an absolute path on a drive that
+Windows reports as fixed.
+JSONPath is limited to dotted identifiers; expected values are strings or null,
+and files are limited to 16 MiB. Device paths, reparse points,
+`diagnostic-latest.json`, file-based plan inputs, and other plans are refused.
+Path checks are point-in-time checks, not a guarantee against concurrent
+replacement. Process metrics are reported as unavailable.
+
+For this subset, `runtime_smoke_validate_probe` validates without starting a
+run. `runtime_smoke_run_probe` and `runtime_smoke_run_plan` start durable runs;
+use `runtime_smoke_wait_for_result`, `runtime_smoke_get_result`, and
+`runtime_smoke_stop` to observe or stop them. Only the default probe
+budgets are supported; `agent_mode`, other lifecycle tools, UI scenarios and
+cross-platform file observation still require Python. Python remains the
+installed default.
 
 ### Input provenance
 

@@ -14,10 +14,10 @@ internal static class LegacyRuntimeSmokeFileRunner
     internal static JsonObject Validate(JsonNode? plan)
     {
         var result = LegacyRuntimeSmokeValidation.ValidateNative(plan);
-        result["accepted_action_kinds"] = new JsonArray();
+        result["accepted_action_kinds"] = new JsonArray("ui.noop");
         result["accepted_probe_kinds"] = new JsonArray("file.json");
         result["accepted_probe_phases"] = new JsonArray("after");
-        result["native_execution_subset"] = "Windows only: one inline v2 case with one after-only file.json probe on a drive-letter path, no action, and no cleanup; validation vocabulary does not imply executable support.";
+        result["native_execution_subset"] = "Windows only: one inline v2 case with one after-only file.json probe on a drive reported as fixed, an optional ui.noop action, optional default budgets, and no cleanup; validation vocabulary does not imply executable support.";
         if (Text(result["status"]) == "INVALID_SETUP") return result;
         string? reason = Unsupported(plan);
         if (reason is not null)
@@ -29,7 +29,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             {
                 ["reason"] = reason,
                 ["requested"] = new JsonObject(),
-                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case, one after-only file.json probe and no actions or cleanup" },
+                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case, one after-only file.json probe, optional ui.noop and default budgets, and no cleanup" },
                 ["next_step"] = "Use a supported plan or run this plan with the Python runtime."
             };
         }
@@ -45,12 +45,14 @@ internal static class LegacyRuntimeSmokeFileRunner
     {
         if (!OperatingSystem.IsWindows()) return "native file observation is currently Windows-only";
         if (plan is not JsonObject root || Text(root["schema"]) != "netcoredbg.runtime_smoke.v2") return "only inline v2 plans are supported";
-        if (!Only(root, "schema", "name", "description", "cases")) return "unsupported plan field";
+        if (!Only(root, "schema", "name", "description", "cases", "budgets")) return "unsupported plan field";
+        if (root.ContainsKey("budgets") && (root["budgets"] is not JsonObject budgets || !Only(budgets, "max_actions", "max_elapsed_seconds") || budgets.Count != 2 || !IntegerEquals(budgets["max_actions"], 1) || !IntegerEquals(budgets["max_elapsed_seconds"], 5))) return "only default budgets max_actions=1 and max_elapsed_seconds=5 are supported";
         if (root["cases"] is not JsonArray { Count: 1 } cases || cases[0] is not JsonObject item) return "exactly one inline case is supported";
         if (!Only(item, "id", "transitions")) return "unsupported case field";
         if (item["id"] is not null && Text(item["id"]) is null) return "case id must be a string";
         if (item["transitions"] is not JsonArray { Count: 1 } transitions || transitions[0] is not JsonObject transition) return "exactly one transition is supported";
-        if (!Only(transition, "id", "settle", "probes")) return "unsupported transition field";
+        if (!Only(transition, "id", "action", "settle", "probes")) return "unsupported transition field";
+        if (transition.ContainsKey("action") && (transition["action"] is not JsonObject action || !Only(action, "kind") || Text(action["kind"]) != "ui.noop")) return "only ui.noop without extra action fields is supported";
         if (transition["id"] is not null && Text(transition["id"]) is null) return "transition id must be a string";
         if (transition.ContainsKey("settle") && (transition["settle"] is not JsonObject settle || !Only(settle, "idle_ms") || (settle.ContainsKey("idle_ms") && (settle["idle_ms"] is not JsonValue idle || !idle.TryGetValue<int>(out int ms) || ms != 0)))) return "only settle idle_ms=0 or the default settle is supported";
         if (transition["probes"] is not JsonArray { Count: 1 } probes || probes[0] is not JsonObject probe) return "exactly one file.json probe is supported";
@@ -58,7 +60,7 @@ internal static class LegacyRuntimeSmokeFileRunner
         if (Text(probe["kind"]) != "file.json" || Text(probe["phase"]) != "after") return "only an explicit after-phase file.json probe is supported";
         if (probe["name"] is not null && Text(probe["name"]) is null) return "probe name must be a string";
         string? path = Text(probe["path"]);
-        if (path is null || !LocalFilePath(path)) return "file path must be an absolute Windows drive-letter path without device names or alternate streams";
+        if (path is null || !LocalFilePath(path)) return "file path must be on a Windows drive reported as fixed, without device names or alternate streams";
         if (string.Equals(Path.GetFileName(path), "diagnostic-latest.json", StringComparison.Ordinal)) return "diagnostic-latest.json alias is not supported";
         string? expression = Text(probe["jsonpath"]);
         if (expression is null || !JsonPath.IsMatch(expression)) return "only simple dotted identifier JSONPath expressions are supported";
@@ -76,7 +78,9 @@ internal static class LegacyRuntimeSmokeFileRunner
             string stem = part.Split('.')[0].TrimEnd(' ');
             if (Regex.IsMatch(stem, @"\A(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)) return false;
         }
-        return true;
+        try { return new DriveInfo(path[..3]).DriveType == DriveType.Fixed; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
+        { return false; }
     }
 
     internal static async Task<JsonObject> RunAsync(JsonNode? plan, CancellationToken cancellationToken)
@@ -90,20 +94,50 @@ internal static class LegacyRuntimeSmokeFileRunner
         var transition = (JsonObject)((JsonArray)item["transitions"]!)[0]!;
         var probe = (JsonObject)((JsonArray)transition["probes"]!)[0]!;
         var idleMs = transition["settle"] is JsonObject settle && settle.ContainsKey("idle_ms") ? 0 : 250;
+        bool budgeted = root.ContainsKey("budgets");
+        using var budgetCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (budgeted)
+        {
+            var remaining = TimeSpan.FromSeconds(5) - started.Elapsed;
+            if (remaining <= TimeSpan.Zero) budgetCancellation.Cancel();
+            else budgetCancellation.CancelAfter(remaining);
+        }
+        var executionToken = budgetCancellation.Token;
+        var actions = new JsonArray();
         var metricClock = Stopwatch.StartNew();
-        if (idleMs != 0) await Task.Delay(idleMs, cancellationToken).ConfigureAwait(false);
+        JsonObject? observed = null;
+        bool settled = false;
+        bool timedOut = false;
+        try
+        {
+            executionToken.ThrowIfCancellationRequested();
+            if (transition.ContainsKey("action"))
+                actions.Add(new JsonObject { ["status"] = "PASS", ["route"] = "noop", ["duration_ms"] = 0 });
+            if (idleMs != 0) await Task.Delay(idleMs, executionToken).ConfigureAwait(false);
+            settled = true;
+            metricClock.Stop();
+            executionToken.ThrowIfCancellationRequested();
+            observed = await ObserveAsync(probe, executionToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            timedOut = budgeted && (executionToken.IsCancellationRequested || started.Elapsed >= TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException) when (budgeted && !cancellationToken.IsCancellationRequested && executionToken.IsCancellationRequested)
+        {
+            timedOut = true;
+        }
         metricClock.Stop();
         cancellationToken.ThrowIfCancellationRequested();
-        JsonObject observed = await ObserveAsync(probe, cancellationToken).ConfigureAwait(false);
-        string status = Text(observed["status"])!;
-        string reason = status == "PASS" ? "transition passed" : Text(observed["reason"]) ?? "transition failed";
+        if (timedOut) observed = null;
+        string status = timedOut ? "IMPASSE" : Text(observed!["status"])!;
+        string reason = timedOut ? "elapsed time budget exhausted" : status == "PASS" ? "transition passed" : Text(observed!["reason"]) ?? "transition failed";
         string caseReason = status == "PASS" ? "case passed" : reason;
         string resultReason = status == "PASS" ? "runtime smoke v2 scenario passed" : reason;
         string name = Text(probe["name"]) is string n && n.Length > 0 ? n : "file.json";
         string key = name == "file.json" && string.IsNullOrEmpty(Text(probe["name"])) ? "file.json" : "file.json." + name;
-        observed["path"] = key;
-        JsonNode? value = observed["value"];
-        var after = new JsonObject { [key] = value?.DeepClone() };
+        if (observed is not null) observed["path"] = key;
+        JsonNode? value = observed?["value"];
+        var after = new JsonObject();
+        if (observed is not null) after[key] = value?.DeepClone();
         var diff = new JsonObject();
         if (value is not null) diff[key] = new JsonObject { ["from"] = null, ["to"] = value.DeepClone() };
         var metrics = Metrics((long)Math.Round(metricClock.Elapsed.TotalMilliseconds));
@@ -112,14 +146,14 @@ internal static class LegacyRuntimeSmokeFileRunner
             ["id"] = transition["id"]?.DeepClone(),
             ["status"] = status,
             ["reason"] = reason,
-            ["actions"] = new JsonArray(),
+            ["actions"] = actions.DeepClone(),
             ["metrics"] = metrics,
-            ["settle"] = new JsonObject { ["status"] = "PASS", ["idle_ms"] = idleMs },
             ["before"] = new JsonObject(),
             ["after"] = after,
             ["diff"] = diff,
-            ["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = new JsonArray(observed) }
+            ["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = observed is null ? new JsonArray() : new JsonArray(observed) }
         };
+        if (settled) transitionResult["settle"] = new JsonObject { ["status"] = "PASS", ["idle_ms"] = idleMs };
         var caseCleanup = Cleanup();
         caseCleanup["case_id"] = Text(item["id"]) ?? "";
         var caseResult = new JsonObject
@@ -127,7 +161,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             ["id"] = item["id"]?.DeepClone(),
             ["status"] = status,
             ["reason"] = caseReason,
-            ["actions"] = new JsonArray(),
+            ["actions"] = actions.DeepClone(),
             ["transitions"] = new JsonArray(transitionResult),
             ["before"] = new JsonObject(),
             ["after"] = after.DeepClone(),
@@ -139,7 +173,7 @@ internal static class LegacyRuntimeSmokeFileRunner
         var cleanup = Cleanup();
         cleanup["failed_case_cleanups"] = new JsonArray();
         var refs = new JsonArray();
-        if (Text(observed["evidence_ref"]) is string evidence)
+        if (Text(observed?["evidence_ref"]) is string evidence)
             refs.Add(new JsonObject { ["case_id"] = item["id"]?.DeepClone(), ["phase"] = "after", ["probe"] = name, ["evidence_ref"] = evidence });
         long elapsed = started.ElapsedMilliseconds;
         var result = new JsonObject
@@ -147,7 +181,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             ["status"] = status,
             ["reason"] = resultReason,
             ["elapsed_ms"] = elapsed,
-            ["action_count"] = 0,
+            ["action_count"] = actions.Count,
             ["completed_steps"] = new JsonArray(),
             ["failed_assertions"] = new JsonArray(),
             ["cleanup"] = cleanup,
@@ -164,12 +198,35 @@ internal static class LegacyRuntimeSmokeFileRunner
             ["status"] = status,
             ["reason"] = resultReason,
             ["elapsed_ms"] = elapsed,
-            ["action_count"] = 0,
+            ["action_count"] = actions.Count,
             ["generated_case_count"] = 0,
             ["case_count"] = 1,
             ["cleanup"] = Compact(cleanup),
             ["evidence_refs"] = Compact(refs)
         };
+        cancellationToken.ThrowIfCancellationRequested();
+        if (budgeted && !timedOut && (executionToken.IsCancellationRequested || started.Elapsed >= TimeSpan.FromSeconds(5)))
+        {
+            const string timeoutReason = "elapsed time budget exhausted";
+            transitionResult["status"] = "IMPASSE";
+            transitionResult["reason"] = timeoutReason;
+            transitionResult["after"] = new JsonObject();
+            transitionResult["diff"] = new JsonObject();
+            transitionResult["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = new JsonArray() };
+            caseResult["status"] = "IMPASSE";
+            caseResult["reason"] = timeoutReason;
+            caseResult["after"] = new JsonObject();
+            caseResult["diff"] = new JsonObject();
+            refs.Clear();
+            result["status"] = "IMPASSE";
+            result["reason"] = timeoutReason;
+            result["elapsed_ms"] = started.ElapsedMilliseconds;
+            var compact = (JsonObject)result["compact"]!;
+            compact["status"] = "IMPASSE";
+            compact["reason"] = timeoutReason;
+            compact["elapsed_ms"] = started.ElapsedMilliseconds;
+            compact["evidence_refs"] = new JsonArray();
+        }
         return result;
     }
 
@@ -186,6 +243,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             string[] parts = path[current.Length..].Split(['\\', '/']);
             for (int i = 0; i < parts.Length; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 current = Path.Combine(current, parts[i]);
                 var attributes = File.GetAttributes(current);
                 if ((attributes & (FileAttributes.Device | FileAttributes.ReparsePoint)) != 0 ||
@@ -197,6 +255,7 @@ internal static class LegacyRuntimeSmokeFileRunner
                     return result;
                 }
             }
+            cancellationToken.ThrowIfCancellationRequested();
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
             if (!stream.CanSeek || stream.Length > MaxFileBytes)
             {
@@ -303,5 +362,6 @@ internal static class LegacyRuntimeSmokeFileRunner
     };
 
     private static bool Only(JsonObject obj, params string[] accepted) => obj.All(pair => accepted.Contains(pair.Key, StringComparer.Ordinal));
+    private static bool IntegerEquals(JsonNode? node, int expected) => node is JsonValue value && value.TryGetValue<int>(out int actual) && actual == expected;
     private static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 }
