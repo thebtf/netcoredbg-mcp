@@ -19,7 +19,7 @@ internal enum MemoryInspectionCommand { ReadMemory, Disassemble, Locations }
 
 internal readonly record struct LegacyObservedProcess(int Pid, string Role, string? Program, double RegisteredAt, bool? Alive);
 
-internal sealed class NetCoreDbgSession : IAsyncDisposable
+internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
@@ -137,6 +137,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private int _nativeSceneCaptureAuthorityInvalidated;
     private int _nativeUiInvokeAuthorityInvalidated;
     private int _outgoingSequence;
+    private bool _encHookPresent;
+    private bool _encEnabled;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
     private bool _legacyTerminateDispatched;
@@ -685,6 +687,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership, resourceEventObserver: resourceEventObserver);
             }
 
+            var resolvedDebugger = Path.IsPathFullyQualified(debuggerPath)
+                ? debuggerPath : DapLaunchEnvironment.FindExecutable(debuggerPath);
+            session._encHookPresent = OperatingSystem.IsWindows() && resolvedDebugger is not null
+                && File.Exists(Path.Combine(Path.GetDirectoryName(resolvedDebugger)!, "ncdbhook.dll"));
             await session.StartProtocolAsync(programPath, initializeTimeout, dapEnvironment, breakpoints, launchOptions, cancellationToken, functionBreakpoints).ConfigureAwait(false);
             return session;
         }
@@ -2210,6 +2216,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
     {
         await InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+        if (_encHookPresent)
+        {
+            _ = await SendRequestAsync("setHotReload", new { enable = true }, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            _encEnabled = true;
+        }
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
         if (functionBreakpoints is not null)
         {
@@ -3227,7 +3238,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         catch (Exception exception)
         {
             if (request.InspectionContextId is not null && request.WriteStarted
-                && (exception is OperationCanceledException || request.Command is "setVariable" or "writeMemory"))
+                && (exception is OperationCanceledException || request.Command is "setVariable" or "writeMemory" or "applyDeltas"))
             {
                 Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
                 lock (_stateGate)
@@ -3343,12 +3354,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
             }
             else continueExecution?.MarkWriteStarted();
-            if (inspectionRequest is { Command: "setVariable" or "writeMemory" } mutation)
+            if (inspectionRequest is { Command: "setVariable" or "writeMemory" or "applyDeltas" } mutation)
             {
                 lock (_stateGate)
                 {
                     if (Volatile.Read(ref _readerFailure) is not null || IsRetirementRequested || _inspectionClosed
-                        || !StringComparer.Ordinal.Equals(_inspectionContextId, mutation.InspectionContextId))
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, mutation.InspectionContextId)
+                        || (mutation.Command == "applyDeltas" && _legacyEncModuleRevision != (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved)))
                     {
                         throw new InvalidDataException("DAP variable update lost write admission.");
                     }
@@ -3462,7 +3474,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (message.TryGetProperty("request_seq", out var requestSequence)
                     && requestSequence.TryGetInt32(out var sequence)
                     && _pending.TryGetValue(sequence, out var pending)
-                    && pending.Command is "setVariable" or "writeMemory")
+                    && pending.Command is "setVariable" or "writeMemory" or "applyDeltas")
                 {
                     _callStackAdmissionGate.Wait();
                     try { HandleResponse(message); }
@@ -3749,6 +3761,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
                 && (request.InspectionContextId is null
                     || (!_inspectionClosed && StringComparer.Ordinal.Equals(_inspectionContextId, request.InspectionContextId)));
+            if (request.Command == "applyDeltas"
+                && _legacyEncModuleRevision != (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved))
+                targetCurrent = false;
             if (_resourceEventObserver is not null && request.Command == "exceptionInfo" && targetCurrent && success.ValueKind == JsonValueKind.True)
             {
                 if (body.ValueKind == JsonValueKind.Object && Encoding.UTF8.GetByteCount(body.GetRawText()) <= 64 * 1024)
@@ -3814,6 +3829,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     responseContext = GetOrCreateInspectionContext();
                 }
             }
+            if (request.Command == "applyDeltas")
+            {
+                _inspectionContextId = null;
+                if (!targetCurrent || success.ValueKind != JsonValueKind.True)
+                {
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                }
+            }
             request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True,
                 targetCurrent, responseContext, serializedContent));
         }
@@ -3870,16 +3894,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 HandleLoadedSourceEvent(body);
                 break;
             case "module":
-                lock (_stateGate)
+                _callStackAdmissionGate.Wait();
+                try
                 {
-                    switch (TryGetString(body, "reason"))
+                    lock (_stateGate)
                     {
-                        case "new": _activityModuleNew++; break;
-                        case "changed": _activityModuleChanged++; break;
-                        case "removed": _activityModuleRemoved++; break;
+                        switch (TryGetString(body, "reason"))
+                        {
+                            case "new": _activityModuleNew++; break;
+                            case "changed": _activityModuleChanged++; break;
+                            case "removed": _activityModuleRemoved++; break;
+                        }
                     }
+                    HandleRuntimeInventoryEvent(eventName, body);
                 }
-                HandleRuntimeInventoryEvent(eventName, body);
+                finally { _callStackAdmissionGate.Release(); }
                 break;
             case "progressStart":
             case "progressUpdate":

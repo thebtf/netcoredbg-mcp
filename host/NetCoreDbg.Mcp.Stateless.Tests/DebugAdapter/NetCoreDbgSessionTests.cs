@@ -92,6 +92,128 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public void DeltaEmitter_ApplyEdits_PreservesSingleFinalNewline()
+    {
+        var hostPath = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            Path.Combine(Path.GetDirectoryName(hostPath)!, "enc_compiler.dll"));
+        var editType = Assert.IsAssignableFrom<Type>(assembly.GetType("NetcoredbgMcp.EncCompiler.SourceEdit"));
+        var emitterType = Assert.IsAssignableFrom<Type>(assembly.GetType("NetcoredbgMcp.EncCompiler.DeltaEmitter"));
+        var edit = Assert.IsAssignableFrom<object>(Activator.CreateInstance(editType, 1, 1, "class Edited { }"));
+        var edits = Array.CreateInstance(editType, 1);
+        edits.SetValue(edit, 0);
+        var method = Assert.IsAssignableFrom<MethodInfo>(emitterType.GetMethod("ApplyEdits", BindingFlags.Public | BindingFlags.Static));
+        var result = Assert.IsType<string>(method.Invoke(null, ["class Original { }" + Environment.NewLine, edits]));
+        Assert.Equal("class Edited { }" + Environment.NewLine, result);
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_SnapshotWriteRestorePreservesOriginalBytes()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-restore-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var target = Path.Combine(scratch, "Source.cs");
+        byte[] original = [0xef, 0xbb, 0xbf, .. Encoding.UTF8.GetBytes("class Café { }\r\n")];
+        await File.WriteAllBytesAsync(target, original);
+        try
+        {
+            var source = await OpenLegacyEncSourceAsync(scratch, "Source.cs");
+            string backup;
+            await using (source)
+            {
+                Assert.Equal(target, LegacyEncProperty(source, "TargetPath"));
+                Assert.Equal("class Café { }\r\n", LegacyEncProperty(source, "Snapshot"));
+                await InvokeLegacyEncAsync(source, "WriteAsync", "class Edited { }\n", CancellationToken.None);
+                backup = Assert.IsType<string>(LegacyEncProperty(source, "BackupPath"));
+                Assert.True(File.Exists(backup));
+                await InvokeLegacyEncAsync(source, "RestoreBeforeDispatchAsync");
+                await InvokeLegacyEncAsync(source, "CompleteAsync");
+                Assert.Null(LegacyEncProperty(source, "BackupPath"));
+            }
+            Assert.Equal(original, await File.ReadAllBytesAsync(target));
+            Assert.False(File.Exists(backup));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_ExclusiveHandleAndUnknownOutcomeRetainBackup()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-retain-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var target = Path.Combine(scratch, "Source.cs");
+        var original = Encoding.UTF8.GetBytes("class Original { }\r\n");
+        await File.WriteAllBytesAsync(target, original);
+        try
+        {
+            var source = await OpenLegacyEncSourceAsync(scratch, target);
+            string backup;
+            await using (source)
+            {
+                Assert.Throws<IOException>(() => File.Open(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
+                Assert.Throws<IOException>(() => File.Move(target, Path.Combine(scratch, "Moved.cs")));
+                await InvokeLegacyEncAsync(source, "WriteAsync", "class Edited { }\n", CancellationToken.None);
+                backup = Assert.IsType<string>(LegacyEncProperty(source, "BackupPath"));
+                Assert.True(File.Exists(backup));
+            }
+            Assert.Equal("class Edited { }\n", await File.ReadAllTextAsync(target, Encoding.UTF8));
+            Assert.Equal(original, await File.ReadAllBytesAsync(backup));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_RejectsHardLinkOutsideProject()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-hardlink-{Guid.NewGuid():N}");
+        var project = Path.Combine(scratch, "project");
+        Directory.CreateDirectory(project);
+        var target = Path.Combine(project, "Source.cs");
+        var alias = Path.Combine(scratch, "outside.cs");
+        await File.WriteAllTextAsync(target, "class Original { }\n");
+        try
+        {
+            if (!CreateEncHardLink(alias, target, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create the scratch hard link.");
+            IAsyncDisposable? unexpected = null;
+            var failure = await Record.ExceptionAsync(async () => { unexpected = await OpenLegacyEncSourceAsync(project, target); });
+            if (unexpected is not null) await unexpected.DisposeAsync();
+            Assert.IsType<IOException>(failure);
+            Assert.Equal("class Original { }\n", await File.ReadAllTextAsync(alias));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    private static async Task<IAsyncDisposable> OpenLegacyEncSourceAsync(string root, string file)
+    {
+        var path = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
+        var type = Assert.IsAssignableFrom<Type>(assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyEncSource"));
+        var method = Assert.IsAssignableFrom<MethodInfo>(type.GetMethod("OpenAsync", BindingFlags.Static | BindingFlags.NonPublic));
+        var task = Assert.IsAssignableFrom<Task>(method.Invoke(null, [root, file, CancellationToken.None]));
+        await task;
+        return Assert.IsAssignableFrom<IAsyncDisposable>(task.GetType().GetProperty("Result")!.GetValue(task));
+    }
+
+    private static object? LegacyEncProperty(object source, string name) =>
+        source.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(source);
+
+    private static async Task InvokeLegacyEncAsync(object source, string name, params object[] arguments)
+    {
+        var method = Assert.IsAssignableFrom<MethodInfo>(source.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic));
+        await Assert.IsAssignableFrom<Task>(method.Invoke(source, arguments));
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateEncHardLink(string link, string existing, IntPtr securityAttributes);
+
+    [Fact]
     public async Task BuildRunner_PreservesWorkingDirectoryArgumentsOutputAndExitCode()
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;

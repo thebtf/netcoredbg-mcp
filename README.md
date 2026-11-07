@@ -1250,6 +1250,19 @@ An execution request must have replied before a later stop can clear its EnC
 guard. If the stop arrives first, another stop may be needed; an unconfirmed
 request requires a debugging restart.
 
+The source-built opt-in `--legacy-compat` host also exposes `apply_code_change`
+on Windows for launched sessions using an EnC-enabled debugger. It accepts
+same-line edits and one delta attempt per module per debuggee session. The
+source must be a UTF-8 file on a local fixed drive, inside the project root with
+matching path casing, without reparse points or hard-link aliases, and available
+for exclusive access. The host retains an adjacent original-byte `.enc-backup`
+when application or restoration is unconfirmed. Errors can include its path;
+cancellation may return no response. Returned delta files remain in the host's
+temporary directory; automatic retention cleanup is not yet provided. Module
+and stop checks cover events observed by the host,
+not runtime transitions it has not received. Attached sessions do not enable
+this native operation. The installed Python default is unchanged.
+
 In the unreleased Python source, `get_loaded_sources` refreshes `debug://state`
 in DAP reader order. Its returned list is the adapter snapshot; later source
 events can change the live state independently.
