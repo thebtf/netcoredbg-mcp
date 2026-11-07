@@ -136,9 +136,17 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         var guardedRequest = CreateGuardedRequest(tool, target, isElement ? selector : default);
-        var guarded = await TryProduceAsync(
-            token => _guardedProducer(tool, guardedRequest, token),
-            cancellationToken).ConfigureAwait(false);
+        JsonObject? guarded;
+        try
+        {
+            guarded = await TryProduceAsync(
+                token => _guardedProducer(tool, guardedRequest, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NativeSceneObserverCleanupException)
+        {
+            return ToolError(tool, "OBSERVER_UNAVAILABLE", "Native-scene observer cleanup is unconfirmed.");
+        }
         if (guarded is not null && TryNormalizeGuarded(guarded, target, out var guardedNormalized))
         {
             return await CaptureQualifiedAsync(
@@ -348,6 +356,10 @@ internal sealed class NativeSceneCaptureCoordinator
         catch (OperationCanceledException)
         {
             return null;
+        }
+        catch (NativeSceneObserverCleanupException)
+        {
+            throw;
         }
         catch (Exception)
         {
