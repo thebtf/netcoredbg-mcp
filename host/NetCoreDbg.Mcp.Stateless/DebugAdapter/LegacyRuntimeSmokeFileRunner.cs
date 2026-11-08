@@ -17,7 +17,7 @@ internal static class LegacyRuntimeSmokeFileRunner
         result["accepted_action_kinds"] = new JsonArray("ui.noop");
         result["accepted_probe_kinds"] = new JsonArray("file.json", "output.since", "output.field", "debug.evaluate");
         result["accepted_probe_phases"] = new JsonArray("after");
-        result["native_execution_subset"] = "One inline v2 case with one after-only probe: file.json on a Windows fixed drive, literal output.since, output.field, or debug.evaluate in a selected stopped frame; optional ui.noop, default budgets, and no cleanup. Validation vocabulary does not imply broader execution support.";
+        result["native_execution_subset"] = "One inline v2 case with up to 16 after-only file.json (Windows fixed drive), literal output.since, or output.field probes, or one debug.evaluate probe in a selected stopped frame; optional ui.noop, default budgets, and no cleanup. Validation vocabulary does not imply broader execution support.";
         if (Text(result["status"]) == "INVALID_SETUP") return result;
         string? reason = Unsupported(plan);
         if (reason is not null)
@@ -29,7 +29,7 @@ internal static class LegacyRuntimeSmokeFileRunner
             {
                 ["reason"] = reason,
                 ["requested"] = new JsonObject(),
-                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case and one supported after-only probe, optional ui.noop and default budgets, and no cleanup" },
+                ["accepted"] = new JsonObject { ["native_subset"] = "one inline v2 case with up to 16 supported read-only after-only probes or one debug.evaluate probe, optional ui.noop and default budgets, and no cleanup" },
                 ["next_step"] = "Use a supported plan or run this plan with the Python runtime."
             };
         }
@@ -54,7 +54,19 @@ internal static class LegacyRuntimeSmokeFileRunner
         if (transition.ContainsKey("action") && (transition["action"] is not JsonObject action || !Only(action, "kind") || Text(action["kind"]) != "ui.noop")) return "only ui.noop without extra action fields is supported";
         if (transition["id"] is not null && Text(transition["id"]) is null) return "transition id must be a string";
         if (transition.ContainsKey("settle") && (transition["settle"] is not JsonObject settle || !Only(settle, "idle_ms") || (settle.ContainsKey("idle_ms") && (settle["idle_ms"] is not JsonValue idle || !idle.TryGetValue<int>(out int ms) || ms != 0)))) return "only settle idle_ms=0 or the default settle is supported";
-        if (transition["probes"] is not JsonArray { Count: 1 } probes || probes[0] is not JsonObject probe) return "exactly one probe is supported";
+        if (transition["probes"] is not JsonArray { Count: >= 1 and <= 16 } probes) return "one to 16 probes are supported";
+        if (probes.Count > 1 && probes.Any(node => node is JsonObject candidate && Text(candidate["kind"]) == "debug.evaluate")) return "debug.evaluate must be the only probe";
+        foreach (var node in probes)
+        {
+            if (node is not JsonObject candidate) return "each probe must be an object";
+            string? reason = UnsupportedProbe(candidate);
+            if (reason is not null) return reason;
+        }
+        return null;
+    }
+
+    private static string? UnsupportedProbe(JsonObject probe)
+    {
         if (Text(probe["phase"]) != "after") return "only an explicit after-phase probe is supported";
         if (probe["name"] is not null && Text(probe["name"]) is null) return "probe name must be a string";
         if (Text(probe["kind"]) == "output.since")
@@ -106,14 +118,15 @@ internal static class LegacyRuntimeSmokeFileRunner
         { return false; }
     }
 
-    private static string? ProbeKind(JsonNode? plan) =>
+    private static JsonArray? Probes(JsonNode? plan) =>
         plan is JsonObject root && root["cases"] is JsonArray { Count: 1 } cases && cases[0] is JsonObject item
         && item["transitions"] is JsonArray { Count: 1 } transitions && transitions[0] is JsonObject transition
-        && transition["probes"] is JsonArray { Count: 1 } probes && probes[0] is JsonObject probe
-            ? Text(probe["kind"]) : null;
+        && transition["probes"] is JsonArray probes ? probes : null;
 
-    internal static bool UsesOutput(JsonNode? plan) => ProbeKind(plan) is "output.since" or "output.field";
-    internal static bool UsesEvaluation(JsonNode? plan) => ProbeKind(plan) == "debug.evaluate";
+    internal static bool UsesOutput(JsonNode? plan) => Probes(plan)?.Any(node =>
+        node is JsonObject probe && Text(probe["kind"]) is "output.since" or "output.field") == true;
+    internal static bool UsesEvaluation(JsonNode? plan) => Probes(plan) is { Count: 1 } probes &&
+        probes[0] is JsonObject probe && Text(probe["kind"]) == "debug.evaluate";
 
     private static bool Patterns(JsonNode? node) => node is null ||
         (node is JsonArray { Count: <= 256 } items && items.All(item => Text(item) is string text && text.Length <= 4096));
@@ -136,7 +149,7 @@ internal static class LegacyRuntimeSmokeFileRunner
         var root = (JsonObject)plan!;
         var item = (JsonObject)((JsonArray)root["cases"]!)[0]!;
         var transition = (JsonObject)((JsonArray)item["transitions"]!)[0]!;
-        var probe = (JsonObject)((JsonArray)transition["probes"]!)[0]!;
+        var probes = (JsonArray)transition["probes"]!;
         var idleMs = transition["settle"] is JsonObject settle && settle.ContainsKey("idle_ms") ? 0 : 250;
         bool budgeted = root.ContainsKey("budgets");
         using var budgetCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -149,7 +162,9 @@ internal static class LegacyRuntimeSmokeFileRunner
         var executionToken = budgetCancellation.Token;
         var actions = new JsonArray();
         var metricClock = Stopwatch.StartNew();
-        JsonObject? observed = null;
+        var observed = new JsonArray();
+        JsonObject? selectedFailure = null;
+        int failureRank = 0;
         bool settled = false;
         bool timedOut = false;
         try
@@ -160,14 +175,21 @@ internal static class LegacyRuntimeSmokeFileRunner
             if (idleMs != 0) await Task.Delay(idleMs, executionToken).ConfigureAwait(false);
             settled = true;
             metricClock.Stop();
-            executionToken.ThrowIfCancellationRequested();
-            observed = Text(probe["kind"]) is "output.since" or "output.field" or "debug.evaluate"
-                ? probeObserver is null
-                    ? new JsonObject { ["name"] = Text(probe["name"]) ?? Text(probe["kind"]), ["kind"] = Text(probe["kind"]), ["status"] = "BLOCKED", ["reason"] = "probe observation is unavailable" }
-                    : await probeObserver(probe, executionToken).ConfigureAwait(false)
-                : await ObserveAsync(probe, executionToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            timedOut = budgeted && (executionToken.IsCancellationRequested || started.Elapsed >= TimeSpan.FromSeconds(5));
+            foreach (var node in probes)
+            {
+                var probe = (JsonObject)node!;
+                executionToken.ThrowIfCancellationRequested();
+                var observation = Text(probe["kind"]) is "output.since" or "output.field" or "debug.evaluate"
+                    ? probeObserver is null
+                        ? new JsonObject { ["name"] = Text(probe["name"]) ?? Text(probe["kind"]), ["kind"] = Text(probe["kind"]), ["status"] = "BLOCKED", ["reason"] = "probe observation is unavailable" }
+                        : await probeObserver(probe, executionToken).ConfigureAwait(false)
+                    : await ObserveAsync(probe, executionToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                observed.Add(observation);
+                int rank = Text(observation["status"]) switch { "FAIL" => 3, "BLOCKED" => 2, "IMPASSE" => 1, "PASS" => 0, _ => 2 };
+                if (rank > failureRank) { failureRank = rank; selectedFailure = observation; }
+                if (budgeted && (executionToken.IsCancellationRequested || started.Elapsed >= TimeSpan.FromSeconds(5))) { timedOut = true; break; }
+            }
         }
         catch (OperationCanceledException) when (budgeted && !cancellationToken.IsCancellationRequested && executionToken.IsCancellationRequested)
         {
@@ -175,20 +197,28 @@ internal static class LegacyRuntimeSmokeFileRunner
         }
         metricClock.Stop();
         cancellationToken.ThrowIfCancellationRequested();
-        if (timedOut) observed = null;
-        string status = timedOut ? "IMPASSE" : Text(observed!["status"])!;
-        string reason = timedOut ? TimeoutReason(effect) : status == "PASS" ? "transition passed" : Text(observed!["reason"]) ?? "transition failed";
+        if (timedOut) observed.Clear();
+        string status = timedOut ? "IMPASSE" : failureRank switch { 3 => "FAIL", 2 => "BLOCKED", 1 => "IMPASSE", _ => "PASS" };
+        string reason = timedOut ? TimeoutReason(effect) : status == "PASS" ? "transition passed" : Text(selectedFailure?["reason"]) ?? "transition failed";
         string caseReason = status == "PASS" ? "case passed" : reason;
         string resultReason = status == "PASS" ? "runtime smoke v2 scenario passed" : reason;
-        string kind = Text(probe["kind"])!;
-        string name = Text(probe["name"]) is string n && n.Length > 0 ? n : kind;
-        string key = name == kind && string.IsNullOrEmpty(Text(probe["name"])) ? kind : kind + "." + name;
-        if (observed is not null) observed["path"] = key;
-        JsonNode? value = observed?["value"];
         var after = new JsonObject();
-        if (observed is not null) after[key] = value?.DeepClone();
         var diff = new JsonObject();
-        if (value is not null) diff[key] = new JsonObject { ["from"] = null, ["to"] = value.DeepClone() };
+        var refs = new JsonArray();
+        for (int i = 0; i < observed.Count; i++)
+        {
+            var probe = (JsonObject)probes[i]!;
+            var observation = (JsonObject)observed[i]!;
+            string kind = Text(probe["kind"])!;
+            string name = Text(probe["name"]) is string n && n.Length > 0 ? n : kind;
+            string key = name == kind && string.IsNullOrEmpty(Text(probe["name"])) ? kind : kind + "." + name;
+            observation["path"] = key;
+            JsonNode? value = observation["value"];
+            after[key] = value?.DeepClone();
+            if (value is not null) diff[key] = new JsonObject { ["from"] = null, ["to"] = value.DeepClone() };
+            if (Text(observation["evidence_ref"]) is string evidence)
+                refs.Add(new JsonObject { ["case_id"] = item["id"]?.DeepClone(), ["phase"] = "after", ["probe"] = name, ["evidence_ref"] = evidence });
+        }
         var metrics = Metrics((long)Math.Round(metricClock.Elapsed.TotalMilliseconds));
         var transitionResult = new JsonObject
         {
@@ -200,11 +230,11 @@ internal static class LegacyRuntimeSmokeFileRunner
             ["before"] = new JsonObject(),
             ["after"] = after,
             ["diff"] = diff,
-            ["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = observed is null ? new JsonArray() : new JsonArray(observed) }
+            ["probes"] = new JsonObject { ["before"] = new JsonArray(), ["after"] = observed }
         };
         if (settled) transitionResult["settle"] = new JsonObject { ["status"] = "PASS", ["idle_ms"] = idleMs };
         var caseCleanup = Cleanup();
-        bool unconfirmedEffect = effect?.EvaluationDispatched == true && (timedOut || observed?["outcome_unknown"]?.GetValue<bool>() == true);
+        bool unconfirmedEffect = effect?.EvaluationDispatched == true && (timedOut || (observed.Count == 1 && observed[0]?["outcome_unknown"]?.GetValue<bool>() == true));
         if (unconfirmedEffect) MarkUnconfirmed(caseCleanup);
         caseCleanup["case_id"] = Text(item["id"]) ?? "";
         var caseResult = new JsonObject
@@ -224,9 +254,6 @@ internal static class LegacyRuntimeSmokeFileRunner
         var cleanup = Cleanup();
         if (unconfirmedEffect) MarkUnconfirmed(cleanup);
         cleanup["failed_case_cleanups"] = new JsonArray();
-        var refs = new JsonArray();
-        if (Text(observed?["evidence_ref"]) is string evidence)
-            refs.Add(new JsonObject { ["case_id"] = item["id"]?.DeepClone(), ["phase"] = "after", ["probe"] = name, ["evidence_ref"] = evidence });
         long elapsed = started.ElapsedMilliseconds;
         var result = new JsonObject
         {
