@@ -66,9 +66,11 @@ does not change the installed Python default or provide full #552 compatibility.
 
 At host startup, the legacy route uses a nonempty `NETCOREDBG_PATH` as given.
 Otherwise it searches `~/.netcoredbg-mcp/netcoredbg/` (including one directory
-level below it), then `PATH`. An invalid explicit path is not replaced by a
-different debugger. This native lookup does not download or build a debugger;
-native setup and complete Python replacement remain open.
+level below it), then `PATH`. Unlike Python discovery, a managed-directory
+enumeration error falls through to `PATH`, which may select a different version.
+An invalid explicit path is not replaced by a different debugger. This native
+lookup does not download or build a debugger; native setup and complete Python
+replacement remain open.
 
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at

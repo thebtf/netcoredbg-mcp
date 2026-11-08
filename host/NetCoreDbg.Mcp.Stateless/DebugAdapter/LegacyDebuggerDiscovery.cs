@@ -38,7 +38,7 @@ internal static class LegacyDebuggerDiscovery
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                 or ArgumentException or NotSupportedException or System.Security.SecurityException)
             {
-                return null;
+                return DapLaunchEnvironment.FindExecutable("netcoredbg");
             }
         }
 
