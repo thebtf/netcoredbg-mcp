@@ -1404,6 +1404,12 @@ foreign input. For an operator-free product verdict, set both
 `input_policy.no_global_input=true` and `run_confidence.no_operator=true`.
 The first setting prevents runner-controlled global input; the second requires
 input-monitor confidence evidence for the action window.
+For `ui.click` and `ui.invoke`, that policy permits only the provider's
+InvokePattern route, with no runner-controlled physical-click or key fallback.
+An older bridge or backend without this route returns `BLOCKED`; a provider
+error after dispatch may leave the action outcome unknown and is not retried
+automatically. InvokePattern does not guarantee that the application or its
+provider will leave focus or the foreground window unchanged.
 
 The resulting `run_confidence` classification is `CLEAN_PROVEN` when the
 monitor proves no operator input, `DIRTY_UNPROVEN` when it observes physical or

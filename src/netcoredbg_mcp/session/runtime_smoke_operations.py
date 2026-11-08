@@ -458,20 +458,34 @@ def ui_operation_adapters(
             "result": _bounded_ui_result(result),
         }
 
-    async def click(**args: Any) -> dict[str, Any]:
+    async def click(*, app_dispatch_only: bool = False, **args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
+        method = (
+            getattr(backend, "invoke_element_app_dispatch", None)
+            if app_dispatch_only
+            else backend.invoke_element
+        )
+        if not callable(method):
+            return _adapter_blocked(
+                "ui.click", "UI backend has no app-dispatch-only invoke operation"
+            )
         try:
-            result = await backend.invoke_element(**_selector_kwargs(selector))
+            result = await method(**_selector_kwargs(selector))
         except Exception as exc:
             blocked = {"status": "BLOCKED", "reason": str(exc)}
-            if _is_selector_miss(blocked):
+            if app_dispatch_only:
+                blocked["providerOutcome"] = "unknown"
+            if not app_dispatch_only and _is_selector_miss(blocked):
                 return _selector_blocked(selector, result=blocked)
             return {
                 "status": "BLOCKED",
-                "reason": str(exc),
+                "reason": (
+                    "app-dispatch failed; provider outcome may be unknown"
+                    if app_dispatch_only else str(exc)
+                ),
                 "requested": {"selector": selector},
                 "accepted": {
                     "backend": "connected UI backend supporting ui.click via invoke_element"
@@ -479,7 +493,9 @@ def ui_operation_adapters(
                 "next_step": "Inspect UI backend or bridge transport diagnostics.",
                 "result": blocked,
             }
-        if _is_selector_miss(result):
+        if _is_selector_miss(result) and not (
+            isinstance(result, dict) and result.get("providerOutcome") == "unknown"
+        ):
             return _selector_blocked(selector, result=_bounded_ui_result(result))
         if not _is_backend_success(result):
             bounded = _bounded_ui_result(result) if isinstance(result, dict) else result
@@ -519,6 +535,9 @@ def ui_operation_adapters(
             if key in result:
                 output[key] = result[key]
         return await _settle_after_state_change(output)
+
+    async def click_app_dispatch(**args: Any) -> dict[str, Any]:
+        return await click(app_dispatch_only=True, **args)
 
     async def coordinate_click_variant(
         *,
@@ -845,15 +864,26 @@ def ui_operation_adapters(
         context = ActionContext(service_adapters=adapters, clock=time.monotonic)
         return await handle_ui_text_type_replace_selection(action, context)
 
-    async def invoke(**args: Any) -> dict[str, Any]:
+    async def invoke(*, app_dispatch_only: bool = False, **args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
             return backend
-        fallback = args.get("fallback_key_sequence")
+        fallback = None if app_dispatch_only else args.get("fallback_key_sequence")
         selector = _selector(args)
+        method = (
+            getattr(backend, "invoke_element_app_dispatch", None)
+            if app_dispatch_only
+            else backend.invoke_element
+        )
+        if not callable(method):
+            return _adapter_blocked(
+                "ui.invoke", "UI backend has no app-dispatch-only invoke operation"
+            )
         try:
-            result = await backend.invoke_element(**_selector_kwargs(selector))
-            if _is_selector_miss(result):
+            result = await method(**_selector_kwargs(selector))
+            if _is_selector_miss(result) and not (
+                isinstance(result, dict) and result.get("providerOutcome") == "unknown"
+            ):
                 return _selector_blocked(selector, result=result)
             if not _should_use_invoke_fallback(result, fallback):
                 return await _settle_after_state_change(result)
@@ -861,11 +891,16 @@ def ui_operation_adapters(
         except Exception as exc:
             if fallback is None:
                 result = {"status": "BLOCKED", "reason": str(exc)}
-                if _is_selector_miss(result):
+                if app_dispatch_only:
+                    result["providerOutcome"] = "unknown"
+                if not app_dispatch_only and _is_selector_miss(result):
                     return _selector_blocked(selector, result=result)
                 return {
                     "status": "BLOCKED",
-                    "reason": str(exc),
+                    "reason": (
+                        "app-dispatch failed; provider outcome may be unknown"
+                        if app_dispatch_only else str(exc)
+                    ),
                     "requested": {"selector": selector},
                     "accepted": {"backend": "connected UI backend supporting ui.invoke"},
                     "next_step": "Inspect UI backend or bridge transport diagnostics.",
@@ -879,6 +914,9 @@ def ui_operation_adapters(
             primary_error=primary_error,
         )
         return await _settle_after_state_change(result)
+
+    async def invoke_app_dispatch(**args: Any) -> dict[str, Any]:
+        return await invoke(app_dispatch_only=True, **args)
 
     async def drag(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -1076,6 +1114,7 @@ def ui_operation_adapters(
         "ui.text.set_text": text_set_text,
         "ui.get_property": get_property,
         "ui.click": click,
+        "ui.click.app_dispatch": click_app_dispatch,
         "ui.right_click": right_click,
         "ui.double_click": double_click,
         "ui.find_element": find_element,
@@ -1083,6 +1122,7 @@ def ui_operation_adapters(
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
         "ui.invoke": invoke,
+        "ui.invoke.app_dispatch": invoke_app_dispatch,
         "ui.drag": drag,
     }
     if session is not None:

@@ -10,7 +10,14 @@ namespace FlaUIBridge.Commands;
 
 public static class PatternCommands
 {
-    public static JsonNode InvokeElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    public static JsonNode InvokeElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow) =>
+        InvokeElementCore(@params, automation, mainWindow, allowPhysicalFallback: true);
+
+    public static JsonNode InvokeElementAppDispatch(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow) =>
+        InvokeElementCore(@params, automation, mainWindow, allowPhysicalFallback: false);
+
+    private static JsonNode InvokeElementCore(JsonNode? @params, UIA3Automation automation,
+        AutomationElement? mainWindow, bool allowPhysicalFallback)
     {
         if (mainWindow is null)
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
@@ -36,6 +43,16 @@ public static class PatternCommands
         {
             element.Patterns.Invoke.Pattern.Invoke();
             method = "InvokePattern";
+        }
+        else if (!allowPhysicalFallback)
+        {
+            return new JsonObject
+            {
+                ["status"] = "BLOCKED",
+                ["reason"] = "InvokePattern is unavailable; physical click is prohibited.",
+                ["invoked"] = false,
+                ["physicalFallbackAttempted"] = false,
+            };
         }
         else
         {

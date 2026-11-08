@@ -1411,6 +1411,38 @@ class TestPywinautoBackendInvoke:
         assert result["method"] == "Click"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["unsupported", "invoke_error"])
+    async def test_app_dispatch_never_falls_back_to_click(self, mode):
+        element = MagicMock()
+        element.element_info = SimpleNamespace(
+            automation_id="btn1", name="Save", control_type="Button"
+        )
+        element.iface_invoke = None if mode == "unsupported" else MagicMock()
+        if element.iface_invoke is not None:
+            element.iface_invoke.Invoke.side_effect = RuntimeError("provider outcome unknown")
+        backend, _ = _pywinauto_backend_with_element(element)
+
+        result = await backend.invoke_element_app_dispatch(automation_id="btn1")
+
+        assert result["status"] == "BLOCKED"
+        element.click.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_app_dispatch_uses_invoke_pattern_when_supported(self):
+        element = MagicMock()
+        element.element_info = SimpleNamespace(
+            automation_id="btn1", name="Save", control_type="Button"
+        )
+        element.iface_invoke = MagicMock()
+        backend, _ = _pywinauto_backend_with_element(element)
+
+        result = await backend.invoke_element_app_dispatch(automation_id="btn1")
+
+        assert result["method"] == "InvokePattern"
+        element.iface_invoke.Invoke.assert_called_once()
+        element.click.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_invoke_blocks_mismatched_exact_automation_id_before_side_effect(self):
         """invoke_element does not invoke/click when exact id resolves to another element."""
         from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
