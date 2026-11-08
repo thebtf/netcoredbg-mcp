@@ -633,6 +633,45 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_IdleDebugState_ContainsTheIdleResourceStateAndAvailableActions()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), new JsonObject());
+        var data = Assert.IsType<JsonObject>(state["data"]);
+        Assert.Equal("idle", data["state"]?.GetValue<string>());
+        Assert.False(data["debuggeeAlive"]?.GetValue<bool>() ?? true);
+        Assert.Equal(0, data["threadCount"]?.GetValue<int>());
+        Assert.Empty(Assert.IsType<JsonArray>(data["threads"]));
+        Assert.Empty(Assert.IsType<JsonArray>(data["modules"]));
+        Assert.Empty(Assert.IsType<JsonObject>(data["loadedSources"]));
+        Assert.Empty(Assert.IsType<JsonObject>(data["activeProgress"]));
+        var expectedActions = OperatingSystem.IsWindows()
+            ? new[] { "start_debug", "attach_debug", "get_progress" }
+            : new[] { "start_debug", "get_progress" };
+        Assert.Equal(expectedActions, Assert.IsType<JsonArray>(state["next_actions"]).Select(static item => item?.GetValue<string>()));
+
+        var resource = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync(
+            "resources/read", new JsonObject { ["uri"] = "debug://state" }, new RequestId("idle-state-resource")));
+        var resourceState = JsonNode.Parse(resource["contents"]![0]!["text"]!.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(data, resourceState));
+    }
+
+    [Theory]
+    [InlineData("get_modules", "modules")]
+    [InlineData("get_progress", "progress")]
+    public async Task LegacyCompat_IdleInventories_ReturnEmptySnapshots(string tool, string field)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"]));
+        var response = await LegacyConsoleCallAsync(driver, tool, new JsonObject(), new JsonObject());
+        Assert.Null(response["error"]);
+        Assert.Equal("idle", response["state"]?.GetValue<string>());
+        Assert.Equal(0, response["data"]?["count"]?.GetValue<int>());
+        Assert.Empty(Assert.IsType<JsonArray>(response["data"]?[field]));
+    }
+
+    [Fact]
     public async Task LegacyCompat_ConsoleJourney_UsesImplicitSessionAndPythonEnvelopes()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
@@ -685,6 +724,15 @@ public sealed class ModernProtocolContractTests
         var stop = await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), meta);
         Assert.Equal("idle", stop["state"]?.GetValue<string>());
         Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+        var idleAfterStop = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), meta);
+        Assert.False(idleAfterStop["data"]?["debuggeeAlive"]?.GetValue<bool>() ?? true);
+        foreach (var (tool, field) in new[] { ("get_modules", "modules"), ("get_progress", "progress") })
+        {
+            var inventory = await LegacyConsoleCallAsync(driver, tool, new JsonObject(), meta);
+            Assert.Null(inventory["error"]);
+            Assert.Equal(0, inventory["data"]?["count"]?.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(inventory["data"]?[field]));
+        }
     }
 
     [Theory]
@@ -1321,6 +1369,12 @@ public sealed class ModernProtocolContractTests
             Assert.NotSame(queuedStart, await Task.WhenAny(queuedStart, Task.Delay(TimeSpan.FromSeconds(1))));
             var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), other);
             Assert.Equal("initializing", state["state"]?.GetValue<string>());
+            foreach (var tool in new[] { "get_modules", "get_progress" })
+            {
+                var inventory = await LegacyConsoleCallAsync(driver, tool, new JsonObject(), other);
+                Assert.NotNull(inventory["error"]);
+                Assert.Null(inventory["data"]);
+            }
         }
         finally
         {

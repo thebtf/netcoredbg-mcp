@@ -711,7 +711,7 @@ internal static class Program
             finally { _legacyGate.Release(); }
         }
 
-        private string SerializeLegacyResourceState()
+        private object CreateLegacyResourceState()
         {
             if (_legacyStarting || _legacyStopping)
                 throw new McpProtocolException("Debug session transition is in progress.", McpErrorCode.InvalidRequest);
@@ -785,7 +785,12 @@ internal static class Program
                 lastInvalidation = idle ? null : state.Invalidation,
                 lastMemoryEvent = idle ? null : state.MemoryEvent,
             };
-            var serialized = JsonSerializer.Serialize(payload);
+            return payload;
+        }
+
+        private string SerializeLegacyResourceState()
+        {
+            var serialized = JsonSerializer.Serialize(CreateLegacyResourceState());
             if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
                 throw new McpProtocolException("Debug state resource is too large.", McpErrorCode.InvalidRequest);
             return serialized;
@@ -2169,6 +2174,11 @@ internal static class Program
                 if (name == GetDebugState)
                 {
                     var snapshot = LegacySnapshot();
+                    if (snapshot.State == "idle" && !_legacyStopping)
+                    {
+                        try { return LegacyResponse(CreateLegacyResourceState(), snapshot.State); }
+                        catch (McpProtocolException exception) { return LegacyError(exception.Message, "unknown"); }
+                    }
                     return LegacyResponse(new
                     {
                         state = snapshot.State,
@@ -2388,6 +2398,19 @@ internal static class Program
                     ClearLegacyGroupsAfterConfirmedStop();
                     if (smokeDrainPending) return LegacyError("Debugger is idle; runtime smoke is still draining.", "idle");
                     return LegacyResponse(new { success = true });
+                }
+                if (_legacySessionId is null && name is (GetModules or GetProgress))
+                {
+                    if (_legacyStarting || _legacyStopping || _legacyAttachClosing)
+                        return LegacyError("Debug session transition is in progress.");
+                    lock (_lifetimeGate)
+                    {
+                        if (_startCleanupFailure is not null)
+                            return LegacyError("Debug session cleanup is unconfirmed.", "unknown");
+                    }
+                    return name == GetModules
+                        ? LegacyResponse(new { modules = Array.Empty<object>(), count = 0 }, "idle")
+                        : LegacyResponse(new { progress = Array.Empty<object>(), count = 0 }, "idle");
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
                 if (name == QuickEvaluate)
@@ -4847,7 +4870,7 @@ internal static class Program
 
         private static string[] LegacyActions(string state) => state switch
         {
-            "idle" => ["start_debug"],
+            "idle" => OperatingSystem.IsWindows() ? ["start_debug", "attach_debug", "get_progress"] : ["start_debug", "get_progress"],
             "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "apply_code_change", "get_output", "get_output_tail", "stop_debug"],
             "running" => ["get_debug_state", "debuggee_activity", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
             _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
