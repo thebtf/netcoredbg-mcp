@@ -14,6 +14,10 @@
   <ItemGroup>
     <Compile Include="../NetCoreDbg.Mcp.Host/ProjectRootResolver.cs" Link="ProjectRootResolver.cs" />
     <Compile Include="../NetCoreDbg.Mcp.Host/NativeCodeSearch.cs" Link="NativeCodeSearch.cs" />
+    <Compile Include="../NetCoreDbg.Mcp.Host/NativePrompts.cs" Link="NativePrompts.cs" />
+    <Compile Include="../NetCoreDbg.Mcp.Host/NativePromptsBuilders.cs" Link="NativePromptsBuilders.cs" />
+    <Compile Include="../NetCoreDbg.Mcp.Host/NativePromptsContent.cs" Link="NativePromptsContent.cs" />
+    <Compile Include="../NetCoreDbg.Mcp.Host/NativePromptsPlaybooks.cs" Link="NativePromptsPlaybooks.cs" />
     <ProjectReference Include="../NetCoreDbg.Mcp.CodeSearch.Core/NetCoreDbg.Mcp.CodeSearch.Core.csproj" />
     <ProjectReference Include="../../tools/enc_compiler/EncCompiler.csproj" />
   </ItemGroup>

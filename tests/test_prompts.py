@@ -75,6 +75,15 @@ def mcp_server():
 
 
 @pytest.mark.asyncio
+async def test_debug_prompt_explains_continue_resumes_all_threads(mcp_server):
+    result = await mcp_server.get_prompt("debug")
+    content = "\n".join(message.content.text for message in result.messages)
+
+    assert "resumes all threads" in content
+    assert "resume only that thread" not in content
+
+
+@pytest.mark.asyncio
 async def test_escape_hatch_lists_all_unwrapped(mcp_server):
     prompts = await mcp_server.list_prompts()
     prompt_names = {prompt.name for prompt in prompts}

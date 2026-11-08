@@ -204,7 +204,7 @@ When the app has multiple threads (WPF UI + background workers, ASP.NET request 
 
 Common patterns:
 - UI thread frozen → check if background thread holds a lock (pause → get_threads → inspect all stacks)
-- Wrong thread stopped → continue_execution(thread_id=current) to resume only that thread
+- Wrong thread stopped → continue_execution(thread_id=current) requests that the adapter resumes all threads; thread_id selects the active thread.
 - Background crash → get_exception_context shows which thread threw
 
 ## Build Failures

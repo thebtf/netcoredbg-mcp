@@ -1286,6 +1286,13 @@ Eight prompts provide guided workflows: `debug`, `debug-gui`,
 `debug-exception`, `debug-visual`, `debug-mistakes`, `investigate`,
 `debug-scenario`, and `dap-escape-hatch`.
 
+The source-built opt-in `--legacy-compat` host also exposes these prompts, with
+a compatibility notice: some referenced tools and argument names are not yet
+available in the native session. Check its `tools/list` schemas. Python and
+native debug sessions do not share state. The notice remains until referenced
+native tools and argument schemas have been verified. The default modern host
+does not advertise these legacy prompts; Python remains the installed default.
+
 ### Process cleanup boundary
 
 `cleanup_processes(force=True)` invokes the retained cleanup owners for debugger

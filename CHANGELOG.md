@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The source-built opt-in legacy host exposes the eight existing MCP prompts using the shared native prompt implementation. Each rendering warns that some referenced tools and arguments remain unavailable; Python and native sessions do not share debug state. The modern host and installed Python default are unchanged.
 - The source-built opt-in legacy runtime-smoke path supports up to 16 ordered after-phase file, output, and `debug.evaluate` probes in one transition. Evaluation requires a current owner-selected stopped frame and can execute code. An unknown evaluation outcome stops later probes and leaves cleanup unconfirmed; do not retry automatically. Python remains the installed default.
 - The source-built opt-in legacy runtime-smoke path also supports an after-phase `output.field` probe, extracting the first matching field from checkpointed output with exact or `contains:` expectations. Session, output-retention, and native size/time limits remain in force; Python remains the installed default.
 - The source-built opt-in legacy runtime-smoke path supports after-phase `output.since` probes over existing owner-bound checkpoints with literal patterns (`regex=false`). Missing or trimmed evidence and session changes cannot pass; native output and evidence limits apply. Regex probes and other unsupported plans remain blocked, and Python remains the installed default.
@@ -96,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retired the former runner-log grant collector, permission-probe job/selector and P0 permission-report dependency after migrating the surviving current-job selector. Removed requests and Attempt 1.0/2.0 fields refuse without aliases or synthetic upgrades. Historical run `38937481596/1` observed the same in-progress job at offsets 0/60 seconds, both UNAVAILABLE; original reports/history remain unchanged and are not relabeled PASS or server denial. The amendment requires a new canonical Candidate/Catalog, complete downloaded proof/reviews and explicit Root S4 before a new noncolliding preview tag; original `5f96014` approval remains original-only. No version bump or live release is claimed.
 
 ### Fixed
+- The debug prompt no longer claims that `continue_execution(thread_id=...)` resumes only one thread; it describes the all-thread DAP request in both Python and native prompt sources.
 - The Python wheel includes the full source needed to build its default Edit-and-Continue compiler; a wheel-based regression exercises real delta emission without a compiler override.
 - The source-built legacy host validates no-build launch targets before starting the adapter and resolves relative paths and matching `.exe`/`.dll` pairs like the existing Python entry point. POSIX links are resolved before `..`; the returned program is the resolved target. The modern host is unchanged.
 - The shared EnC emitter no longer adds an extra blank line when the original source already ends in a newline.
