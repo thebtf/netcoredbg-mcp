@@ -1281,6 +1281,9 @@ this native operation. The installed Python default is unchanged.
 In the unreleased Python source, `get_loaded_sources` refreshes `debug://state`
 in DAP reader order. Its returned list is the adapter snapshot; later source
 events can change the live state independently.
+The source-built native host also normalizes Windows loaded-source paths before
+keying the live view; rooted `/:` and `/:/` share the key observed in Python
+3.13. Other Python Unicode versions and path forms are not fully verified.
 
 Eight prompts provide guided workflows: `debug`, `debug-gui`,
 `debug-exception`, `debug-visual`, `debug-mistakes`, `investigate`,
