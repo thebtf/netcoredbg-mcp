@@ -811,15 +811,7 @@ internal static class Program
                     var error = content.GetProperty("error").GetString()!;
                     return Result(new { error, state, next_actions = actions, message = $"Error: {error}. Try one of the suggested next_actions." }, false);
                 }
-                var message = state switch
-                {
-                    "idle" => "No active debug session.",
-                    "initializing" => "Debug session is initializing.",
-                    "running" => "Program is RUNNING. Variable references from previous stops are INVALID. Do NOT call get_variables — wait for the program to stop.",
-                    "stopped" => "Program is PAUSED. UI is frozen, app cannot respond to input. Inspect state with get_call_stack/get_variables, then resume.",
-                    "terminated" => "Program has terminated. Check output for errors, then stop the session.",
-                    _ => string.Empty,
-                };
+                var message = LegacyStateMessage(state);
                 return Result(new { state, next_actions = actions, message, data = content.GetProperty("data") }, false);
             }
             finally { _legacyGate.Release(); }
@@ -1823,11 +1815,12 @@ internal static class Program
                     _legacyUnconfirmedBreakpointOverflow = false;
                     _legacyResources.Publish(attachResources!, attachToken);
                     ScheduleLegacyTrace(attachGeneration);
+                    var attachState = LegacySnapshot().State;
                     return Result(new
                     {
-                        state = LegacySnapshot().State,
-                        next_actions = LegacyActions(LegacySnapshot().State),
-                        message = "Debug session state observed.",
+                        state = attachState,
+                        next_actions = LegacyActions(attachState),
+                        message = LegacyStateMessage(attachState),
                         data = new { success = true, processId },
                         warning = "ATTACH MODE HAS LIMITED FUNCTIONALITY. Stack traces may be incomplete due to netcoredbg limitation. For reliable debugging, use start_debug instead."
                     }, false);
@@ -2184,7 +2177,7 @@ internal static class Program
                             {
                                 state = full.State,
                                 next_actions = LegacyActions(full.State),
-                                message = full.State == "idle" ? "No active debug session." : "Debug session state observed.",
+                                message = LegacyStateMessage(full.State),
                                 data = full.Data,
                             });
                             if (Encoding.UTF8.GetByteCount(serialized) <= MaximumSerializedInspectionBytes)
@@ -2222,7 +2215,7 @@ internal static class Program
                     {
                         state = snapshot.State,
                         next_actions = LegacyActions(snapshot.State),
-                        message = snapshot.State == "idle" ? "No active debug session." : "Debug session state observed.",
+                        message = LegacyStateMessage(snapshot.State),
                         data = partial,
                         warning,
                     }, false);
@@ -3646,7 +3639,7 @@ internal static class Program
             {
                 state,
                 next_actions = LegacyActions(state).Concat(actions).Distinct(StringComparer.Ordinal).ToArray(),
-                message = state == "idle" ? "No active debug session." : "Debug session state observed.",
+                message = LegacyStateMessage(state),
                 data
             }, false);
             return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
@@ -4903,9 +4896,19 @@ internal static class Program
         private static string[] LegacyActions(string state) => state switch
         {
             "idle" => OperatingSystem.IsWindows() ? ["start_debug", "attach_debug", "get_progress"] : ["start_debug", "get_progress"],
-            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "step_over", "step_into", "step_out", "continue_execution", "apply_code_change", "get_output", "get_output_tail", "stop_debug"],
-            "running" => ["get_debug_state", "debuggee_activity", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
+            "stopped" => ["get_debug_state", "get_threads", "get_call_stack", "get_scopes", "get_variables", "evaluate_expression", "step_over", "step_into", "step_out", "continue_execution", "get_progress", "apply_code_change", "get_output", "get_output_tail", "search_output", "stop_debug"],
+            "running" => ["get_debug_state", "debuggee_activity", "pause_execution", "get_output", "get_output_tail", "search_output", "get_progress", "stop_debug"],
             _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
+        };
+
+        private static string LegacyStateMessage(string state) => state switch
+        {
+            "idle" => "No active debug session.",
+            "initializing" => "Debug session is initializing.",
+            "running" => "Program is RUNNING. Variable references from previous stops are INVALID. Do NOT call get_variables — wait for the program to stop.",
+            "stopped" => "A debuggee thread is stopped; UI may be unresponsive. Inspect the call stack before reading variables.",
+            "terminated" => "Program has terminated. Check output for errors, then stop the session.",
+            _ => "Debug state is unconfirmed. Do not retry uncertain actions automatically.",
         };
 
         private static CallToolResult LegacyCompositeResult(JsonElement content, bool exception, long? hitCount)
@@ -4991,7 +4994,7 @@ internal static class Program
             {
                 state,
                 next_actions = LegacyActions(state).Concat(extra).Distinct(StringComparer.Ordinal).ToArray(),
-                message = state == "idle" ? "No active debug session." : "Debug session state observed.",
+                message = LegacyStateMessage(state),
                 data
             }, false);
             return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
@@ -5083,7 +5086,7 @@ internal static class Program
         private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
 
         private static CallToolResult LegacyResponse(object data, string state) =>
-            Result(new { state, next_actions = LegacyActions(state), message = state == "idle" ? "No active debug session." : "Debug session state observed.", data }, false);
+            Result(new { state, next_actions = LegacyActions(state), message = LegacyStateMessage(state), data }, false);
 
         private static CallToolResult LegacyResponseWithMessage(object data, string state, string message) =>
             Result(new { state, next_actions = LegacyActions(state), message, data }, false);

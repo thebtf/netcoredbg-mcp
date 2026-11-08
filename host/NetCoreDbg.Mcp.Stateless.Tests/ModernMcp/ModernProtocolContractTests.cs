@@ -708,6 +708,11 @@ public sealed class ModernProtocolContractTests
         Assert.Equal("stopped", state["state"]?.GetValue<string>());
         Assert.Equal("stopped", state["data"]?["state"]?.GetValue<string>());
         Assert.Equal(1, state["data"]?["currentThreadId"]?.GetValue<int>());
+        Assert.Contains("UI may be unresponsive", state["message"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+        var stoppedActions = Assert.IsType<JsonArray>(state["next_actions"]).Select(static item => item?.GetValue<string>()).ToArray();
+        Assert.Contains("get_scopes", stoppedActions);
+        Assert.Contains("get_variables", stoppedActions);
+        Assert.DoesNotContain("ui_click", stoppedActions);
 
         var stack = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject { ["levels"] = 20 }, meta);
         Assert.Equal("stopped", stack["state"]?.GetValue<string>());
@@ -1369,6 +1374,7 @@ public sealed class ModernProtocolContractTests
             Assert.NotSame(queuedStart, await Task.WhenAny(queuedStart, Task.Delay(TimeSpan.FromSeconds(1))));
             var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), other);
             Assert.Equal("initializing", state["state"]?.GetValue<string>());
+            Assert.Contains("initializing", state["message"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
             foreach (var tool in new[] { "get_modules", "get_progress" })
             {
                 var inventory = await LegacyConsoleCallAsync(driver, tool, new JsonObject(), other);
@@ -1647,6 +1653,26 @@ public sealed class ModernProtocolContractTests
             ["pre_build"] = false,
         }, owner))["data"]?["success"]?.GetValue<bool>());
         Assert.Equal("running", (await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner))["state"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LegacyCompat_RunningState_ProvidesSafeInspectionGuidance()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(QuickEvaluateOptions());
+        var owner = new JsonObject { ["muxSessionId"] = "running-guidance-owner" };
+        await StartQuickEvaluateSessionAsync(driver, owner);
+        try
+        {
+            var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner);
+            Assert.Equal("running", state["state"]?.GetValue<string>());
+            Assert.Contains("references", state["message"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("invalid", state["message"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            var actions = Assert.IsType<JsonArray>(state["next_actions"]).Select(static item => item?.GetValue<string>()).ToArray();
+            Assert.Contains("get_progress", actions);
+            Assert.Contains("search_output", actions);
+            Assert.DoesNotContain("get_variables", actions);
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
     }
 
     [Fact]
