@@ -870,6 +870,122 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Theory]
+    [InlineData(true, "success")]
+    [InlineData(false, "success")]
+    [InlineData(true, "timeout")]
+    [InlineData(false, "timeout")]
+    [InlineData(true, "negative")]
+    [InlineData(false, "negative")]
+    public async Task LegacyRuntimeSmoke_MixedEvaluationPreservesOrderAndStopsOnUnknownOutcome(bool direct, string mode)
+    {
+        bool uncertain = mode != "success";
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"));
+        harness.EnableLegacyCompat();
+        const string owner = "smoke-mixed-evaluate-owner";
+        var started = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "mixed-evaluate-launch", owner));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            _ = await harness.CallLegacyWithMetaAsync("get_threads", new JsonObject(), "mixed-evaluate-barrier", owner);
+            var stack = Content(await harness.CallLegacyWithMetaAsync("get_call_stack", new JsonObject(), "mixed-evaluate-stack", owner));
+            Assert.NotEmpty(Assert.IsType<JsonArray>(stack["data"]?["frames"]));
+            var checkpoint = Content(await harness.CallLegacyWithMetaAsync("output_checkpoint",
+                new JsonObject { ["name"] = "mixed-evaluate" }, "mixed-evaluate-checkpoint", owner));
+            Assert.Equal("PASS", checkpoint["data"]?["status"]?.GetValue<string>());
+
+            JsonObject Output(string name) => new()
+            {
+                ["kind"] = "output.since",
+                ["phase"] = "after",
+                ["name"] = name,
+                ["checkpoint"] = "mixed-evaluate",
+                ["regex"] = false,
+                ["required"] = new JsonArray(),
+                ["forbidden"] = new JsonArray(),
+            };
+            JsonObject Evaluate(string name, string expression) => new()
+            {
+                ["kind"] = "debug.evaluate",
+                ["phase"] = "after",
+                ["name"] = name,
+                ["expression"] = expression,
+                ["expected"] = "42",
+            };
+            var before = Output("before");
+            if (mode == "negative") before["required"] = new JsonArray("missing-before-evaluation");
+            var plan = new JsonObject
+            {
+                ["schema"] = "netcoredbg.runtime_smoke.v2",
+                ["cases"] = new JsonArray(new JsonObject
+                {
+                    ["id"] = "mixed-evaluate",
+                    ["transitions"] = new JsonArray(new JsonObject
+                    {
+                        ["settle"] = new JsonObject { ["idle_ms"] = 0 },
+                        ["probes"] = new JsonArray(before, Evaluate("first", "6 * 7"),
+                            Evaluate("second", mode == "timeout" ? "fixture:timeout" : mode == "negative" ? "fixture:negative" : "6 * 7"),
+                            Output("after"), Evaluate("last", "6 * 7")),
+                    }),
+                }),
+            };
+            if (mode == "timeout") plan["budgets"] = new JsonObject { ["max_actions"] = 1, ["max_elapsed_seconds"] = 5 };
+            JsonObject result;
+            if (direct)
+            {
+                result = Content(await harness.CallLegacyWithMetaAsync("run_runtime_smoke",
+                    new JsonObject { ["plan"] = plan }, "mixed-evaluate-direct", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            }
+            else
+            {
+                var run = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_plan",
+                    new JsonObject { ["plan"] = plan }, "mixed-evaluate-start", owner));
+                var runId = Assert.IsType<string>(run["data"]?["run_id"]?.GetValue<string>());
+                result = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_wait_for_result",
+                    new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 15000 }, "mixed-evaluate-wait", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+                Assert.True(result["data"]?["final"]?.GetValue<bool>());
+                result = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_get_result",
+                    new JsonObject { ["run_id"] = runId }, "mixed-evaluate-result", owner));
+            }
+            var data = Assert.IsType<JsonObject>(result["data"]);
+            Assert.Equal(uncertain ? "IMPASSE" : "PASS", data["status"]?.GetValue<string>());
+            var requests = (await harness.Fixture.ReadTranscriptAsync()).Where(item => item.Kind == "request" && item.Command == "evaluate").ToArray();
+            Assert.Equal(uncertain ? 2 : 3, requests.Length);
+            if (uncertain)
+            {
+                Assert.Contains("may have executed", data["reason"]?.GetValue<string>() ?? "", StringComparison.OrdinalIgnoreCase);
+                Assert.NotEqual("PASS", data["cleanup"]?["status"]?.GetValue<string>());
+                var next = Content(await harness.CallLegacyWithMetaAsync("runtime_smoke_run_plan",
+                    new JsonObject { ["plan"] = plan.DeepClone() }, "mixed-evaluate-next", owner));
+                Assert.Equal("BLOCKED", next["data"]?["status"]?.GetValue<string>());
+            }
+            else
+            {
+                Assert.Equal("PASS", data["cleanup"]?["status"]?.GetValue<string>());
+                var probes = Assert.IsType<JsonArray>(data["cases"]?[0]?["transitions"]?[0]?["probes"]?["after"]);
+                Assert.Equal(new[] { "output.since.before", "debug.evaluate.first", "debug.evaluate.second", "output.since.after", "debug.evaluate.last" },
+                    probes.Select(item => item?["path"]?.GetValue<string>()));
+                Assert.All(probes, item => Assert.Equal("PASS", item?["status"]?.GetValue<string>()));
+                Assert.Equal("42", probes[1]?["value"]?.GetValue<string>());
+                Assert.Equal("42", probes[2]?["value"]?.GetValue<string>());
+                Assert.Equal("42", probes[4]?["value"]?.GetValue<string>());
+            }
+        }
+        finally
+        {
+            if (started) await Record.ExceptionAsync(async () => await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "mixed-evaluate-stop", owner).WaitAsync(TimeSpan.FromSeconds(15)));
+        }
+    }
+
+    [Theory]
     [InlineData("ready", "PASS")]
     [InlineData("not-ready", "FAIL")]
     public async Task LegacyRuntimeSmoke_FileJsonAfterOnlyReportsObservedAndExpected(string expected, string status)
@@ -967,7 +1083,7 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
-    public async Task LegacyRuntimeSmoke_MultipleProbesRejectDuplicatePathsAndEvaluationBeforeExecution()
+    public async Task LegacyRuntimeSmoke_MultipleProbesRejectDuplicatePathsAndOversizedPlans()
     {
         if (!OperatingSystem.IsWindows()) return;
         await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
@@ -979,10 +1095,6 @@ public sealed class RegistryShutdownContractTests
         probes.Add(probes[0]!.DeepClone());
         var duplicate = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan", new JsonObject { ["plan"] = plan.DeepClone() }, "multi-duplicate"));
         Assert.Equal("INVALID_SETUP", duplicate["data"]?["status"]?.GetValue<string>());
-        probes[1] = new JsonObject { ["kind"] = "debug.evaluate", ["phase"] = "after", ["expression"] = "1" };
-        var blocked = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = plan }, "multi-evaluate"));
-        Assert.Equal("BLOCKED", blocked["data"]?["status"]?.GetValue<string>());
-        Assert.Null(blocked["data"]?["run_id"]);
         var tooMany = FileJsonSmokePlan(path, "ready");
         var manyProbes = tooMany["cases"]![0]!["transitions"]![0]!["probes"]!.AsArray();
         for (int i = 1; i < 17; i++)
