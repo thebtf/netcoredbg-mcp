@@ -162,6 +162,9 @@ internal static class Program
 
         if (sessions.LegacyCompat)
         {
+            mcp.WithListPromptsHandler((_, _) => ValueTask.FromResult(NativePrompts.ListLegacyPrompts()))
+                .WithGetPromptHandler((context, _) => ValueTask.FromResult(NativePrompts.GetLegacyPrompt(context.Params)));
+
             mcp.WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
             {
                 Resources = [
