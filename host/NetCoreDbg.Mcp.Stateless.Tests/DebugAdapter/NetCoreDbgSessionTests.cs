@@ -1834,6 +1834,21 @@ public sealed class NetCoreDbgSessionTests
         Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
     }
 
+    [Fact]
+    public void DapWriteBarrier_DisposeClosesOwnedInputStream()
+    {
+        var type = typeof(NetCoreDbgSessionContractDriver).GetNestedType("DapWriteBarrierStream", BindingFlags.NonPublic);
+        Assert.NotNull(type);
+        var constructor = type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null, types: [typeof(Stream)], modifiers: null);
+        Assert.NotNull(constructor);
+        using var input = new MemoryStream();
+        var barrier = Assert.IsAssignableFrom<Stream>(constructor.Invoke([input]));
+        barrier.Dispose();
+        barrier.Dispose();
+        Assert.False(input.CanWrite);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

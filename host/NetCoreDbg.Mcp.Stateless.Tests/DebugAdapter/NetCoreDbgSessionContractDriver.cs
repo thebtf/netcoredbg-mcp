@@ -1054,6 +1054,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         object? session = null;
         DapWriteBarrierStream? writeBarrier = null;
         PreHeaderWriteGate? preHeaderWriteGate = null;
+        IDisposable? untransferredWindowsLaunch = null;
         try
         {
             var assembly = LoadProductionAssemblyOrAssert();
@@ -1090,27 +1091,55 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
             using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
-            var startInfo = new ProcessStartInfo(fixture.ExecutablePath)
+            Process process;
+            Stream input;
+            Stream output;
+            Stream error;
+            object? processTreeOwnership = null;
+            if (OperatingSystem.IsWindows())
             {
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            startInfo.ArgumentList.Add("--interpreter=vscode");
-            var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the controlled adapter.");
-            writeBarrier = new DapWriteBarrierStream(process.StandardInput.BaseStream);
+                var ownerType = sessionType.GetNestedType("WindowsProcessTreeOwnership", BindingFlags.NonPublic)
+                    ?? throw new InvalidOperationException("Windows debugger Job ownership is unavailable.");
+                var start = ownerType.GetMethod("Start", BindingFlags.Static | BindingFlags.NonPublic,
+                    binder: null, types: [typeof(string), typeof(IReadOnlyList<string>)], modifiers: null)
+                    ?? throw new InvalidOperationException("Windows debugger Job launch is unavailable.");
+                untransferredWindowsLaunch = Assert.IsAssignableFrom<IDisposable>(start.Invoke(null,
+                    [fixture.ExecutablePath, new[] { "--interpreter=vscode" }]));
+                var launchType = untransferredWindowsLaunch.GetType();
+                process = Assert.IsType<Process>(launchType.GetProperty("Process")?.GetValue(untransferredWindowsLaunch));
+                input = Assert.IsAssignableFrom<Stream>(launchType.GetProperty("Input")?.GetValue(untransferredWindowsLaunch));
+                output = Assert.IsAssignableFrom<Stream>(launchType.GetProperty("Output")?.GetValue(untransferredWindowsLaunch));
+                error = Assert.IsAssignableFrom<Stream>(launchType.GetProperty("Error")?.GetValue(untransferredWindowsLaunch));
+                processTreeOwnership = launchType.GetProperty("Ownership")?.GetValue(untransferredWindowsLaunch)
+                    ?? throw new InvalidOperationException("Windows debugger Job owner was not returned.");
+            }
+            else
+            {
+                var startInfo = new ProcessStartInfo(fixture.ExecutablePath)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                startInfo.ArgumentList.Add("--interpreter=vscode");
+                process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the controlled adapter.");
+                input = process.StandardInput.BaseStream;
+                output = process.StandardOutput.BaseStream;
+                error = process.StandardError.BaseStream;
+            }
+            writeBarrier = new DapWriteBarrierStream(input);
             preHeaderWriteGate = new PreHeaderWriteGate();
             var constructorArguments = new object?[]
             {
                 process,
                 writeBarrier,
-                process.StandardOutput.BaseStream,
-                process.StandardError.BaseStream,
+                output,
+                error,
                 requestTimeout,
                 stopTimeout,
-                null,
+                processTreeOwnership,
                 null,
                 null,
                 (Func<CancellationToken, Task>)preHeaderWriteGate.WaitIfArmedAsync,
@@ -1122,6 +1151,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 constructorArguments[10] = stepOverTimeProvider;
             }
             session = constructor.Invoke(constructorArguments);
+            untransferredWindowsLaunch = null;
             var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, startupCancellation.Token]);
             await AwaitAsyncResult(started, "StartProtocolAsync", startupCancellation.Token);
             var activeReaderTask = readerTask.GetValue(session) as Task
@@ -1134,6 +1164,28 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         {
             writeBarrier?.Release();
             preHeaderWriteGate?.Release();
+            if (session is null && untransferredWindowsLaunch is not null)
+            {
+                try
+                {
+                    var owner = untransferredWindowsLaunch.GetType().GetProperty("Ownership")?.GetValue(untransferredWindowsLaunch)
+                        ?? throw new InvalidOperationException("Windows debugger Job owner was not returned.");
+                    var ownerType = owner.GetType();
+                    var terminate = ownerType.GetMethod("Terminate", BindingFlags.Instance | BindingFlags.Public)
+                        ?? throw new InvalidOperationException("Windows debugger Job termination is unavailable.");
+                    var drain = ownerType.GetMethod("WaitForDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                        ?? throw new InvalidOperationException("Windows debugger Job drain is unavailable.");
+                    terminate.Invoke(owner, null);
+                    await Assert.IsAssignableFrom<Task>(drain.Invoke(owner, [TimeSpan.FromSeconds(5)]));
+                    untransferredWindowsLaunch.Dispose();
+                    fixture.MarkCleanupConfirmed();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    failure.Data["WindowsLaunchCleanupFailure"] = cleanupFailure;
+                    failure.Data["UnconfirmedWindowsLaunch"] = untransferredWindowsLaunch;
+                }
+            }
             await DisposeFailedSessionAsync(fixture, session, failure);
             await fixture.DisposePreservingFailureAsync(failure);
             throw;
@@ -1731,6 +1783,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         private int _prefixBytes;
         private bool _opaqueCancellation;
         private Action? _cancelOnEntry;
+        private int _disposed;
 
         public override bool CanRead => inner.CanRead;
         public override bool CanSeek => inner.CanSeek;
@@ -1742,6 +1795,19 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         public long HeaderBytesForwarded => Interlocked.Read(ref _headerBytesForwarded);
         public string UnderlyingStreamType => inner.GetType().FullName
             ?? throw new InvalidOperationException("The underlying stdin stream has no runtime type name.");
+
+        protected override void Dispose(bool disposing)
+        {
+            try
+            {
+                if (disposing && Interlocked.Exchange(ref _disposed, 1) == 0)
+                    inner.Dispose();
+            }
+            finally
+            {
+                base.Dispose(disposing);
+            }
+        }
 
         public void ArmBeforeUnderlyingHeader(int prefixBytes, bool opaqueCancellation, Action? cancelOnEntry)
         {
