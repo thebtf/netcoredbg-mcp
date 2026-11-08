@@ -72,6 +72,13 @@ An invalid explicit path is not replaced by a different debugger. This native
 lookup does not download or build a debugger; native setup and complete Python
 replacement remain open.
 
+In this opt-in mode, `--help` and `--version` exit without starting the MCP
+server; the version is the native host's build version, not the Python package
+version. Invalid arguments and conflicting project options fail before startup.
+`setup` and `--setup` report that native setup is unavailable rather than
+starting the server. Use the installed Python entry point for setup until its
+native replacement is delivered.
+
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at
 most one non-terminating disconnect. An adapter acknowledgement does not prove
