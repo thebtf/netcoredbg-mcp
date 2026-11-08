@@ -2002,8 +2002,7 @@ internal static class Program
                         else
                         {
                             var effect = LegacyRuntimeSmokeFileRunner.UsesEvaluation(prepared.Plan) ? new LegacyRuntimeSmokeEffect() : null;
-                            var observer = CreateLegacySmokeOutputObserver(prepared.Plan, generation, _legacySessionId, muxId)
-                                ?? CreateLegacySmokeEvaluationObserver(generation, _legacySessionId, muxId, effect);
+                            var observer = CreateLegacySmokeObserver(prepared.Plan, generation, _legacySessionId, muxId, effect);
                             Func<JsonObject, CancellationToken, Task<JsonObject>>? runner = observer is null ? null :
                                 (plan, token) => LegacyRuntimeSmokeFileRunner.RunAsync(plan, token, observer, effect);
                             data = _legacySmoke.Start(name, prepared, muxId, runner, effect);
@@ -2068,8 +2067,7 @@ internal static class Program
                         var plan = JsonNode.Parse(planValue.GetRawText());
                         var effect = name == RunRuntimeSmoke && LegacyRuntimeSmokeFileRunner.UsesEvaluation(plan) ? new LegacyRuntimeSmokeEffect() : null;
                         var observer = name == RunRuntimeSmoke
-                            ? CreateLegacySmokeOutputObserver(plan, _legacySessionGeneration, _legacySessionId, muxId)
-                                ?? CreateLegacySmokeEvaluationObserver(_legacySessionGeneration, _legacySessionId, muxId, effect) : null;
+                            ? CreateLegacySmokeObserver(plan, _legacySessionGeneration, _legacySessionId, muxId, effect) : null;
                         _legacyGate.Release();
                         gateHeld = false;
                         data = name == RuntimeSmokeValidatePlan
@@ -3993,11 +3991,13 @@ internal static class Program
             catch (InvalidOperationException ex) { return LegacyError(ex.Message); }
         }
 
-        private Func<JsonObject, CancellationToken, Task<JsonObject>>? CreateLegacySmokeOutputObserver(
-            JsonNode? plan, long generation, string? sessionId, string? owner)
+        private Func<JsonObject, CancellationToken, Task<JsonObject>>? CreateLegacySmokeObserver(
+            JsonNode? plan, long generation, string? sessionId, string? owner, LegacyRuntimeSmokeEffect? effect)
         {
-            if (!LegacyRuntimeSmokeFileRunner.UsesOutput(plan)) return null;
-            return (probe, token) => ObserveLegacySmokeOutputAsync(probe, generation, sessionId, owner, token);
+            if (!LegacyRuntimeSmokeFileRunner.UsesOutput(plan) && effect is null) return null;
+            return (probe, token) => probe["kind"]?.GetValue<string>() == "debug.evaluate" && effect is not null
+                ? ObserveLegacySmokeEvaluationAsync(probe, generation, sessionId, owner, effect, token)
+                : ObserveLegacySmokeOutputAsync(probe, generation, sessionId, owner, token);
         }
 
         private async Task<JsonObject> ObserveLegacySmokeOutputAsync(JsonObject probe, long generation,
@@ -4102,9 +4102,6 @@ internal static class Program
             finally { _legacyGate.Release(); }
         }
 
-        private Func<JsonObject, CancellationToken, Task<JsonObject>>? CreateLegacySmokeEvaluationObserver(
-            long generation, string? sessionId, string? owner, LegacyRuntimeSmokeEffect? effect) => effect is null ? null :
-                (probe, token) => ObserveLegacySmokeEvaluationAsync(probe, generation, sessionId, owner, effect, token);
 
         private async Task<JsonObject> ObserveLegacySmokeEvaluationAsync(JsonObject probe, long generation,
             string? sessionId, string? owner, LegacyRuntimeSmokeEffect effect, CancellationToken cancellationToken)
@@ -4176,7 +4173,12 @@ internal static class Program
                 {
                     var code = content.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String ? error.GetString() : null;
                     if (code == "DAP_EVALUATE_REFUSED") observed["reason"] = "Evaluation was refused before dispatch.";
-                    else if (code == "DAP_EVALUATE_FAILED") observed["reason"] = "Evaluation failed and may have executed. Do not retry automatically.";
+                    else if (code == "DAP_EVALUATE_FAILED")
+                    {
+                        observed["status"] = "IMPASSE";
+                        observed["reason"] = "Evaluation failed and may have executed. Do not retry automatically.";
+                        observed["outcome_unknown"] = true;
+                    }
                     else
                     {
                         observed["status"] = "IMPASSE";

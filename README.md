@@ -1346,11 +1346,12 @@ consumer-mode release gate and the examples in [`docs/examples/`](docs/examples/
 for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 
 The source-built opt-in `--legacy-compat` host supports one inline v2 case with
-one transition and up to 16 after-phase `file.json`, `output.since`, or
-`output.field` probes, or one `debug.evaluate` probe. It also supports an
-optional `ui.noop` action and no cleanup. Read-only probes run in order even
-when one fails; the combined status gives `FAIL` precedence over `BLOCKED` and
-`IMPASSE`. Duplicate probe paths are rejected before execution. A
+one transition and up to 16 after-phase `file.json`, `output.since`,
+`output.field`, or `debug.evaluate` probes. It also supports an optional
+`ui.noop` action and no cleanup. Probes run in order; ordinary failures do not
+stop later probes, and `FAIL` takes precedence over `BLOCKED` and `IMPASSE`.
+An unknown evaluation outcome stops later probes and reports `IMPASSE`.
+Duplicate probe paths are rejected before execution. A
 `file.json` probe is Windows-only and requires an absolute path on a drive that
 Windows reports as fixed. JSONPath is limited to dotted identifiers; expected
 values are strings or null, and files are limited to 16 MiB. Device paths,
@@ -1372,10 +1373,10 @@ output on Linux and the macOS path have not yet been verified.
 A `debug.evaluate` probe requires `get_call_stack` to have selected a frame in
 the current stopped context for the same mux owner. The observed value is the
 debugger's result string; `expected` is compared to it without type coercion.
-Evaluation can execute code and have side effects. Cancellation, timeout, or a
-lost context after dispatch can leave its outcome unknown; do not retry
-automatically. An unconfirmed direct or durable run reports failed cleanup and
-blocks further runs in that host.
+Evaluation can execute code and have side effects. Cancellation, timeout, a
+failed evaluation, or a lost context after dispatch can leave its effects
+unknown; do not retry automatically. An unconfirmed direct or durable run
+reports failed cleanup and blocks further runs in that host.
 
 For this subset, `runtime_smoke_validate_probe` validates without starting a
 run. `runtime_smoke_start`, `runtime_smoke_run_probe` and `runtime_smoke_run_plan`
