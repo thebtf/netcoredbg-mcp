@@ -996,6 +996,35 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task LoadedSourceRootedColon_PreservesPythonIdentityForEventsAndSnapshots()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });
+        var sources = new JsonArray(
+            new JsonObject { ["path"] = "/:", ["name"] = "before" },
+            new JsonObject { ["path"] = "/:/", ["name"] = "after" });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled),
+            batches: new JsonArray(Batch(
+                SourceEvent("new", new JsonObject { ["path"] = "/:", ["name"] = "before" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "/:/", ["name"] = "after" }))),
+            loadedSources: new JsonObject { ["sources"] = sources }));
+        var token = await StartSessionAsync(driver, "source-rooted-colon-start");
+        await AdvanceOutputAsync(driver, token, "source-rooted-colon-events");
+        var key = OperatingSystem.IsWindows() ? "path:\\:" : "path:/:";
+        var events = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-rooted-colon-state"))["loadedSources"]);
+        Assert.Single(events);
+        Assert.Equal("after", events[key]?["name"]?.GetValue<string>());
+
+        var snapshot = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("source-rooted-colon-snapshot")), false);
+        Assert.Equal(1, snapshot["count"]?.GetValue<int>());
+        var refreshed = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-rooted-colon-refreshed"))["loadedSources"]);
+        Assert.Single(refreshed);
+        Assert.Equal("after", refreshed[key]?["name"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task LoadedSourceUnicode_PreservesPythonLowercaseIdentityForEventsAndSnapshots()
     {
         var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });

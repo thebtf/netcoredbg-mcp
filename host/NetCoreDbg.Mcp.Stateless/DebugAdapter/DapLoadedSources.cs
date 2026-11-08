@@ -94,7 +94,7 @@ internal static class DapLoadedSources
             offset = shareEnd < 0 ? path.Length : shareEnd + 1;
             rooted = shareEnd >= 0;
         }
-        else if (windows && path.Length >= 2 && path[1] == ':')
+        else if (windows && path.Length >= 2 && path[0] != separator && path[1] == ':')
         {
             offset = 2;
             if (path.Length > offset && path[offset] == separator) { offset++; rooted = true; }
