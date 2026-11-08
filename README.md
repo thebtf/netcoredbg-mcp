@@ -64,6 +64,12 @@ Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
 
+At host startup, the legacy route uses a nonempty `NETCOREDBG_PATH` as given.
+Otherwise it searches `~/.netcoredbg-mcp/netcoredbg/` (including one directory
+level below it), then `PATH`. An invalid explicit path is not replaced by a
+different debugger. This native lookup does not download or build a debugger;
+native setup and complete Python replacement remain open.
+
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at
 most one non-terminating disconnect. An adapter acknowledgement does not prove
