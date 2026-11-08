@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The opt-in native legacy host now handles `--help` and its own build `--version` without starting MCP, rejects invalid or conflicting arguments, and explicitly reports that native setup is unavailable. Python remains the installed setup owner and default; native setup and complete Python replacement remain open.
 - The source-built opt-in legacy host discovers an existing managed debugger or a `PATH` executable when `NETCOREDBG_PATH` is empty. If managed discovery fails, it tries `PATH`, which can select a different installed version. A nonempty explicit path remains authoritative; native lookup does not download or build a debugger. Python remains the installed default.
 - The source-built opt-in legacy host exposes the eight existing MCP prompts using the shared native prompt implementation. Each rendering warns that some referenced tools and arguments remain unavailable; Python and native sessions do not share debug state. The modern host and installed Python default are unchanged.
 - The source-built opt-in legacy runtime-smoke path supports up to 16 ordered after-phase file, output, and `debug.evaluate` probes in one transition. Evaluation requires a current owner-selected stopped frame and can execute code. An unknown evaluation outcome stops later probes and leaves cleanup unconfirmed; do not retry automatically. Python remains the installed default.

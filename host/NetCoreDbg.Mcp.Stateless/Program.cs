@@ -51,6 +51,9 @@ internal static class Program
             await RunUnixProcessGroupProxyAsync(arguments[1], arguments[2]).ConfigureAwait(false);
             return;
         }
+        if (await NativeCommandLine.HandleAsync(arguments).ConfigureAwait(false))
+            return;
+
 
         try
         {
