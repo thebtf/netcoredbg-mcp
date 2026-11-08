@@ -265,7 +265,10 @@ async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> d
             "duration_ms": context.elapsed_ms(started),
             "route": "invoke",
         }
-    result = await context.call_adapter("ui.invoke", selector=selector)
+    adapter = "ui.invoke.app_dispatch" if _no_global_input_enabled(
+        _effective_input_policy(action, context)
+    ) else "ui.invoke"
+    result = await context.call_adapter(adapter, selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
         route="invoke",
@@ -339,7 +342,10 @@ async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> di
             "duration_ms": context.elapsed_ms(started),
             "route": "click",
         }
-    result = await context.call_adapter("ui.click", selector=selector)
+    adapter = "ui.click.app_dispatch" if _no_global_input_enabled(
+        _effective_input_policy(action, context)
+    ) else "ui.click"
+    result = await context.call_adapter(adapter, selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
         route="click",

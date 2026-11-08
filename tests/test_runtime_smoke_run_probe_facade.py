@@ -112,14 +112,17 @@ class GuardedTracepointRunProbeSession(RunProbeFacadeSession):
         self.hygiene_preflight_calls: list[dict[str, Any]] = []
         self.add_breakpoint_calls: list[tuple[str, int]] = []
 
-    async def add_breakpoint(self, file: str, line: int) -> Breakpoint:
+    async def add_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> Breakpoint:
         self.add_breakpoint_calls.append((file, line))
         new_breakpoint = Breakpoint(file=file, line=line, verified=True)
-        self.breakpoints.add(new_breakpoint)
-        return new_breakpoint
+        return self.breakpoints.add(new_breakpoint, tracepoint_id=tracepoint_id)
 
-    async def remove_breakpoint(self, file: str, line: int) -> bool:
-        return self.breakpoints.remove(file, line)
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> bool:
+        return self.breakpoints.remove(file, line, tracepoint_id=tracepoint_id)
 
     async def clear_breakpoints(self, file: str | None = None) -> int:
         return self.breakpoints.clear(file)
@@ -143,7 +146,9 @@ class GuardedTracepointRunProbeSession(RunProbeFacadeSession):
 
 
 class FailingBreakpointTracepointRunProbeSession(GuardedTracepointRunProbeSession):
-    async def add_breakpoint(self, file: str, line: int) -> Breakpoint:
+    async def add_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None
+    ) -> Breakpoint:
         raise RuntimeError(f"adapter refused breakpoint at {file}:{line}")
 
 

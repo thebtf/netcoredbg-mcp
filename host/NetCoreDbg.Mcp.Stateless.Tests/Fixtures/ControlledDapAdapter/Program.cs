@@ -10,8 +10,58 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Unicode;
 
+if (args.Length > 0 && args[0] == "--controlled-build-observe")
+{
+    Console.OutputEncoding = Encoding.UTF8;
+    Console.Write(JsonSerializer.Serialize(new { workingDirectory = Environment.CurrentDirectory, arguments = args[1..] }));
+    Console.Error.Write("controlled stderr: λ");
+    Environment.ExitCode = 37;
+    return;
+}
+
+if (args.Length is 2 or 3 && args[0] == "--controlled-build-tree")
+{
+    var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Fixture executable is unavailable.");
+    var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
+    if (args.Length == 3 && args[2] == "--redirect-child-output")
+    {
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+    }
+    start.ArgumentList.Add("--controlled-dap-descendant");
+    using var descendant = Process.Start(start) ?? throw new InvalidOperationException("Could not start controlled descendant.");
+    using var root = Process.GetCurrentProcess();
+    var observation = JsonSerializer.Serialize(new
+    {
+        rootId = root.Id,
+        rootStart = root.StartTime.ToUniversalTime().Ticks,
+        descendantId = descendant.Id,
+        descendantStart = descendant.StartTime.ToUniversalTime().Ticks,
+    });
+    await File.WriteAllTextAsync(args[1] + ".tmp", observation);
+    File.Move(args[1] + ".tmp", args[1]);
+    await Task.Delay(Timeout.InfiniteTimeSpan);
+    return;
+}
+
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
 {
+    if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")
+    {
+        var transcript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")
+            ?? throw new InvalidOperationException("The controlled transcript path is required.");
+        var observation = JsonSerializer.Serialize(new
+        {
+            removed = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_REMOVE"),
+            unchanged = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_INHERITED"),
+            overridden = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_VALUE"),
+            added = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_NEW"),
+            aliasesEqual = string.Equals(Environment.GetEnvironmentVariable("WINDIR"), Environment.GetEnvironmentVariable("SYSTEMROOT"), StringComparison.Ordinal),
+        });
+        var destination = transcript + ".environment-" + Environment.ProcessId;
+        await File.WriteAllTextAsync(destination + ".tmp", observation);
+        File.Move(destination + ".tmp", destination);
+    }
     await Task.Delay(Timeout.InfiniteTimeSpan);
     return;
 }
@@ -134,7 +184,23 @@ internal sealed record AdapterOptions(
     string NextResponseMode,
     string SetBreakpointsResponseMode,
     string ScopesResponseMode,
-    string VariablesResponseMode)
+    string VariablesResponseMode,
+    string PauseResponseMode,
+    int? PauseEventThreadId,
+    bool? PauseAllThreadsStopped,
+    bool? SupportsExceptionInfoRequest,
+    string ExceptionInfoResponseMode,
+    string ExceptionInfoCapabilityDelta,
+    string ExceptionBreakpointFilters,
+    string ExceptionFiltersCapabilityDelta,
+    string SetExceptionBreakpointsResponseMode,
+    bool? SupportsSetVariable,
+    string SetVariableCapabilityDelta,
+    int? ProcessEventId,
+    bool? SupportsLoadedSourcesRequest,
+    bool? SupportsStepTargets,
+    string StepTargetsMode,
+    string StepTargetsDelta)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -169,6 +235,22 @@ internal sealed record AdapterOptions(
         var setBreakpointsResponseMode = "success";
         var scopesResponseMode = "success";
         var variablesResponseMode = "success";
+        var pauseResponseMode = "ack-only";
+        int? pauseEventThreadId = 1;
+        bool? pauseAllThreadsStopped = true;
+        bool? supportsExceptionInfoRequest = null;
+        var exceptionInfoResponseMode = "success";
+        var exceptionInfoCapabilityDelta = "none";
+        var exceptionBreakpointFilters = "omit";
+        var exceptionFiltersCapabilityDelta = "none";
+        var setExceptionBreakpointsResponseMode = "absent-body";
+        bool? supportsSetVariable = null;
+        var setVariableCapabilityDelta = "none";
+        int? processEventId = null;
+        bool? supportsLoadedSourcesRequest = null;
+        bool? supportsStepTargets = null;
+        var stepTargetsMode = "success";
+        var stepTargetsDelta = "none";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -238,7 +320,7 @@ internal sealed record AdapterOptions(
                     stopReason = argument["--stop-reason=".Length..];
                     break;
                 case var _ when argument.StartsWith("--exit-code=", StringComparison.Ordinal)
-                    && int.TryParse(argument["--exit-code=".Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedExitCode):
+                    && int.TryParse(argument["--exit-code=".Length..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsedExitCode):
                     exitCode = parsedExitCode;
                     break;
                 case var _ when argument.StartsWith("--threads-response=", StringComparison.Ordinal):
@@ -270,6 +352,60 @@ internal sealed record AdapterOptions(
                     break;
                 case var _ when argument.StartsWith("--variables-response=", StringComparison.Ordinal):
                     variablesResponseMode = argument["--variables-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--supports-set-variable=", StringComparison.Ordinal):
+                    var setVariableSupport = argument["--supports-set-variable=".Length..];
+                    supportsSetVariable = setVariableSupport == "omit" ? null : bool.Parse(setVariableSupport);
+                    break;
+                case var _ when argument.StartsWith("--set-variable-capability-delta=", StringComparison.Ordinal):
+                    setVariableCapabilityDelta = argument["--set-variable-capability-delta=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--process-event-id=", StringComparison.Ordinal):
+                    processEventId = int.Parse(argument["--process-event-id=".Length..], CultureInfo.InvariantCulture);
+                    break;
+                case var _ when argument.StartsWith("--pause-response=", StringComparison.Ordinal):
+                    pauseResponseMode = argument["--pause-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--pause-event-thread-id=", StringComparison.Ordinal):
+                    var eventThread = argument["--pause-event-thread-id=".Length..];
+                    pauseEventThreadId = eventThread == "omit" ? null : int.Parse(eventThread, CultureInfo.InvariantCulture);
+                    break;
+                case var _ when argument.StartsWith("--pause-all-threads-stopped=", StringComparison.Ordinal):
+                    var allStopped = argument["--pause-all-threads-stopped=".Length..];
+                    pauseAllThreadsStopped = allStopped == "omit" ? null : bool.Parse(allStopped);
+                    break;
+                case var _ when argument.StartsWith("--supports-exception-info=", StringComparison.Ordinal):
+                    var exceptionSupport = argument["--supports-exception-info=".Length..];
+                    supportsExceptionInfoRequest = exceptionSupport == "omit" ? null : bool.Parse(exceptionSupport);
+                    break;
+                case var _ when argument.StartsWith("--supports-loaded-sources=", StringComparison.Ordinal):
+                    var loadedSourcesSupport = argument["--supports-loaded-sources=".Length..];
+                    supportsLoadedSourcesRequest = loadedSourcesSupport == "omit" ? null : bool.Parse(loadedSourcesSupport);
+                    break;
+                case var _ when argument.StartsWith("--supports-step-targets=", StringComparison.Ordinal):
+                    var stepTargetsSupport = argument["--supports-step-targets=".Length..];
+                    supportsStepTargets = stepTargetsSupport == "omit" ? null : bool.Parse(stepTargetsSupport);
+                    break;
+                case var _ when argument.StartsWith("--step-targets-mode=", StringComparison.Ordinal):
+                    stepTargetsMode = argument["--step-targets-mode=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--step-targets-delta=", StringComparison.Ordinal):
+                    stepTargetsDelta = argument["--step-targets-delta=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-info-response=", StringComparison.Ordinal):
+                    exceptionInfoResponseMode = argument["--exception-info-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-info-capability-delta=", StringComparison.Ordinal):
+                    exceptionInfoCapabilityDelta = argument["--exception-info-capability-delta=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-breakpoint-filters=", StringComparison.Ordinal):
+                    exceptionBreakpointFilters = argument["--exception-breakpoint-filters=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-filters-capability-delta=", StringComparison.Ordinal):
+                    exceptionFiltersCapabilityDelta = argument["--exception-filters-capability-delta=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--set-exception-breakpoints-response=", StringComparison.Ordinal):
+                    setExceptionBreakpointsResponseMode = argument["--set-exception-breakpoints-response=".Length..];
                     break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
@@ -307,7 +443,20 @@ internal sealed record AdapterOptions(
             nextResponseMode,
             setBreakpointsResponseMode,
             scopesResponseMode,
-            variablesResponseMode);
+            variablesResponseMode,
+            pauseResponseMode,
+            pauseEventThreadId,
+            pauseAllThreadsStopped,
+            supportsExceptionInfoRequest,
+            exceptionInfoResponseMode,
+            exceptionInfoCapabilityDelta,
+            exceptionBreakpointFilters,
+            exceptionFiltersCapabilityDelta,
+            setExceptionBreakpointsResponseMode,
+            supportsSetVariable,
+            setVariableCapabilityDelta,
+            processEventId,
+            supportsLoadedSourcesRequest, supportsStepTargets, stepTargetsMode, stepTargetsDelta);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -453,11 +602,16 @@ internal sealed class ControlledDapAdapter
     private Task? _heldNextResponse;
     private Task? _heldInspectionResponse;
     private Task? _heldBreakpointsResponse;
+    private readonly List<Task> _heldPauseControls = [];
+    private int _independentThreadsRequests;
+    private bool _recordPauseWire;
     private bool _launchCompleted;
     private int _runtimeBreakpointRequests;
+    private int _exceptionFilterRequests;
     private bool _inspectionResponseHeld;
     private bool _inspectionStepped;
     private int _continueRequests;
+    private int _legacyBreakpointFrameRequests;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -468,12 +622,18 @@ internal sealed class ControlledDapAdapter
     private int _outgoingSequence = 1;
     private bool _initializedEventSent;
     private int _nextBreakpointId = 1;
+    private readonly Dictionary<(string File, int Line), int> _stableBreakpointIds = [];
     private readonly List<(int Id, int Line)> _initiallyUnverifiedBreakpoints = [];
 
     public ControlledDapAdapter(AdapterOptions options, string transcriptPath, string[] processArguments)
     {
         _options = options;
         _transcriptPath = transcriptPath;
+        _recordPauseWire = options.PauseResponseMode != "ack-only"
+            || options.NextResponseMode is "continue-ack-only" or "continue-hold-ack"
+            || options.ThreadsResponseMode is "empty" or "first-zero" or "first-seven" or "first-unsorted"
+                or "discovery-current-before-reply" or "hold-independent" or "hold-independent-distinct" or "hold-with-current-event"
+                or "hold-independent-late-response-event" or "wrong-request-sequence" or "eof";
         _processArguments = processArguments;
         _transcriptWriteMutex = new Mutex(
             initiallyOwned: false,
@@ -488,7 +648,30 @@ internal sealed class ControlledDapAdapter
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        await RecordAsync(new { kind = "startup", arguments = JsonSerializer.Serialize(_processArguments), processId = Environment.ProcessId }, cancellationToken);
+        using (var self = Process.GetCurrentProcess())
+        {
+            await RecordAsync(new
+            {
+                kind = "startup",
+                arguments = JsonSerializer.Serialize(_processArguments),
+                processId = Environment.ProcessId,
+                processStartTimeUtcTicks = self.StartTime.ToUniversalTime().Ticks,
+                simpleControlledTree = _options.SpawnDescendant && !_options.SpawnWindowedDescendant
+                    && !_options.PublishSecondWindowedDescendantAfterRelease,
+            }, cancellationToken);
+        }
+
+        if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")
+        {
+            var observed = JsonSerializer.Serialize(new
+            {
+                removed = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_REMOVE"),
+                unchanged = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_INHERITED"),
+                overridden = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_VALUE"),
+                added = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_NEW"),
+            });
+            await RecordAsync(new { kind = "environment-observation", arguments = observed }, cancellationToken);
+        }
 
         try
         {
@@ -511,6 +694,17 @@ internal sealed class ControlledDapAdapter
         {
             using var suspendedDescendantLifetime = _suspendedDescendant;
             _lifecycleEventsCancellation.Cancel();
+            foreach (var heldControl in _heldPauseControls)
+            {
+                try
+                {
+                    await heldControl.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Teardown cancels independent pause, continue and discovery barriers.
+                }
+            }
             if (_heldThreadsResponse is { } heldThreadsResponse)
             {
                 try
@@ -635,6 +829,10 @@ internal sealed class ControlledDapAdapter
                         cancellationToken);
                     await RecordAsync(new { kind = "capabilities-event" }, cancellationToken);
                 }
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-before-initialize" or "disable-before-initialize")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-before-initialize", cancellationToken);
+                }
 
                 await WriteResponseAsync(sequence + 10_000, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "unmatched-response", requestSequence = sequence + 10_000 }, cancellationToken);
@@ -661,6 +859,31 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsDelayedStackTraceLoading"] = _options.SupportsDelayedStackTraceLoading;
                 }
+                if (_options.SupportsExceptionInfoRequest is { } exceptionInfoSupport)
+                {
+                    initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
+                }
+                if (_options.SupportsStepTargets is { } stepTargetsSupport)
+                    initializeCapabilities["supportsStepInTargetsRequest"] = stepTargetsSupport;
+                if (_options.SupportsLoadedSourcesRequest is { } loadedSourcesSupport)
+                {
+                    initializeCapabilities["supportsLoadedSourcesRequest"] = loadedSourcesSupport;
+                }
+                if (_options.SupportsSetVariable is { } setVariableSupport)
+                {
+                    initializeCapabilities["supportsSetVariable"] = setVariableSupport;
+                }
+                if (_options.ExceptionBreakpointFilters != "omit")
+                {
+                    initializeCapabilities["exceptionBreakpointFilters"] = ExceptionFilterDescriptors(_options.ExceptionBreakpointFilters == "supported");
+                }
+                if (_outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("breakpointCapabilities", out var breakpointCapabilities)
+                    && breakpointCapabilities.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var capability in breakpointCapabilities.EnumerateObject())
+                        initializeCapabilities[capability.Name] = capability.Value.Clone();
+                }
 
                 await WriteResponseAsync(sequence, command, initializeCapabilities, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
                 await RecordAsync(new
@@ -671,6 +894,10 @@ internal sealed class ControlledDapAdapter
                     supportsConfigurationDoneRequest = supportsConfigurationDone,
                     supportsTerminateRequest = supportsTerminate,
                 }, cancellationToken);
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-after-initialize" or "disable-after-initialize")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-after-initialize", cancellationToken);
+                }
                 if (_options.EnableConfigurationDoneAfterInitialization)
                 {
                     await WaitForConfigurationDoneCapabilityDeltaReleaseAsync(cancellationToken);
@@ -704,16 +931,37 @@ internal sealed class ControlledDapAdapter
                     await CompleteLaunchAsync(cancellationToken);
                 }
                 return false;
+            case "attach":
+                _pendingLaunch = request.Detach();
+                await RecordAsync(new { kind = "attach-gated", sequence }, cancellationToken);
+                if (!_options.SupportsConfigurationDone) await CompleteLaunchAsync(cancellationToken);
+                return false;
             case "configurationDone":
-                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
+                var refuseConfiguration = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("configurationDoneRefused", out var configurationRefused) && configurationRefused.GetBoolean();
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: !refuseConfiguration);
                 await RecordAsync(new { kind = "configuration-done", sequence }, cancellationToken);
-                await CompleteLaunchAsync(cancellationToken);
+                if (!refuseConfiguration) await CompleteLaunchAsync(cancellationToken);
                 return false;
             case "terminate":
                 if (!_options.IgnoreGracefulShutdown)
                 {
+                    var terminateMode = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TERMINATE_MODE");
+                    if (terminateMode is "terminal-before-ack" or "exited-before-ack")
+                    {
+                        var eventName = terminateMode == "exited-before-ack" ? "exited" : "terminated";
+                        await WriteEventAsync(eventName, eventName == "exited" ? new { exitCode = 0 } : null, cancellationToken);
+                        await RecordAsync(new { kind = "terminate-terminal-before-ack" }, cancellationToken);
+                        _heldPauseControls.Add(CompleteHeldTerminateAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+                        return false;
+                    }
                     await WaitForGracefulReleaseAsync(_options.BlockGracefulShutdown, cancellationToken);
-                    await WriteResponseAsync(sequence, command, body: null, cancellationToken);
+                    await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: terminateMode != "refuse");
+                    if (terminateMode == "held-terminal")
+                    {
+                        await RecordAsync(new { kind = "terminate-acknowledged" }, cancellationToken);
+                        _heldPauseControls.Add(CompleteHeldTerminateAsync(_lifecycleEventsCancellation.Token));
+                    }
                 }
 
                 return false;
@@ -749,6 +997,28 @@ internal sealed class ControlledDapAdapter
 
                 return false;
             case "threads":
+                if (_options.SetVariableCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    var supported = _options.SetVariableCapabilityDelta == "enable-on-threads";
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsSetVariable = supported } }, cancellationToken);
+                    await RecordAsync(new { kind = "set-variable-capabilities-delta-event", supported }, cancellationToken);
+                }
+                if (_options.ExceptionInfoCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    var supported = _options.ExceptionInfoCapabilityDelta == "enable-on-threads";
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = supported } }, cancellationToken);
+                    await RecordAsync(new { kind = "exception-info-capabilities-delta-event", supported }, cancellationToken);
+                }
+                if (_options.StepTargetsDelta is "enable-on-threads" or "disable-on-threads")
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsStepInTargetsRequest = _options.StepTargetsDelta == "enable-on-threads" } }, cancellationToken);
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-on-threads", cancellationToken);
+                }
+                else if (_options.ExceptionFiltersCapabilityDelta == "unrelated-on-threads")
+                {
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = true } }, cancellationToken);
+                }
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
             case "stackTrace":
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
@@ -756,17 +1026,276 @@ internal sealed class ControlledDapAdapter
             case "variables":
                 await HandleInspectionRequestAsync(sequence, command, root, cancellationToken);
                 return false;
+            case "evaluate":
+                await HandleEvaluateRequestAsync(sequence, root, cancellationToken);
+                return false;
+            case "setVariable":
+                await HandleSetVariableRequestAsync(sequence, root, cancellationToken);
+                return false;
+            case "exceptionInfo":
+                await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
+                return false;
+            case "applyDeltas":
+                var refuseDeltas = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("applyDeltasRefused", out var deltaRefused)
+                    && deltaRefused.ValueKind == JsonValueKind.True;
+                if (refuseDeltas) await RecordAsync(new { kind = "apply-deltas-refused", sequence }, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: !refuseDeltas);
+                return false;
+            case "writeMemory":
+                var writeMode = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("memoryWriteMode", out var writeModeElement)
+                    ? writeModeElement.GetString() : null;
+                var writeBody = new { bytesWritten = 2, offset = 7 };
+                if (writeMode is "stale" or "held")
+                {
+                    if (writeMode == "stale")
+                    {
+                        await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                        await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "memory-write-restopped");
+                    }
+                    await RecordAsync(new { kind = "memory-write-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, writeBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                await WriteResponseAsync(sequence, command, writeBody, cancellationToken, success: writeMode != "refused");
+                return false;
+            case "readMemory":
+            case "disassemble":
+            case "locations":
+                var memoryMode = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("memoryInspectionMode", out var memoryModeElement)
+                    ? memoryModeElement.GetString() : null;
+                object memoryBody = command switch
+                {
+                    "readMemory" => new { address = "0x1238", unreadableBytes = 2, data = "AQID" },
+                    "disassemble" => new
+                    {
+                        instructions = new[]
+                    {
+                        new { address = "0x1234", instructionBytes = "55", instruction = memoryMode == "large" ? new string('x', 270_000) : "push rbp", symbol = "main", presentationHint = "normal" },
+                        new { address = "0x1235", instructionBytes = "90", instruction = "nop", symbol = "next", presentationHint = "normal" },
+                    }
+                    },
+                    _ => new { source = new { path = "C:/src/Program.cs", name = "Program.cs" }, line = 12, column = 3, endLine = 13, endColumn = 8 },
+                };
+                if (memoryMode == "invalid-read") memoryBody = new { address = "0x1234", data = "!!!" };
+                else if (memoryMode == "invalid-disassemble") memoryBody = new { instructions = new object[] { false } };
+                else if (memoryMode == "invalid-locations") memoryBody = new { source = new { path = "C:/src/Program.cs" }, line = new { bad = true }, column = -1 };
+                else if (memoryMode == "wide-location") memoryBody = new { source = new { path = "C:/src/Program.cs" }, line = 1, column = 2_147_483_648L };
+                else if (memoryMode == "wide-instruction") memoryBody = new { instructions = new[] { new { address = "0x1234", instruction = "nop", column = 2_147_483_648L } } };
+                else if (memoryMode == "wide-unreadable") memoryBody = new { address = "0x1234", unreadableBytes = 2_147_483_648L, data = "" };
+                if (memoryMode == "stale")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "memory-inspection-restopped");
+                    await RecordAsync(new { kind = "memory-inspection-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, memoryBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                await WriteResponseAsync(sequence, command, memoryBody, cancellationToken);
+                return false;
+            case "stepInTargets":
+                var targetsBody = new JsonObject { ["targets"] = new JsonArray(new JsonObject { ["id"] = 42, ["label"] = "Call", ["line"] = 3, ["column"] = 1 }) };
+                if (_options.StepTargetsMode == "stale")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "step-targets-restopped");
+                    await RecordAsync(new { kind = "step-targets-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, targetsBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                if (_options.StepTargetsMode == "malformed") targetsBody["targets"] = new JsonArray(new JsonObject { ["id"] = 1 });
+                await WriteResponseAsync(sequence, command, targetsBody, cancellationToken, success: _options.StepTargetsMode != "refused");
+                return false;
+            case "loadedSources":
+                var loadedSources = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSources", out var sourceBody)
+                    && sourceBody.ValueKind != JsonValueKind.Null
+                    ? (object)sourceBody : new { sources = Array.Empty<object>() };
+                if (_outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSourcesGeneratedLength", out var generatedLength)
+                    && generatedLength.ValueKind == JsonValueKind.Number)
+                {
+                    loadedSources = new { sources = new[] { new { name = new string('x', generatedLength.GetInt32()) } } };
+                }
+                var loadedSourcesRefused = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSourcesRefused", out var refused) && refused.GetBoolean();
+                if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("loadedSourcesBefore", out var beforeSources) && beforeSources.ValueKind == JsonValueKind.Array)
+                    await WriteOutputEntriesAsync(beforeSources, cancellationToken);
+                await WriteResponseAsync(sequence, command, loadedSources, cancellationToken, success: !loadedSourcesRefused);
+                if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("loadedSourcesAfter", out var afterSources) && afterSources.ValueKind == JsonValueKind.Array)
+                    await WriteOutputEntriesAsync(afterSources, cancellationToken);
+                return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
+            case "stepIn":
+            case "stepOut":
+                _recordPauseWire = true;
+                return await HandleNextRequestAsync(sequence, root, cancellationToken, command);
             case "continue":
                 return await HandleContinueRequestAsync(sequence, root, cancellationToken);
+            case "pause":
+                _recordPauseWire = true;
+                return await HandlePauseRequestAsync(sequence, root, cancellationToken);
             case "setBreakpoints":
                 await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
                 return false;
+            case "setFunctionBreakpoints":
+                await HandleSetFunctionBreakpointsRequestAsync(sequence, root, cancellationToken);
+                return false;
+            case "setExceptionBreakpoints":
+                return await HandleSetExceptionBreakpointsRequestAsync(sequence, root, cancellationToken);
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
         }
+    }
+
+    private static object[] ExceptionFilterDescriptors(bool supported) => supported
+        ? [new { filter = "all", label = "All exceptions" }, new { filter = "user-unhandled", label = "User-unhandled exceptions" }]
+        : [];
+
+    private async Task WriteExceptionFiltersCapabilityAsync(bool supported, CancellationToken cancellationToken)
+    {
+        await WriteEventAsync("capabilities", new { capabilities = new { exceptionBreakpointFilters = ExceptionFilterDescriptors(supported) } }, cancellationToken);
+        await RecordAsync(new { kind = "exception-filters-capabilities-delta-event", supported }, cancellationToken);
+    }
+
+    private async Task<bool> HandleSetExceptionBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled exception filter payload";
+        var ordinal = ++_exceptionFilterRequests;
+        var mode = _options.SetExceptionBreakpointsResponseMode;
+        var requested = root.GetProperty("arguments").GetProperty("filters").EnumerateArray().ToArray();
+        var results = new JsonArray(requested.Select((_, index) => (JsonNode)new JsonObject
+        {
+            ["verified"] = index % 2 == 0,
+            ["message"] = privatePayload,
+            ["id"] = index + 100,
+        }).ToArray());
+        object? body = new JsonObject { ["breakpoints"] = results };
+        switch (mode)
+        {
+            case "absent-body":
+                await WriteResponseAsync(sequence, "setExceptionBreakpoints", null, cancellationToken, omitBody: true);
+                return false;
+            case "missing-breakpoints":
+                body = new { message = privatePayload };
+                break;
+            case "verified":
+                break;
+            case "refused":
+                await WriteResponseAsync(sequence, "setExceptionBreakpoints", new { message = privatePayload }, cancellationToken, success: false);
+                return false;
+            case "null-breakpoints":
+                body = new JsonObject { ["breakpoints"] = null };
+                break;
+            case "non-object-body":
+                body = new[] { privatePayload };
+                break;
+            case "non-array-breakpoints":
+                body = new { breakpoints = privatePayload };
+                break;
+            case "missing-verified":
+                results[0]!.AsObject().Remove("verified");
+                break;
+            case "non-boolean-verified":
+                results[0]!["verified"] = "true";
+                break;
+            case "null-entry":
+                results[0] = null;
+                break;
+            case "too-few-results":
+                results.RemoveAt(results.Count - 1);
+                break;
+            case "too-many-results":
+                results.Add(new JsonObject { ["verified"] = true });
+                break;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken);
+                return false;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return false;
+            case "eof":
+                return true;
+            case "timeout":
+                await RecordAsync(new { kind = "exception-filters-response-timeout", sequence }, cancellationToken);
+                return false;
+            case "hold-first":
+                if (ordinal != 1)
+                {
+                    break;
+                }
+                await RecordAsync(new { kind = "exception-filters-response-gated", sequence }, cancellationToken);
+                _heldBreakpointsResponse = CompleteHeldBreakpointsResponseAsync(sequence, body, _lifecycleEventsCancellation.Token, "setExceptionBreakpoints");
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown setExceptionBreakpoints response mode '{mode}'.");
+        }
+        await WriteResponseAsync(sequence, "setExceptionBreakpoints", body, cancellationToken);
+        return false;
+    }
+
+    private async Task HandleSetFunctionBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var requested = root.GetProperty("arguments").GetProperty("breakpoints").EnumerateArray().ToArray();
+        var refusal = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionBreakpointRefusal", out var mode) ? mode.GetString() : null;
+        if (!_initializedEventSent || (refusal == "empty" && requested.Length == 0) ||
+            (refusal == "nonempty" && requested.Length != 0))
+        {
+            await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { message = "function breakpoints refused" }, cancellationToken, success: false);
+            return;
+        }
+        if (!_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionStartupFailure", out var startupFailure))
+        {
+            if (startupFailure.GetString() == "timeout")
+            {
+                await RecordAsync(new { kind = "function-startup-response-withheld", sequence }, cancellationToken);
+                return;
+            }
+            if (startupFailure.GetString() == "malformed")
+            {
+                await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { breakpoints = "invalid" }, cancellationToken);
+                return;
+            }
+        }
+
+        var runtimeOnly = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncEventRuntimeOnly", out var runtimeEvent) && runtimeEvent.ValueKind == JsonValueKind.True;
+        if ((!runtimeOnly || _launchCompleted) && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncSourceEvent", out var sourceEvent) && sourceEvent.ValueKind == JsonValueKind.Object)
+            await WriteEventAsync("breakpoint", sourceEvent, cancellationToken);
+        if (_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncRefuseAfterEvent", out var refuseAfterEvent) && refuseAfterEvent.ValueKind == JsonValueKind.True)
+        {
+            await WriteResponseAsync(sequence, "setFunctionBreakpoints", new { message = "function breakpoints refused" }, cancellationToken, success: false);
+            return;
+        }
+
+
+        var reuseSourceId = _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncReuseSourceId", out var reuse) && reuse.ValueKind == JsonValueKind.True;
+        var breakpoints = requested.Select((_, index) => new Dictionary<string, object?>
+        {
+            ["id"] = reuseSourceId && index == 0 ? 1 : _nextBreakpointId++,
+            ["verified"] = index % 2 == 0,
+        }).ToArray();
+        if (_outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionBreakpointZeroLine", out var zeroLine) && zeroLine.ValueKind == JsonValueKind.True)
+            foreach (var breakpoint in breakpoints) { breakpoint["line"] = 0; breakpoint["verified"] = false; }
+        var body = new { breakpoints };
+        if (_launchCompleted && _outputScript.ValueKind == JsonValueKind.Object &&
+            _outputScript.TryGetProperty("functionSyncHold", out var hold) && hold.ValueKind == JsonValueKind.True)
+        {
+            await RecordAsync(new { kind = "function-breakpoints-response-gated", sequence }, cancellationToken);
+            _heldBreakpointsResponse = CompleteHeldBreakpointsResponseAsync(sequence, body, _lifecycleEventsCancellation.Token, "setFunctionBreakpoints");
+            return;
+        }
+        await WriteResponseAsync(sequence, "setFunctionBreakpoints", body, cancellationToken);
     }
 
     private async Task HandleSetBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
@@ -782,7 +1311,13 @@ internal sealed class ControlledDapAdapter
         var responseMode = _options.SetBreakpointsResponseMode switch
         {
             "hold-first-runtime" => "success",
+            "mixed-remove" => "mixed",
+            "mixed-missing-id" => "mixed",
+            "crossed-lines" => "success",
+            "same-effective-line" => "success",
+            "stable-id" => "success",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
+            "same-effective-line-refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
             "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
             "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
             "reader-failure-first-runtime" => runtimeOrdinal == 1 ? "reader-failure" : "success",
@@ -792,7 +1327,18 @@ internal sealed class ControlledDapAdapter
         var breakpoints = requested.Select((entry, index) =>
         {
             var line = entry.GetProperty("line").GetInt32();
-            var id = _nextBreakpointId++;
+            int id;
+            if (_options.SetBreakpointsResponseMode == "stable-id")
+            {
+                var file = root.GetProperty("arguments").GetProperty("source").GetProperty("path").GetString()!;
+                var key = (file, line);
+                if (!_stableBreakpointIds.TryGetValue(key, out id))
+                {
+                    id = _nextBreakpointId++;
+                    _stableBreakpointIds.Add(key, id);
+                }
+            }
+            else id = _nextBreakpointId++;
             var breakpoint = new Dictionary<string, object?>
             {
                 ["id"] = id,
@@ -813,6 +1359,20 @@ internal sealed class ControlledDapAdapter
                     breakpoint["line"] = checked(line + 1);
                 }
             }
+            if (_options.SetBreakpointsResponseMode == "mixed-missing-id")
+            {
+                if (index == 0) breakpoint.Remove("id");
+                else if (index == 1)
+                {
+                    breakpoint["verified"] = false;
+                    breakpoint.Remove("line");
+                    _initiallyUnverifiedBreakpoints.Add((id, line));
+                }
+            }
+            if (_options.SetBreakpointsResponseMode == "crossed-lines")
+                breakpoint["line"] = index == 0 ? 3 : 2;
+            if (_options.SetBreakpointsResponseMode is "same-effective-line" or "same-effective-line-refuse-first-runtime")
+                breakpoint["line"] = 2;
             return breakpoint;
         }).ToList();
 
@@ -850,11 +1410,11 @@ internal sealed class ControlledDapAdapter
         await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken, success: success);
     }
 
-    private async Task CompleteHeldBreakpointsResponseAsync(int sequence, object? body, CancellationToken cancellationToken)
+    private async Task CompleteHeldBreakpointsResponseAsync(int sequence, object? body, CancellationToken cancellationToken, string command = "setBreakpoints")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
         await RecordAsync(new { kind = "runtime-breakpoints-response-releasing", sequence }, cancellationToken);
-        await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken);
+        await WriteResponseAsync(sequence, command, body, cancellationToken);
     }
 
     private async Task CompleteLaunchAsync(CancellationToken cancellationToken)
@@ -868,12 +1428,18 @@ internal sealed class ControlledDapAdapter
         if (_options.SpawnDescendant && _descendant is null)
         {
             _descendant = StartDescendant(_options.SpawnWindowedDescendant);
-            await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+            await RecordAsync(new { kind = "descendant", processId = _descendant.Id, processStartTimeUtcTicks = _descendant.StartTime.ToUniversalTime().Ticks }, cancellationToken);
         }
 
         if (_holdLaunchResponse)
         {
             await RecordAsync(new { kind = "launch-response-gated" }, cancellationToken);
+            await WaitForThreadsResponseReleaseAsync(cancellationToken);
+        }
+        if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_HOLD_RESTART_LAUNCH") == "1"
+            && (await File.ReadAllTextAsync(_transcriptPath, cancellationToken)).Contains("\"kind\":\"launch-released\"", StringComparison.Ordinal))
+        {
+            await RecordAsync(new { kind = "restart-launch-response-gated" }, cancellationToken);
             await WaitForThreadsResponseReleaseAsync(cancellationToken);
         }
 
@@ -886,6 +1452,11 @@ internal sealed class ControlledDapAdapter
         {
             await WriteEventAsync("breakpoint", new { reason = "changed", breakpoint = new { id, verified = true, line } }, cancellationToken);
             await RecordAsync(new { kind = "breakpoint-verified-event" }, cancellationToken);
+            if (_options.SetBreakpointsResponseMode == "mixed-remove")
+            {
+                await WriteEventAsync("breakpoint", new { reason = "removed", breakpoint = new { id } }, cancellationToken);
+                await RecordAsync(new { kind = "breakpoint-removed-event" }, cancellationToken);
+            }
         }
 
         if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("launch", out var launchOutput))
@@ -893,8 +1464,11 @@ internal sealed class ControlledDapAdapter
             await WriteOutputEntriesAsync(launchOutput, cancellationToken);
         }
 
-        _launchCompleted = true;
-        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
+        var startupCommand = launch.Document.RootElement.GetProperty("command").GetString()!;
+        var launchRefused = _outputScript.ValueKind == JsonValueKind.Object
+            && _outputScript.TryGetProperty(startupCommand == "attach" ? "attachRefused" : "launchRefused", out var refusal) && refusal.GetBoolean();
+        _launchCompleted = !launchRefused;
+        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), startupCommand, body: null, cancellationToken, success: !launchRefused);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
         if (_options.ExitAfterLaunchResponse)
         {
@@ -910,7 +1484,7 @@ internal sealed class ControlledDapAdapter
             return;
         }
 
-        if (!_options.SuppressLifecycleEvents)
+        if (!launchRefused && !_options.SuppressLifecycleEvents)
         {
             _lifecycleEvents ??= EmitLifecycleEventsAsync(_lifecycleEventsCancellation.Token);
         }
@@ -936,7 +1510,7 @@ internal sealed class ControlledDapAdapter
                 new
                 {
                     name = "controlled-dap-descendant",
-                    systemProcessId = descendant.Id,
+                    systemProcessId = _options.ProcessEventId ?? descendant.Id,
                     isLocalProcess = true,
                     startMethod = "launch",
                 },
@@ -988,6 +1562,9 @@ internal sealed class ControlledDapAdapter
                 await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
                 await WriteEventAsync("terminated", body: null, cancellationToken);
                 return;
+            case "all-stop-zero":
+                await WriteStoppedEventAsync(threadId: 0, allThreadsStopped: true, cancellationToken);
+                return;
             case "all-stop":
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
                 return;
@@ -995,6 +1572,19 @@ internal sealed class ControlledDapAdapter
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
                 await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
                 await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                return;
+            case "all-stop-held-continued-restop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 2, allThreadsStopped: true, cancellationToken, "admission-restopped-event", reason: "admission-restop");
+                return;
+
+            case "all-stop-threads-release-breakpoint-restop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await WaitForThreadsResponseReleaseAsync(cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "breakpoint-restopped-event", "breakpoint");
                 return;
 
             case "partial-stop":
@@ -1160,9 +1750,9 @@ internal sealed class ControlledDapAdapter
 
         foreach (var property in environment.EnumerateObject())
         {
-            if (string.IsNullOrWhiteSpace(property.Name) ||
+            if (property.Name.Length == 0 ||
                 property.Value.ValueKind != JsonValueKind.String ||
-                property.Value.GetString() is not { Length: > 0 } value)
+                property.Value.GetString() is not { } value)
             {
                 throw new InvalidDataException("DAP launch environment contains an invalid variable.");
             }
@@ -1334,10 +1924,10 @@ internal sealed class ControlledDapAdapter
         }
     }
 
-    private async Task CompleteHeldNextResponseAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    private async Task CompleteHeldNextResponseAsync(int sequence, int threadId, CancellationToken cancellationToken, string command = "next")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
-        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await WriteResponseAsync(sequence, command, body: null, cancellationToken);
         await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
     }
 
@@ -1347,10 +1937,10 @@ internal sealed class ControlledDapAdapter
         await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
     }
 
-    private async Task CompleteHeldNextAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    private async Task CompleteHeldNextAcknowledgementAsync(int sequence, CancellationToken cancellationToken, string command = "next")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
-        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await WriteResponseAsync(sequence, command, body: null, cancellationToken);
         await RecordAsync(new { kind = "next-acknowledged", sequence }, cancellationToken);
     }
 
@@ -1398,6 +1988,172 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
+    private async Task CompleteHeldTerminateAsync(CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteEventAsync("terminated", new { }, cancellationToken);
+    }
+    private async Task CompleteHeldTerminateAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "terminate", body: null, cancellationToken);
+    }
+
+
+    private string PauseControlPath(string control) => _transcriptPath + "." + control + ".release";
+
+    private static async Task WaitForControlReleaseAsync(string path, CancellationToken cancellationToken)
+    {
+        while (!File.Exists(path))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
+    }
+
+    private async Task<bool> HandlePauseRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        _ = ReadRequiredNextThreadId(root);
+        switch (_options.PauseResponseMode)
+        {
+            case "ack-only":
+            case "ack-body-absent":
+            case "ack-body-null":
+            case "ack-body-object":
+            case "ack-body-array":
+            case "ack-body-string":
+            case "ack-body-boolean":
+            case "ack-body-number":
+                await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "hold":
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "stopped-before-ack":
+            case "stopped-continued-before-ack":
+                await WritePauseStoppedEventAsync(sequence, cancellationToken);
+                if (_options.PauseResponseMode == "stopped-continued-before-ack")
+                {
+                    await WriteContinuedEventAsync(_options.PauseEventThreadId, allThreadsContinued: true, cancellationToken);
+                    await RecordAsync(new { kind = "pause-continued", sequence }, cancellationToken);
+                }
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "ack-before-stopped":
+            case "ack-before-stopped-held":
+            case "ack-before-breakpoint-held":
+                await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+                await RecordAsync(new { kind = "pause-stop-gated", sequence }, cancellationToken);
+                _heldPauseControls.Add(CompleteHeldPauseStopAsync(sequence, _lifecycleEventsCancellation.Token));
+                return false;
+            case "terminal-before-ack":
+                await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                await RecordAsync(new { kind = "pause-terminal", sequence }, cancellationToken);
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "negative":
+                await WriteResponseAsync(sequence, "pause", new { message = "private controlled pause refusal" }, cancellationToken, success: false);
+                return false;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "threads", body: null, cancellationToken);
+                return false;
+            case "wrong-command-continue":
+                await WriteResponseAsync(sequence, "continue", body: null, cancellationToken);
+                return false;
+            case "wrong-correlation":
+            case "wrong-request-sequence":
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, "pause", body: null, cancellationToken);
+                return false;
+            case "malformed-success":
+                await WriteMessageAsync(new
+                {
+                    seq = Interlocked.Increment(ref _outgoingSequence) - 1,
+                    type = "response",
+                    request_seq = sequence,
+                    success = "true",
+                    command = "pause",
+                }, cancellationToken);
+                return false;
+            case "malformed":
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                await RecordAsync(new { kind = "pause-malformed-response", sequence }, cancellationToken);
+                return false;
+            case "eof":
+                await RecordAsync(new { kind = "pause-eof", sequence }, cancellationToken);
+                return true;
+            case "no-response":
+            case "timeout":
+                await RecordAsync(new { kind = "pause-response-timeout", sequence }, cancellationToken);
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown pause response mode '{_options.PauseResponseMode}'.");
+        }
+    }
+
+    private async Task WritePauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        object? body = _options.PauseResponseMode switch
+        {
+            "ack-body-object" => new { detail = "private controlled pause body" },
+            "ack-body-array" => new object?[] { "private controlled pause body", 17, null },
+            "ack-body-string" => "private controlled pause body",
+            "ack-body-boolean" => true,
+            "ack-body-number" => 1.5,
+            _ => null,
+        };
+        await WriteResponseAsync(sequence, "pause", body, cancellationToken,
+            omitBody: _options.PauseResponseMode == "ack-body-absent");
+        await RecordAsync(new { kind = "pause-acknowledged", sequence }, cancellationToken);
+    }
+
+    private async Task HoldPauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await RecordAsync(new { kind = "pause-response-gated", sequence }, cancellationToken);
+        _heldPauseControls.Add(CompleteHeldPauseAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+    }
+
+    private async Task CompleteHeldPauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("pause-response"), cancellationToken);
+        await RecordAsync(new { kind = "pause-response-releasing", sequence }, cancellationToken);
+        await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+    }
+
+    private async Task WritePauseStoppedEventAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WriteStoppedEventAsync(_options.PauseEventThreadId, _options.PauseAllThreadsStopped, cancellationToken,
+            reason: _options.PauseResponseMode == "ack-before-breakpoint-held" ? "breakpoint" : "pause");
+        await RecordAsync(new { kind = "pause-stopped", sequence }, cancellationToken);
+    }
+
+    private async Task CompleteHeldPauseStopAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("pause-stop"), cancellationToken);
+        await RecordAsync(new { kind = "pause-stop-releasing", sequence }, cancellationToken);
+        await WritePauseStoppedEventAsync(sequence, cancellationToken);
+    }
+
+    private async Task CompleteHeldContinueAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("continue-response"), cancellationToken);
+        await RecordAsync(new { kind = "continue-response-releasing", sequence }, cancellationToken);
+        await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+        await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+    }
+
+    private async Task CompleteIndependentThreadsResponseAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("threads-response-" + sequence.ToString(CultureInfo.InvariantCulture)), cancellationToken);
+        await RecordAsync(new { kind = "threads-response-releasing", sequence }, cancellationToken);
+        await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = threadId, name = "worker" } } }, cancellationToken);
+        await RecordAsync(new { kind = "threads-response-written", sequence }, cancellationToken);
+        if (_options.ThreadsResponseMode == "hold-independent-late-response-event" && threadId == 7)
+        {
+            await WriteStoppedEventAsync(17, allThreadsStopped: false, cancellationToken,
+                recordKind: "discovery-reply-barrier-written", reason: "discovery-reply-barrier");
+        }
+    }
+
     private async Task<bool> HandleContinueRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
     {
         var threadId = ReadRequiredNextThreadId(root);
@@ -1420,6 +2176,14 @@ internal sealed class ControlledDapAdapter
 
         switch (_options.NextResponseMode)
         {
+            case "continue-ack-only":
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+                return false;
+            case "continue-hold-ack":
+                await RecordAsync(new { kind = "continue-response-gated", sequence }, cancellationToken);
+                _heldPauseControls.Add(CompleteHeldContinueAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+                return false;
             case "continue-breakpoint-terminal":
             case "continue-optional-stop":
                 await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
@@ -1503,7 +2267,7 @@ internal sealed class ControlledDapAdapter
         }
     }
 
-    private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken, string command = "next")
     {
         var threadId = ReadRequiredNextThreadId(root);
         var differentThreadId = threadId == int.MaxValue ? int.MinValue : threadId + 1;
@@ -1511,17 +2275,17 @@ internal sealed class ControlledDapAdapter
         {
             case "success":
                 _inspectionStepped = true;
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
             case "negative":
-                await WriteResponseAsync(sequence, "next", new { message = "controlled adapter next refusal" }, cancellationToken, success: false);
+                await WriteResponseAsync(sequence, command, new { message = "controlled adapter next refusal" }, cancellationToken, success: false);
                 return false;
             case "wrong-command":
-                await WriteResponseAsync(sequence, "threads", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command == "next" ? "threads" : "next", body: null, cancellationToken);
                 return false;
             case "wrong-request-sequence":
-                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, command, body: null, cancellationToken);
                 return false;
             case "wrong-request-sequence-collides-with-stack-trace":
                 if (_heldStackTraceResponseSequence is not { } heldStackTraceSequence)
@@ -1529,10 +2293,10 @@ internal sealed class ControlledDapAdapter
                     throw new InvalidOperationException("The collision response requires a held stackTrace request.");
                 }
 
-                await WriteResponseAsync(heldStackTraceSequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(heldStackTraceSequence, command, body: null, cancellationToken);
                 return false;
             case "malformed-success":
-                await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken);
+                await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken, command);
                 return false;
             case "missing-response-sequence":
             case "wrong-type-response-sequence":
@@ -1540,7 +2304,7 @@ internal sealed class ControlledDapAdapter
             case "negative-response-sequence":
             case "overflow-response-sequence":
             case "underflow-response-sequence":
-                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken);
+                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken, command);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
             case "missing-stop-sequence":
@@ -1549,7 +2313,7 @@ internal sealed class ControlledDapAdapter
             case "negative-stop-sequence":
             case "overflow-stop-sequence":
             case "underflow-stop-sequence":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteMalformedNextStoppedSequenceEventAsync(threadId, cancellationToken);
                 return false;
             case "reader-failure":
@@ -1560,28 +2324,28 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "hold-ack-no-stop":
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "hold":
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "hold-then-continued":
                 await WriteContinuedEventAsync(threadId, allThreadsContinued: true, cancellationToken);
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "pre-ack-ignored-stops":
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
                 await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "next-final-stop-gated", sequence }, cancellationToken);
                 _heldNextResponse = CompleteHeldNextStopAsync(threadId, _lifecycleEventsCancellation.Token);
                 return false;
             case "post-ack-ignored-stops":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
                 await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
@@ -1592,7 +2356,7 @@ internal sealed class ControlledDapAdapter
                 await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
                 return false;
             case "terminal-after-ack":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteEventAsync("terminated", body: null, cancellationToken);
                 await RecordAsync(new { kind = "next-terminal-after-ack", sequence }, cancellationToken);
                 return false;
@@ -1618,7 +2382,7 @@ internal sealed class ControlledDapAdapter
                 var terminal = _options.NextResponseMode.StartsWith("exited-", StringComparison.Ordinal) ? "exited" : "terminated";
                 if (terminal == "terminated")
                 {
-                    await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                    await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 }
                 await WriteMalformedNextTerminalEventAsync(terminal, cancellationToken);
                 return false;
@@ -1660,6 +2424,38 @@ internal sealed class ControlledDapAdapter
 
         switch (_options.ThreadsResponseMode)
         {
+            case "empty":
+                await WriteResponseAsync(sequence, "threads", new { threads = Array.Empty<object>() }, cancellationToken);
+                return false;
+            case "first-zero":
+                await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 0, name = "zero" }, new { id = 2, name = "worker" } } }, cancellationToken);
+                return false;
+            case "first-seven":
+            case "first-unsorted":
+            case "discovery-current-before-reply":
+                if (_options.ThreadsResponseMode == "discovery-current-before-reply")
+                {
+                    await WriteStoppedEventAsync(9, allThreadsStopped: true, cancellationToken, recordKind: "discovery-current-event");
+                }
+                await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 7, name = "first" }, new { id = 2, name = "second" } } }, cancellationToken);
+                return false;
+            case "hold-independent":
+            case "hold-independent-distinct":
+            case "hold-independent-late-response-event":
+                var ordinal = ++_independentThreadsRequests;
+                if (_options.ThreadsResponseMode == "hold-independent-late-response-event" && ordinal > 2)
+                {
+                    await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 29, name = "worker" } } }, cancellationToken);
+                    return false;
+                }
+                await RecordAsync(new { kind = "threads-response-gated", sequence, ordinal }, cancellationToken);
+                _heldPauseControls.Add(CompleteIndependentThreadsResponseAsync(sequence, ordinal == 1 ? 7 : 29, _lifecycleEventsCancellation.Token));
+                return false;
+            case "hold-with-current-event":
+                await WriteStoppedEventAsync(7, allThreadsStopped: true, cancellationToken, recordKind: "discovery-current-event");
+                await RecordAsync(new { kind = "threads-response-gated", sequence }, cancellationToken);
+                _heldThreadsResponse = CompleteHeldThreadsResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
             case "success":
                 await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
                 return false;
@@ -1669,6 +2465,13 @@ internal sealed class ControlledDapAdapter
             case "wrong-command":
                 await WriteResponseAsync(sequence, "stackTrace", new { threads = Threads(1, "worker") }, cancellationToken);
                 return false;
+            case "wrong-request-sequence":
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1,
+                    "threads", new { threads = Threads(1, "worker") }, cancellationToken);
+                return false;
+            case "eof":
+                await RecordAsync(new { kind = "threads-eof", sequence }, cancellationToken);
+                return true;
             case "malformed-body":
                 await WriteResponseAsync(sequence, "threads", new
                 {
@@ -1718,6 +2521,52 @@ internal sealed class ControlledDapAdapter
     {
         foreach (var entry in entries.EnumerateArray())
         {
+            if (entry.TryGetProperty("event", out var eventName))
+            {
+                var name = eventName.GetString() ?? throw new InvalidDataException("Scripted event name is required.");
+                var count = entry.TryGetProperty("generatedCount", out var generatedCount) ? generatedCount.GetInt32() : 1;
+                var offset = entry.TryGetProperty("generatedIdOffset", out var idOffset) ? idOffset.GetInt32() : 0;
+                for (var index = 0; index < count; index++)
+                {
+                    var eventBody = JsonNode.Parse(entry.GetProperty("body").GetRawText());
+                    if (name == "loadedSource" && entry.TryGetProperty("generatedCount", out _))
+                        eventBody!["source"]!["sourceReference"] = offset + index;
+                    if (entry.TryGetProperty("generatedTextLength", out var textLength))
+                    {
+                        // Expand bounded inventory cases here, not in the child-process environment block.
+                        var character = entry.TryGetProperty("generatedTextCharacter", out var textCharacter)
+                            ? textCharacter.GetString()![0] : 'x';
+                        var text = new string(character, textLength.GetInt32());
+                        if (name == "module")
+                        {
+                            eventBody!["module"]!["id"] = offset + index;
+                            eventBody["module"]!["name"] = text;
+                        }
+                        else if (name == "progressStart")
+                        {
+                            eventBody!["progressId"] = $"generated-{offset + index}";
+                            eventBody["title"] = text;
+                        }
+                        else if (name == "loadedSource")
+                        {
+                            eventBody!["source"]!["name"] = text;
+                        }
+                        else if (name == "stopped")
+                        {
+                            eventBody!["reason"] = text;
+                        }
+                        else
+                        {
+                            throw new InvalidDataException("Unsupported generated event.");
+                        }
+                    }
+
+                    await WriteEventAsync(name, eventBody, cancellationToken);
+                }
+
+                continue;
+            }
+
             var isRaw = entry.TryGetProperty("rawBody", out var rawBody);
             object body = entry;
             if (entry.TryGetProperty("prefixLength", out var prefixLength))
@@ -1773,6 +2622,285 @@ internal sealed class ControlledDapAdapter
     }
 
 
+    private async Task HandleExceptionInfoRequestAsync(int sequence, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled exception payload";
+        var mode = _options.ExceptionInfoResponseMode;
+        var body = new JsonObject
+        {
+            ["exceptionId"] = "System.InvalidOperationException",
+            ["breakMode"] = "always",
+            ["description"] = "Outer \"failure\"\nЖ",
+            ["details"] = new JsonObject
+            {
+                ["message"] = "Outer failure",
+                ["typeName"] = "InvalidOperationException",
+                ["fullTypeName"] = "System.InvalidOperationException",
+                ["evaluateName"] = "$exception",
+                ["stackTrace"] = "at Controlled.Throw()\nat Controlled.Main()",
+                ["formattedDescription"] = "<b>Outer failure</b>",
+                ["source"] = "ControlledAssembly",
+                ["innerException"] = new JsonArray(new JsonObject
+                {
+                    ["message"] = "Inner failure",
+                    ["typeName"] = "ArgumentException",
+                    ["fullTypeName"] = "System.ArgumentException",
+                    ["formattedDescription"] = "<i>Inner failure</i>",
+                    ["source"] = "ControlledInnerAssembly",
+                    ["innerException"] = new JsonArray(new JsonObject { ["message"] = "Root cause" }),
+                }),
+            },
+            ["adapterExtension"] = new JsonObject { ["code"] = 17, ["tags"] = new JsonArray("controlled", "nested") },
+        };
+        if (mode.StartsWith("sized:", StringComparison.Ordinal))
+        {
+            var size = int.Parse(mode["sized:".Length..], CultureInfo.InvariantCulture);
+            if (size is < 0 or > 262_144)
+            {
+                throw new InvalidOperationException("The controlled exception size exceeds its bound.");
+            }
+            body = new JsonObject
+            {
+                ["exceptionId"] = "ControlledException",
+                ["breakMode"] = "always",
+                ["description"] = new string('x', size) + "\"\nЖ",
+            };
+        }
+        else
+        {
+            switch (mode)
+            {
+                case "success":
+                    break;
+                case "break-never":
+                case "break-unhandled":
+                case "break-userUnhandled":
+                    body["breakMode"] = mode["break-".Length..];
+                    break;
+                case "minimal":
+                    body = new JsonObject { ["exceptionId"] = "ControlledException", ["breakMode"] = "never" };
+                    break;
+                case "refused":
+                    await WriteResponseAsync(sequence, "exceptionInfo", new { message = privatePayload, details = privatePayload }, cancellationToken, success: false);
+                    return;
+                case "non-object-body":
+                    await WriteResponseAsync(sequence, "exceptionInfo", new[] { privatePayload }, cancellationToken);
+                    return;
+                case "missing-id":
+                    body.Remove("exceptionId");
+                    break;
+                case "non-string-id":
+                    body["exceptionId"] = 17;
+                    break;
+                case "missing-break-mode":
+                    body.Remove("breakMode");
+                    break;
+                case "invalid-break-mode":
+                    body["breakMode"] = "sometimes";
+                    break;
+                case "non-string-description":
+                    body["description"] = 17;
+                    break;
+                case "null-description":
+                    body["description"] = null;
+                    break;
+                case "non-object-details":
+                    body["details"] = new JsonArray(privatePayload);
+                    break;
+                case "null-details":
+                    body["details"] = null;
+                    break;
+                case "oversized":
+                    body["description"] = privatePayload + new string('x', 262_145);
+                    break;
+                case "wrong-command":
+                    await WriteResponseAsync(sequence, "stackTrace", body, cancellationToken);
+                    return;
+                case "timeout":
+                    await RecordAsync(new { kind = "exception-info-response-timeout", sequence }, cancellationToken);
+                    return;
+                case "hold-then-continued":
+                case "hold-then-continued-restop":
+                case "hold-then-capability-revoked":
+                    if (mode == "hold-then-capability-revoked")
+                    {
+                        await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = false } }, cancellationToken);
+                    }
+                    else
+                    {
+                        await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                        if (mode == "hold-then-continued-restop")
+                        {
+                            await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "exception-info-restopped-event");
+                        }
+                    }
+                    if (mode != "hold-then-capability-revoked")
+                    {
+                        body["description"] = privatePayload;
+                    }
+                    await RecordAsync(new { kind = "exception-info-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "exceptionInfo", body, _lifecycleEventsCancellation.Token);
+                    return;
+                default:
+                    throw new InvalidOperationException($"Unknown exception-info response mode '{mode}'.");
+            }
+        }
+
+        await WriteResponseAsync(sequence, "exceptionInfo", body, cancellationToken);
+    }
+
+    private async Task HandleEvaluateRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled evaluation payload";
+        var expression = root.GetProperty("arguments").GetProperty("expression").GetString();
+        const string sizePrefix = "fixture:sized:";
+        if (expression is not null && expression.StartsWith(sizePrefix, StringComparison.Ordinal)
+            && int.TryParse(expression.AsSpan(sizePrefix.Length), out var size) && size is >= 0 and <= 262_144)
+        {
+            await WriteResponseAsync(sequence, "evaluate",
+                new { result = new string('x', size) + "\"\nЖ", type = "string", variablesReference = 0 }, cancellationToken);
+            return;
+        }
+        object body;
+        switch (expression)
+        {
+            case "$exception.InnerException":
+                if (_options.VariablesResponseMode == "context-evaluation-invalidated")
+                {
+                    await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                }
+                body = new { result = "null", variablesReference = 0 };
+                break;
+            case "6 * 7":
+            case " \t6 * 7\r\n":
+                body = new { result = "42", type = "int", variablesReference = 0, evaluateName = privatePayload };
+                break;
+            case "tupleVar":
+                body = new { result = "(\"test\", 123)", type = "(string, int)", variablesReference = 1002, namedVariables = 2, memoryReference = privatePayload };
+                break;
+            case "fixture:missing-type":
+                body = new { result = "untyped", variablesReference = 0 };
+                break;
+            case "fixture:null-type":
+                body = new { result = "untyped", type = (string?)null, variablesReference = 0 };
+                break;
+            case "fixture:empty-result":
+                body = new { result = string.Empty, type = "string", variablesReference = 0 };
+                break;
+            case "fixture:negative":
+                await WriteResponseAsync(sequence, "evaluate", new { message = privatePayload, result = privatePayload }, cancellationToken, success: false);
+                await RecordAsync(new { kind = "evaluate-response-written", sequence }, cancellationToken);
+                return;
+            case "fixture:missing-result":
+                body = new { type = privatePayload, variablesReference = 0 };
+                break;
+            case "fixture:non-string-result":
+                body = new { result = 42, type = privatePayload, variablesReference = 0 };
+                break;
+            case "fixture:non-string-type":
+                body = new { result = privatePayload, type = 17, variablesReference = 0 };
+                break;
+            case "fixture:missing-reference":
+                body = new { result = privatePayload, type = "int" };
+                break;
+            case "fixture:negative-reference":
+                body = new { result = privatePayload, variablesReference = -1 };
+                break;
+            case "fixture:fractional-reference":
+                body = new { result = privatePayload, variablesReference = 1.5 };
+                break;
+            case "fixture:oversized-result":
+                body = new { result = privatePayload + new string('x', 262_145), type = "string", variablesReference = 0 };
+                break;
+            case "fixture:wrong-command":
+                await WriteResponseAsync(sequence, "variables", new { result = privatePayload, variablesReference = 0 }, cancellationToken);
+                return;
+            case "fixture:timeout":
+                await RecordAsync(new { kind = "evaluate-response-timeout", sequence }, cancellationToken);
+                return;
+            case "fixture:hold":
+            case "fixture:hold-then-invalidated":
+            case "fixture:hold-then-continued-restop":
+            case "fixture:trace-restop":
+                if (expression == "fixture:hold-then-invalidated")
+                {
+                    await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                }
+                else if (expression is "fixture:hold-then-continued-restop" or "fixture:trace-restop")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "evaluate-restopped-event",
+                        reason: expression == "fixture:trace-restop" ? "pause" : null);
+                }
+                await RecordAsync(new { kind = "evaluate-response-gated", sequence }, cancellationToken);
+                _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "evaluate",
+                    new { result = privatePayload, type = "int", variablesReference = 1002 }, _lifecycleEventsCancellation.Token);
+                return;
+            default:
+                throw new InvalidOperationException("Unknown controlled evaluation expression.");
+        }
+
+        await WriteResponseAsync(sequence, "evaluate", body, cancellationToken);
+    }
+
+    private async Task HandleSetVariableRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var name = root.GetProperty("arguments").GetProperty("name").GetString();
+        const string privatePayload = "private controlled mutation payload";
+        switch (name)
+        {
+            case "fixture:negative":
+                await WriteResponseAsync(sequence, "setVariable", new { message = privatePayload }, cancellationToken, success: false);
+                return;
+            case "fixture:malformed":
+                await WriteResponseAsync(sequence, "setVariable", new { value = privatePayload, variablesReference = -1 }, cancellationToken);
+                return;
+            case "fixture:invalid-seq":
+                await WriteMessageAsync(new
+                {
+                    seq = "invalid",
+                    type = "response",
+                    request_seq = sequence,
+                    command = "setVariable",
+                    success = true,
+                    body = new { value = privatePayload }
+                }, cancellationToken);
+                return;
+            case "fixture:missing-seq":
+                await WriteMessageAsync(new
+                {
+                    type = "response",
+                    request_seq = sequence,
+                    command = "setVariable",
+                    success = true,
+                    body = new { value = privatePayload }
+                }, cancellationToken);
+                return;
+            case "fixture:oversized":
+                await WriteResponseAsync(sequence, "setVariable", new { value = new string('x', 1_000_000) }, cancellationToken);
+                return;
+            case "fixture:wrong-command":
+                await WriteResponseAsync(sequence, "variables", new { value = privatePayload }, cancellationToken);
+                return;
+            case "fixture:timeout":
+                return;
+            case "fixture:hold-invalidated":
+                await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                goto case "fixture:hold";
+            case "fixture:hold":
+                await RecordAsync(new { kind = "set-variable-response-gated", sequence }, cancellationToken);
+                _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "setVariable",
+                    new { value = "updated", type = "tuple", variablesReference = 1002 }, _lifecycleEventsCancellation.Token);
+                return;
+            case "fixture:optional":
+                await WriteResponseAsync(sequence, "setVariable", new { value = "untyped" }, cancellationToken);
+                return;
+            default:
+                await WriteResponseAsync(sequence, "setVariable", new { value = "updated", type = "tuple", variablesReference = 1002 }, cancellationToken);
+                return;
+        }
+    }
+
     private async Task HandleInspectionRequestAsync(int sequence, string command, JsonElement root, CancellationToken cancellationToken)
     {
         const string privatePayload = "private controlled inspection payload";
@@ -1792,6 +2920,37 @@ internal sealed class ControlledDapAdapter
                     new { name = "tupleVar", value = "(\"test\", 123)", variablesReference = 1002, evaluateName = "private tuple expression" },
                     new { name = "longValue", value = new string('v', 16_385), variablesReference = 0 },
                 ];
+        if (command == "variables" && root.GetProperty("arguments").GetProperty("variablesReference").GetInt32() == 1010)
+            entries = [new { name = "self", value = "cycle", type = "Node", variablesReference = 1010 }];
+        if (command == "variables" && mode == "paging")
+        {
+            var arguments = root.GetProperty("arguments");
+            object[] named = [
+                new { name = "Title", value = "fixture", variablesReference = 0 },
+                new { name = "Count", value = "4", variablesReference = 0 },
+            ];
+            object[] indexed = Enumerable.Range(0, 4)
+                .Select(static index => (object)new { name = $"[{index}]", value = index.ToString(CultureInfo.InvariantCulture), variablesReference = 0 }).ToArray();
+            entries = [.. named, .. indexed];
+            var start = arguments.TryGetProperty("start", out var startElement) ? startElement.GetInt32() : 0;
+            var count = arguments.TryGetProperty("count", out var countElement) ? countElement.GetInt32() : 0;
+            entries = count == 0 ? entries.Skip(start).ToArray() : entries.Skip(start).Take(count).ToArray();
+        }
+
+        if (command == "variables" && mode == "large-context")
+        {
+            entries = [new { name = "largeValue", value = new string('v', 150_000), variablesReference = 0 }];
+        }
+        const string contextSizePrefix = "context-escaped:";
+        if (command == "variables" && mode.StartsWith(contextSizePrefix, StringComparison.Ordinal)
+            && int.TryParse(mode.AsSpan(contextSizePrefix.Length), out var escapedBytes) && escapedBytes is >= 0 and <= 262_145)
+        {
+            const string sample = "v\"😀\n";
+            var sampleBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(sample)) - 2;
+            entries = [new { name = "boundary", value = string.Concat(Enumerable.Repeat(sample, escapedBytes / sampleBytes)) + new string('v', escapedBytes % sampleBytes), variablesReference = 0 }];
+            mode = "success";
+        }
+
         if (mode == "refused")
         {
             await WriteResponseAsync(sequence, command, new { message = privatePayload }, cancellationToken, success: false);
@@ -1802,16 +2961,19 @@ internal sealed class ControlledDapAdapter
         {
             entries = [entries[0], new { name = privatePayload, value = privatePayload, variablesReference = "not-an-integer" }];
         }
-        else if (mode is not ("success" or "hold-then-invalidated"))
+        else if (mode is not ("success" or "paging" or "hold" or "hold-then-invalidated" or "large-context"))
         {
             throw new InvalidOperationException($"Unknown inspection response mode '{mode}'.");
         }
 
         var body = new Dictionary<string, object?> { [command] = entries };
-        if (mode == "hold-then-invalidated" && !_inspectionResponseHeld)
+        if ((mode is "hold" or "hold-then-invalidated") && !_inspectionResponseHeld)
         {
             _inspectionResponseHeld = true;
-            await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+            if (mode == "hold-then-invalidated")
+            {
+                await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+            }
             await RecordAsync(new { kind = "inspection-response-gated", command }, cancellationToken);
             _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, body, _lifecycleEventsCancellation.Token);
             return;
@@ -1824,12 +2986,26 @@ internal sealed class ControlledDapAdapter
     {
         await WaitForStackTraceResponseReleaseAsync(cancellationToken);
         await WriteResponseAsync(sequence, command, body, cancellationToken);
+        if (command == "evaluate") await RecordAsync(new { kind = "evaluate-response-written", sequence }, cancellationToken);
     }
 
     private async Task<bool> HandleStackTraceRequestAsync(int sequence, CancellationToken cancellationToken)
     {
         switch (_options.StackTraceResponseMode)
         {
+            case "legacy-breakpoint-frame":
+                var breakpointSource = Environment.GetEnvironmentVariable("CONTROLLED_DAP_BREAKPOINT_SOURCE")
+                    ?? throw new InvalidOperationException("CONTROLLED_DAP_BREAKPOINT_SOURCE is required.");
+                var breakpointFrames = StackFrames(1, "frame", breakpointSource);
+                breakpointFrames[0]["line"] = 2;
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = breakpointFrames }, cancellationToken);
+                if (_options.LifecycleMode == "all-stop-threads-release-breakpoint-restop")
+                {
+                    var ordinal = ++_legacyBreakpointFrameRequests;
+                    if (ordinal <= 2)
+                        await RecordAsync(new { kind = ordinal == 1 ? "first-breakpoint-frame-response" : "second-breakpoint-frame-response", sequence }, cancellationToken);
+                }
+                return false;
             case "success":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame") }, cancellationToken);
                 return false;
@@ -2043,7 +3219,7 @@ internal sealed class ControlledDapAdapter
         {
             await WriteMessageAsync(new
             {
-                seq = _outgoingSequence++,
+                seq = Interlocked.Increment(ref _outgoingSequence) - 1,
                 type = "response",
                 request_seq = requestSequence,
                 success,
@@ -2054,7 +3230,7 @@ internal sealed class ControlledDapAdapter
 
         await WriteMessageAsync(new
         {
-            seq = _outgoingSequence++,
+            seq = Interlocked.Increment(ref _outgoingSequence) - 1,
             type = "response",
             request_seq = requestSequence,
             success,
@@ -2062,25 +3238,25 @@ internal sealed class ControlledDapAdapter
             body,
         }, cancellationToken);
     }
-    private Task WriteMalformedNextSuccessResponseAsync(int requestSequence, CancellationToken cancellationToken) =>
+    private Task WriteMalformedNextSuccessResponseAsync(int requestSequence, CancellationToken cancellationToken, string command = "next") =>
         WriteMessageAsync(new
         {
             seq = _outgoingSequence++,
             type = "response",
             request_seq = requestSequence,
             success = "true",
-            command = "next",
+            command,
             body = (object?)null,
         }, cancellationToken);
 
-    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken)
+    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken, string command = "next")
     {
         var response = new Dictionary<string, object?>
         {
             ["type"] = "response",
             ["request_seq"] = requestSequence,
             ["success"] = true,
-            ["command"] = "next",
+            ["command"] = command,
             ["body"] = new { message = "controlled private next acknowledgement" },
         };
         _outgoingSequence++;
@@ -2175,7 +3351,7 @@ internal sealed class ControlledDapAdapter
     {
         await WriteMessageAsync(new
         {
-            seq = _outgoingSequence++,
+            seq = Interlocked.Increment(ref _outgoingSequence) - 1,
             type = "event",
             @event = eventName,
             body,
@@ -2206,6 +3382,22 @@ internal sealed class ControlledDapAdapter
             await _output.WriteAsync(header, cancellationToken);
             await _output.WriteAsync(payload, cancellationToken);
             await _output.FlushAsync(cancellationToken);
+            if (_recordPauseWire)
+            {
+                using var message = JsonDocument.Parse(payload);
+                var root = message.RootElement;
+                var isResponse = root.GetProperty("type").GetString() == "response";
+                var sequenceProperty = isResponse ? "request_seq" : "seq";
+                int? sequence = root.TryGetProperty(sequenceProperty, out var sequenceElement)
+                    && sequenceElement.TryGetInt32(out var parsedSequence) ? parsedSequence : null;
+                await RecordAsync(new
+                {
+                    kind = isResponse ? "response" : "wire-event",
+                    sequence,
+                    command = isResponse ? root.GetProperty("command").GetString() : null,
+                    rawPayload = BodyEncoding.GetString(payload),
+                }, cancellationToken);
+            }
         }
         finally
         {

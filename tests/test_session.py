@@ -866,6 +866,42 @@ class TestSessionManagerTransportFences:
         assert manager.state.state is DebugState.STOPPED
 
     @pytest.mark.asyncio
+    async def test_attached_stop_terminal_notifies_state_subscribers(self):
+        from netcoredbg_mcp.resource_updates import STATE_URI
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        client = MagicMock(is_running=True, adapter_owner=None)
+        generation = object()
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._debuggee_mode = (generation, "attach")
+        delivered = asyncio.Event()
+        snapshots = []
+
+        async def notify(uris):
+            if STATE_URI in uris:
+                snapshots.append(manager.state.to_dict())
+                delivered.set()
+
+        async def disconnect(*, terminate):
+            assert terminate is False
+            manager._on_transport_terminal(client, _natural_exit_terminal(generation))
+            raise RuntimeError("disconnect lost")
+
+        manager.set_resource_update_callback(notify)
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        try:
+            with pytest.raises(RuntimeError, match="CLR detach unconfirmed"):
+                await manager.stop()
+            await asyncio.wait_for(delivered.wait(), timeout=1.0)
+            assert snapshots[-1]["executionOutcomeUnknown"] is True
+            assert snapshots[-1]["transportTerminal"]["stdoutEof"] is True
+        finally:
+            await manager.close_resource_update_notifications()
+
+    @pytest.mark.usefixtures("synthetic_attach_target")
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("operation", ("launch", "attach"))
     async def test_launch_and_attach_reject_a_terminal_current_generation(self, operation: str):
         """Launch and attach must not restore RUNNING after their adapter terminalizes."""
@@ -882,6 +918,7 @@ class TestSessionManagerTransportFences:
         manager._sync_all_breakpoints = AsyncMock()
         manager.check_dbgshim_compatibility = MagicMock(return_value=None)
         client.set_exception_breakpoints = AsyncMock()
+        client.prepare_attach_safe = AsyncMock()
 
         async def configuration_done() -> DAPResponse:
             manager._on_transport_terminal(client, _natural_exit_terminal(generation))
@@ -902,9 +939,11 @@ class TestSessionManagerTransportFences:
             )
             with pytest.raises(RuntimeError, match=f"netcoredbg terminated during {operation}"):
                 await manager.attach(process_id=1234)
+            client.prepare_attach_safe.assert_awaited_once_with(generation)
 
         assert manager.state.state is DebugState.TERMINATED
 
+    @pytest.mark.usefixtures("synthetic_attach_target")
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation", ("launch", "attach"))
     async def test_launch_and_attach_reject_negative_configuration_done(self, operation: str):
@@ -921,6 +960,7 @@ class TestSessionManagerTransportFences:
         client.stop = AsyncMock()
         client.disconnect = AsyncMock()
         client.set_exception_breakpoints = AsyncMock()
+        client.prepare_attach_safe = AsyncMock()
         client.launch = AsyncMock(
             return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
         )
@@ -956,6 +996,8 @@ class TestSessionManagerTransportFences:
 
             assert native_error in str(failure.value)
             client.configuration_done.assert_awaited_once_with()
+            if operation == "attach":
+                client.prepare_attach_safe.assert_awaited_once_with(generation)
             assert manager.state.state is DebugState.INITIALIZING
             assert manager._client is client
             assert manager._active_dap_run is generation
@@ -968,6 +1010,7 @@ class TestSessionManagerTransportFences:
         finally:
             await manager.close_resource_update_notifications()
 
+    @pytest.mark.usefixtures("synthetic_attach_target")
     @pytest.mark.asyncio
     async def test_attach_serializes_start_and_completion_against_prebuild(self, tmp_path):
         """Pre-build cannot interleave after attach starts its adapter generation."""
@@ -997,6 +1040,7 @@ class TestSessionManagerTransportFences:
         client.start = AsyncMock(side_effect=start)
         client.initialize = AsyncMock(side_effect=initialize)
         client.set_exception_breakpoints = AsyncMock()
+        client.prepare_attach_safe = AsyncMock()
         client.attach = AsyncMock(
             return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
         )
@@ -1020,12 +1064,16 @@ class TestSessionManagerTransportFences:
             prebuild.assert_not_awaited()
         finally:
             release_sync.set()
-            await asyncio.wait_for(attach_task, timeout=1.0)
+            attached = await asyncio.wait_for(attach_task, timeout=1.0)
+            assert attached == {"success": True, "processId": 1234}
             if prebuild_task is not None:
-                await asyncio.wait_for(prebuild_task, timeout=1.0)
+                with pytest.raises(RuntimeError, match="CLR detach is unconfirmed"):
+                    await asyncio.wait_for(prebuild_task, timeout=1.0)
 
         client.start.assert_awaited_once_with(generation=1)
         client.attach.assert_awaited_once_with(1234, just_my_code=False)
+        client.prepare_attach_safe.assert_awaited_once_with(1)
+        prebuild.assert_not_awaited()
 
 
 class TestBreakpointOperations:
@@ -1472,6 +1520,21 @@ class TestInspection:
 
 class TestExecutionControl:
     """Tests for execution control operations."""
+
+    @pytest.mark.asyncio
+    async def test_exit_snapshot_does_not_report_running_before_transport_finalizes(
+        self,
+    ):
+        manager = SessionManager(netcoredbg_path="/path")
+        manager._state.state = DebugState.RUNNING
+        manager._on_exited(DAPEvent(seq=1, event="exited", body={"exitCode": 0}))
+
+        snapshot = await manager.wait_for_stopped(timeout=1)
+
+        assert snapshot.state == DebugState.TERMINATED
+        assert snapshot.exit_code == 0
+        assert snapshot.process_alive is False
+        assert manager.state.state == DebugState.RUNNING
 
     @pytest.mark.asyncio
     async def test_continue_execution(self):

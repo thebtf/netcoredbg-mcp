@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -118,17 +119,28 @@ class Breakpoint:
     log_message: str | None = None
     verified: bool = False
     id: int | None = None
-    dap_line: int | None = None  # Adjusted line from DAP if different from requested `line`
+    dap_line: int | None = (
+        None  # Adjusted line from DAP if different from requested `line`
+    )
+    user_owned: bool = True
+    tracepoint_owners: set[str] = field(default_factory=set)
+    group_owners: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
     def to_dap(self) -> dict[str, Any]:
         """Convert to DAP breakpoint format."""
         bp: dict[str, Any] = {"line": self.line}
-        if self.condition:
-            bp["condition"] = self.condition
-        if self.hit_condition:
-            bp["hitCondition"] = self.hit_condition
-        if self.log_message:
-            bp["logMessage"] = self.log_message
+        if not self.tracepoint_owners:
+            intents = list(self.group_owners.values())
+            if self.user_owned:
+                intents.append((self.condition, self.hit_condition))
+            if intents and all(intent == intents[0] for intent in intents):
+                condition, hit_condition = intents[0]
+                if condition:
+                    bp["condition"] = condition
+                if hit_condition:
+                    bp["hitCondition"] = hit_condition
+            if self.log_message and self.user_owned and not self.group_owners:
+                bp["logMessage"] = self.log_message
         return bp
 
 
@@ -158,57 +170,95 @@ class BreakpointRegistry:
         self._breakpoints: dict[str, list[Breakpoint]] = {}  # file -> breakpoints
         self._function_breakpoints: list[FunctionBreakpoint] = []
 
-    def add(self, breakpoint: Breakpoint) -> None:
-        """Add a breakpoint."""
+    def add(
+        self, breakpoint: Breakpoint, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
+    ) -> Breakpoint:
+        """Add one owner and return its shared physical breakpoint."""
         file_path = self._normalize_path(breakpoint.file)
-        if file_path not in self._breakpoints:
-            self._breakpoints[file_path] = []
+        breakpoints = self._breakpoints.setdefault(file_path, [])
+        for existing in breakpoints:
+            if existing.line == breakpoint.line:
+                if tracepoint_id is not None:
+                    existing.tracepoint_owners.add(tracepoint_id)
+                elif group_id is not None:
+                    existing.group_owners[group_id] = (
+                        breakpoint.condition, breakpoint.hit_condition
+                    )
+                else:
+                    existing.user_owned = True
+                    existing.condition = breakpoint.condition
+                    existing.hit_condition = breakpoint.hit_condition
+                    existing.log_message = breakpoint.log_message
+                return existing
 
-        # Check for duplicate (immutable update — replace with new object)
-        for i, bp in enumerate(self._breakpoints[file_path]):
-            if bp.line == breakpoint.line:
-                self._breakpoints[file_path][i] = Breakpoint(
-                    file=bp.file,
-                    line=bp.line,
-                    condition=breakpoint.condition,
-                    hit_condition=breakpoint.hit_condition,
-                    log_message=breakpoint.log_message,
-                    verified=bp.verified,
-                    id=bp.id,
-                )
-                return
+        breakpoint.user_owned = tracepoint_id is None and group_id is None
+        if tracepoint_id is not None:
+            breakpoint.tracepoint_owners.add(tracepoint_id)
+        elif group_id is not None:
+            breakpoint.group_owners[group_id] = (breakpoint.condition, breakpoint.hit_condition)
+            breakpoint.condition = None
+            breakpoint.hit_condition = None
+        breakpoints.append(breakpoint)
+        return breakpoint
 
-        self._breakpoints[file_path].append(breakpoint)
-
-    def remove(self, file: str, line: int) -> bool:
-        """Remove a breakpoint. Returns True if found."""
+    def remove(
+        self, file: str, line: int, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
+    ) -> bool:
+        """Remove one owner without removing any other owner at the location."""
         file_path = self._normalize_path(file)
-        if file_path not in self._breakpoints:
-            return False
-
-        original_count = len(self._breakpoints[file_path])
-        self._breakpoints[file_path] = [
-            bp for bp in self._breakpoints[file_path] if bp.line != line
-        ]
-
-        if not self._breakpoints[file_path]:
-            del self._breakpoints[file_path]
-
-        return len(self._breakpoints.get(file_path, [])) < original_count
+        breakpoints = self._breakpoints.get(file_path, [])
+        for bp in breakpoints:
+            if bp.line != line:
+                continue
+            if tracepoint_id is not None:
+                if tracepoint_id not in bp.tracepoint_owners:
+                    return False
+                bp.tracepoint_owners.remove(tracepoint_id)
+            elif group_id is not None:
+                if group_id not in bp.group_owners:
+                    return False
+                del bp.group_owners[group_id]
+            else:
+                if not bp.user_owned:
+                    return False
+                bp.user_owned = False
+                bp.condition = None
+                bp.hit_condition = None
+                bp.log_message = None
+            if not bp.user_owned and not bp.tracepoint_owners and not bp.group_owners:
+                breakpoints.remove(bp)
+                if not breakpoints:
+                    del self._breakpoints[file_path]
+            return True
+        return False
 
     def clear(self, file: str | None = None) -> int:
-        """Clear breakpoints. Returns count removed."""
-        if file:
-            file_path = self._normalize_path(file)
-            if file_path in self._breakpoints:
-                count = len(self._breakpoints[file_path])
-                del self._breakpoints[file_path]
-                return count
-            return 0
+        """Clear user-owned breakpoints while preserving tracepoint owners."""
+        files = [self._normalize_path(file)] if file else list(self._breakpoints)
+        count = 0
+        for file_path in files:
+            for bp in list(self._breakpoints.get(file_path, [])):
+                if bp.user_owned and self.remove(file_path, bp.line):
+                    count += 1
+        return count
+
+    def snapshot_for_file(self, file: str) -> list[Breakpoint]:
+        """Capture intent and adapter observations for rollback after an unconfirmed sync."""
+        return [
+            replace(bp, tracepoint_owners=set(bp.tracepoint_owners),
+                    group_owners=dict(bp.group_owners))
+            for bp in self.get_for_file(file)
+        ]
+
+    def restore_for_file(self, file: str, snapshot: list[Breakpoint]) -> None:
+        """Restore the pre-operation intent without issuing another DAP request."""
+        file_path = self._normalize_path(file)
+        if snapshot:
+            self._breakpoints[file_path] = snapshot
         else:
-            count = sum(len(bps) for bps in self._breakpoints.values())
-            self._breakpoints.clear()
-            return count
+            self._breakpoints.pop(file_path, None)
 
     def get_for_file(self, file: str) -> list[Breakpoint]:
         """Get breakpoints for a file."""
@@ -461,9 +511,10 @@ class StoppedSnapshot:
     timed_out: bool = False
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
-    process_alive: bool = True
+    process_alive: bool | None = True
     description: str | None = None
     text: str | None = None
+    outcome_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -561,6 +612,19 @@ class SessionState:
     last_invalidation: InvalidatedEventBody | None = None
     last_memory_event: MemoryEventBody | None = None
     transport_terminal: TransportTerminalSummary | None = None
+    execution_outcome_unknown: bool = False
+    unconfirmed_attach_pids: list[int] = field(default_factory=list)
+    unconfirmed_attach_omitted: int = 0
+    _enc_apply_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
+    _enc_attempted_modules: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _enc_execution_pending: dict[object, bool] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _enc_execution_unknown: bool = field(default=False, init=False, repr=False, compare=False)
     activity_epoch: object = field(
         default_factory=object,
         init=False,
@@ -615,6 +679,27 @@ class SessionState:
                 self.last_memory_event.to_dict() if self.last_memory_event else None
             ),
         }
+        if self.execution_outcome_unknown:
+            payload.update({
+                "state": "unknown",
+                "execState": "unknown",
+                "currentThreadId": None,
+                "stopReason": None,
+                "currentFrameId": None,
+                "debuggeeAlive": None,
+                "executionOutcomeUnknown": True,
+            })
         if self.transport_terminal is not None:
             payload["transportTerminal"] = self.transport_terminal.to_dict()
+        if self.unconfirmed_attach_pids or self.unconfirmed_attach_omitted:
+            payload["unconfirmedAttaches"] = [
+                {
+                    "requestedPid": pid,
+                    "pidIsProcessIdentity": False,
+                    "detachStatus": "unconfirmed",
+                    "targetSurvival": "unknown",
+                }
+                for pid in self.unconfirmed_attach_pids
+            ]
+            payload["unconfirmedAttachesOmitted"] = self.unconfirmed_attach_omitted
         return payload

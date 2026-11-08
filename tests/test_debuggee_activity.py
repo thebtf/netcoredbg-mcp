@@ -109,6 +109,24 @@ def register_activity_fastmcp(
 
 
 @pytest.mark.asyncio
+async def test_unknown_tracepoint_continue_is_exposed_and_activity_is_refused() -> None:
+    manager = make_manager()
+    manager.state.state = DebugState.RUNNING
+    manager.state.execution_outcome_unknown = True
+    manager.state.process_id = 123
+    registry, _ = register_activity_tool(manager)
+
+    state = await registry.tools["get_debug_state"]()
+    activity = await registry.tools["debuggee_activity"](None, window_ms=1)
+
+    assert state["state"] == "unknown"
+    assert state["data"]["execState"] == "unknown"
+    assert state["data"]["debuggeeAlive"] is None
+    assert activity["state"] == "unknown"
+    assert "error" in activity
+
+
+@pytest.mark.asyncio
 async def test_event_handlers_register_once_across_stop_start_cycle() -> None:
     manager = make_manager()
     manager._client = DAPClient("netcoredbg")
@@ -206,7 +224,7 @@ async def test_transparent_tracepoint_stop_is_counted_before_filtering() -> None
     await asyncio.sleep(0)
 
     assert manager.activity_snapshot().stopped_events == 1
-    manager._check_tracepoint.assert_awaited_once_with(7)  # type: ignore[attr-defined]
+    assert manager.activity_snapshot().state == DebugState.RUNNING
 
 
 def test_output_sequence_survives_buffer_trimming() -> None:
@@ -461,6 +479,7 @@ async def test_debuggee_activity_rejects_lifecycle_replacement(
     assert "data" not in result
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["launch", "attach"])
 async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
@@ -474,6 +493,7 @@ async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
     manager._enable_hot_reload_if_supported = AsyncMock()  # type: ignore[method-assign]
     manager._sync_all_breakpoints = AsyncMock()  # type: ignore[method-assign]
     manager._client.set_exception_breakpoints = AsyncMock()
+    manager._client.prepare_attach_safe = AsyncMock()
     manager._client.launch = AsyncMock(return_value=SimpleNamespace(success=True))
     manager._client.attach = AsyncMock(return_value=SimpleNamespace(success=True))
     manager._client.configuration_done = AsyncMock(return_value=SimpleNamespace(success=True))
@@ -496,6 +516,8 @@ async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
     result = await registry.tools["debuggee_activity"](SimpleNamespace(), window_ms=1)
 
     assert result["error"] == "debug session changed during activity window"
+    if route == "attach":
+        manager._client.prepare_attach_safe.assert_awaited_once()
     assert "data" not in result
 
 

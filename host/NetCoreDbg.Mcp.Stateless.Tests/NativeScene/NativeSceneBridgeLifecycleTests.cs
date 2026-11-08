@@ -303,6 +303,83 @@ public sealed class NativeSceneBridgeLifecycleTests
         Assert.Equal(1, observer.RequestsObserved);
     }
 
+    [Fact]
+    public async Task UiObservation_DisposeWithUnconfirmedOwnedHelperDrain_ReportsFailureRetainsOwnerAndAllowsRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        const BindingFlags members = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+                Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless"));
+        var sessionType = assembly.GetType("NetCoreDbg.Mcp.Stateless.NativeUi.NativeUiInvokeSession", throwOnError: true)!;
+        var identityType = assembly.GetType("NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneTargetIdentity", throwOnError: true)!;
+        var constructor = sessionType.GetConstructor(members, binder: null, types: [typeof(Func<Task, Task>)], modifiers: null)!;
+        var observe = sessionType.GetMethod("ObserveAsync", members)!;
+        var retainedLaunchField = sessionType.GetField("_pendingCleanup", members)!;
+        var retainedDrainField = sessionType.GetField("_pendingDrains", members)!;
+        var adapter = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+        Assert.Empty(adapter.Arguments);
+        var target = Activator.CreateInstance(identityType, members, binder: null,
+            args: [1, "controlled-target", adapter.Command, new string('0', 64), null, null], culture: null)!;
+        var drainReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDrain = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancel = new CancellationTokenSource();
+        async Task HoldDrain(Task drained)
+        {
+            Assert.True(drained.IsCompletedSuccessfully);
+            drainReached.TrySetResult(true);
+            await releaseDrain.Task;
+        }
+
+        var owner = Assert.IsAssignableFrom<IAsyncDisposable>(constructor.Invoke([(Func<Task, Task>)HoldDrain]));
+        Task<JsonObject>? pending = null;
+        try
+        {
+            pending = Assert.IsAssignableFrom<Task<JsonObject>>(observe.Invoke(owner,
+            [adapter.Command, target, 1L, 1, 1, (Func<bool>)(() => { cancel.Cancel(); return true; }), cancel.Token]));
+            await drainReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var result = await pending.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Equal("UI_DISCOVERY_CLEANUP_UNCONFIRMED", Text(result["code"]));
+
+            var retained = retainedLaunchField.GetValue(owner);
+            Assert.NotNull(retained);
+            var process = Assert.IsType<System.Diagnostics.Process>(retained.GetType().GetProperty("Process", members)!.GetValue(retained));
+            var handle = process.SafeHandle;
+            var drains = Assert.IsAssignableFrom<Task>(retainedDrainField.GetValue(owner));
+            Assert.True(process.HasExited);
+            Assert.False(handle.IsClosed);
+            Assert.False(drains.IsCompleted);
+
+            var authorizations = 0;
+            var blocked = Assert.IsAssignableFrom<Task<JsonObject>>(observe.Invoke(owner,
+            [adapter.Command, target, 1L, 1, 1, (Func<bool>)(() => { authorizations++; return true; }), CancellationToken.None]));
+            Assert.Equal("UI_DISCOVERY_CLEANUP_UNCONFIRMED", Text((await blocked.WaitAsync(TimeSpan.FromSeconds(5)))["code"]));
+            Assert.Equal(0, authorizations);
+            Assert.Same(retained, retainedLaunchField.GetValue(owner));
+
+            await Assert.ThrowsAnyAsync<Exception>(async () => await owner.DisposeAsync().AsTask());
+            Assert.Same(retained, retainedLaunchField.GetValue(owner));
+            Assert.Same(drains, retainedDrainField.GetValue(owner));
+            Assert.False(handle.IsClosed);
+
+            releaseDrain.TrySetResult(true);
+            await drains.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(retainedLaunchField.GetValue(owner));
+            Assert.True(handle.IsClosed);
+        }
+        finally
+        {
+            releaseDrain.TrySetResult(true);
+            if (pending is not null)
+                await pending.WaitAsync(TimeSpan.FromSeconds(15));
+            if (retainedDrainField.GetValue(owner) is Task cleanupDrain)
+                await cleanupDrain.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
     private static JsonObject Request(string operation) => new()
     {
         ["operation"] = operation,

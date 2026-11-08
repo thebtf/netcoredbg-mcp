@@ -9,6 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests import test_ui_foreground_reporting
+from tests.test_ui_foreground_reporting import TARGET_HWND
+
+foreground_case = test_ui_foreground_reporting.foreground_case
+
 Image = pytest.importorskip("PIL.Image")
 
 
@@ -335,54 +340,22 @@ async def test_black_annotated_capture_invalidates_cached_click_targets(
 
 
 @pytest.mark.asyncio
-async def test_ui_bring_to_front_supports_pywinauto_fallback(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    from netcoredbg_mcp.session.manager import DebugState
-    from netcoredbg_mcp.tools.ui import register_ui_tools
-    from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+async def test_ui_bring_to_front_supports_pywinauto_fallback(foreground_case) -> None:
+    case = foreground_case
 
-    backend = PywinautoBackend.__new__(PywinautoBackend)
-    backend._ui = SimpleNamespace(process_id=42)
-    show_calls: list[tuple[int, int]] = []
-    restore_calls: list[int] = []
-    monkeypatch.setattr(
-        "netcoredbg_mcp.ui.backend.create_backend",
-        lambda *_args, **_kwargs: backend,
-    )
-    monkeypatch.setattr(
-        "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
-        lambda _pid: 123,
-    )
-    monkeypatch.setattr(
-        "netcoredbg_mcp.ui.foreground.restore_foreground_window",
-        lambda hwnd: restore_calls.append(hwnd) is None or True,
-    )
-    monkeypatch.setattr(
-        ctypes.windll,
-        "user32",
-        SimpleNamespace(
-            ShowWindow=lambda hwnd, command: show_calls.append((hwnd, command)) is None or True
-        ),
-    )
-    session = SimpleNamespace(
-        process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
-        stealth_mode=True,
-        session_id=None,
-    )
-    register_ui_tools(capturing_mcp, session, check_session_access=lambda _ctx: None)
+    result = await case.invoke("fallback")
 
-    response = await capturing_mcp.tools["ui_bring_to_front"](SimpleNamespace())
-
-    assert "error" not in response
-    assert response["data"]["activated"] is True
-    assert response["data"]["hwnd"] == 123
-    assert response["data"]["stealth_mode"] is False
-    assert session.stealth_mode is False
-    assert show_calls == [(123, 9)]
-    assert restore_calls == [123]
+    assert result["activated"] is True
+    assert result["hwnd"] == TARGET_HWND
+    assert result["activation_requested"] is True
+    assert result["activation_attempted"] is True
+    assert result["activation_api_result"] is True
+    assert result["foreground"] == {"hwnd": TARGET_HWND, "pid": 42}
+    assert result["foreground_matches_target"] is True
+    assert result["stealth_mode"] is False
+    assert case.session.stealth_mode is False
+    case.desktop.user32.ShowWindow.assert_called_once_with(TARGET_HWND, 9)
+    case.desktop.user32.SetForegroundWindow.assert_called_once_with(TARGET_HWND)
 
 
 @pytest.mark.parametrize(

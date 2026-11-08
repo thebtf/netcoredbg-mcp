@@ -181,6 +181,99 @@ public sealed class SessionSlotContractTests
         Assert.Equal(1, removeCalls);
     }
 
+    [Fact]
+    public async Task SessionSlot_LaunchedCleanupRetry_DoesNotRepeatStopOrRemovalAndKeepsAdmissionClosed()
+    {
+        await AssertCleanupRetryAsync(attached: false);
+    }
+
+    [Fact]
+    public async Task SessionSlot_AttachedCleanupRetry_DoesNotRepeatSuccessfulDrainAndKeepsAdmissionClosed()
+    {
+        await AssertCleanupRetryAsync(attached: true);
+    }
+
+    private static async Task AssertCleanupRetryAsync(bool attached)
+    {
+        var registryType = ProductionAssembly().GetType(RegistryTypeName, throwOnError: false);
+        var slotType = Assert.IsAssignableFrom<Type>(Assert.IsAssignableFrom<Type>(registryType)
+            .GetNestedType("SessionSlot", BindingFlags.NonPublic));
+        var stopCalls = 0;
+        var drainCalls = 0;
+        var disposeCalls = 0;
+        var removeCalls = 0;
+        var retryCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Func<CancellationToken, Task> stop = _ =>
+        {
+            stopCalls++;
+            return Task.CompletedTask;
+        };
+        Func<Task> attachDrain = () =>
+        {
+            drainCalls++;
+            return Task.CompletedTask;
+        };
+        Func<ValueTask> dispose = () =>
+        {
+            disposeCalls++;
+            return disposeCalls == 1
+                ? ValueTask.FromException(new InvalidOperationException("controlled cleanup fault"))
+                : new ValueTask(retryCompletion.Task);
+        };
+        Action remove = () => removeCalls++;
+        var constructor = Assert.Single(slotType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic), candidate =>
+        {
+            var parameters = candidate.GetParameters();
+            return parameters.Any(static parameter => parameter.ParameterType == typeof(Func<CancellationToken, Task>)) &&
+                parameters.Any(static parameter => parameter.ParameterType == typeof(Func<ValueTask>)) &&
+                parameters.Any(static parameter => parameter.ParameterType == typeof(Action));
+        });
+        var slot = constructor.Invoke(constructor.GetParameters().Select(parameter =>
+            attached && parameter.ParameterType == typeof(Func<Task>)
+                ? attachDrain
+                : ConstructorArgument(parameter, stop, dispose, remove)).ToArray());
+        var methods = slotType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        var acquire = Assert.Single(methods, static method => method.Name == "TryAcquire");
+        var close = Assert.Single(methods, static method => method.Name == "CloseAndDrainAsync");
+        var lease = Invoke(acquire, slot, stop, dispose, remove);
+        Assert.NotNull(lease);
+        await ReleaseLeaseAsync(lease!);
+
+        var firstClose = Assert.IsAssignableFrom<Task>(Invoke(close, slot, stop, dispose, remove));
+        await Assert.ThrowsAnyAsync<InvalidOperationException>(() => firstClose);
+        Assert.Null(Invoke(acquire, slot, stop, dispose, remove));
+        Assert.Equal(attached ? 0 : 1, stopCalls);
+        Assert.Equal(attached ? 1 : 0, drainCalls);
+        Assert.Equal(1, disposeCalls);
+        Assert.Equal(attached ? 0 : 1, removeCalls);
+
+        try
+        {
+            var retry = Assert.IsAssignableFrom<Task>(Invoke(close, slot, stop, dispose, remove));
+            var joinedRetry = Assert.IsAssignableFrom<Task>(Invoke(close, slot, stop, dispose, remove));
+            Assert.Same(retry, joinedRetry);
+            Assert.False(retry.IsCompleted);
+            Assert.Null(Invoke(acquire, slot, stop, dispose, remove));
+            Assert.Equal(attached ? 0 : 1, stopCalls);
+            Assert.Equal(attached ? 1 : 0, drainCalls);
+            Assert.Equal(2, disposeCalls);
+            Assert.Equal(attached ? 0 : 1, removeCalls);
+
+            retryCompletion.SetResult(true);
+            await retry.WaitAsync(TimeSpan.FromSeconds(2));
+            await joinedRetry.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Null(Invoke(acquire, slot, stop, dispose, remove));
+            Assert.Equal(attached ? 0 : 1, stopCalls);
+            Assert.Equal(attached ? 1 : 0, drainCalls);
+            Assert.Equal(2, disposeCalls);
+            Assert.Equal(1, removeCalls);
+        }
+        finally
+        {
+            retryCompletion.TrySetResult(true);
+        }
+    }
+
     private static object? ConstructorArgument(
         ParameterInfo parameter,
         Func<CancellationToken, Task> stop,
@@ -190,6 +283,7 @@ public sealed class SessionSlotContractTests
         var type when type == typeof(Func<CancellationToken, Task>) => stop,
         var type when type == typeof(Func<ValueTask>) => dispose,
         var type when type == typeof(Action) => remove,
+        var type when type == typeof(Func<Task>) && parameter.HasDefaultValue && parameter.DefaultValue is null => null,
         var type when type == typeof(TimeSpan) => TimeSpan.FromMilliseconds(100),
         var type when type == typeof(CancellationToken) => CancellationToken.None,
         var type when type == typeof(string) => "faulting-stop-token",

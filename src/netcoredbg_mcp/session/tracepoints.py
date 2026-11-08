@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .state import TraceEntry, Tracepoint
@@ -408,6 +409,12 @@ class TracepointManager:
                     cursor_drop_generation = int(cursor.get("drop_generation") or 0)
                     return self._trace_drop_generation > cursor_drop_generation
                 return True
+            if (
+                oldest_retained == after_timestamp
+                and isinstance(cursor, dict)
+                and self._trace_drop_generation > int(cursor.get("drop_generation") or 0)
+            ):
+                return True
             retained_boundary_count = sum(
                 1 for entry in retained_entries if entry.timestamp == after_timestamp
             )
@@ -497,7 +504,9 @@ class TracepointManager:
             )
         return True
 
-    def set_dap_line_for_breakpoint(self, breakpoint_id: int, dap_line: int | None) -> None:
+    def set_dap_line_for_breakpoint(
+        self, breakpoint_id: int, dap_line: int | None
+    ) -> None:
         """Propagate DAP line change for a tracepoint-owned breakpoint."""
         for tp in self._tracepoints.values():
             if tp.breakpoint_id == breakpoint_id:
@@ -509,7 +518,6 @@ class TracepointManager:
                         tp.line,
                         dap_line,
                     )
-                return
 
     def _is_rate_limited(self, tp_id: str) -> bool:
         """Check if tracepoint is hitting too frequently."""
@@ -528,7 +536,9 @@ class TracepointManager:
         *,
         has_user_breakpoint: bool = False,
         top_frame: Any | None = None,
-    ) -> None:
+        is_current: Callable[[], bool] | None = None,
+        on_uncertain: Callable[[], None] | None = None,
+    ) -> bool:
         """Handle a tracepoint hit: evaluate expression, optionally resume, log result.
 
         Called from SessionManager._check_tracepoint when a tracepoint is detected.
@@ -543,6 +553,8 @@ class TracepointManager:
             top_frame: Pre-fetched top stack frame (avoids redundant DAP call).
         """
         async with self._lock:
+            if is_current is not None and not is_current():
+                return False
             tp.hit_count += 1
 
             # Rate limiting
@@ -561,49 +573,86 @@ class TracepointManager:
                 if not has_user_breakpoint:
                     try:
                         session.prepare_for_execution()
-                        await session._client.continue_execution(thread_id)
+                        await session._request_execution(
+                            lambda: session._client.continue_execution(thread_id)
+                        )
                     except Exception as e:
-                        logger.warning("Failed to resume after rate-limited tracepoint: %s", e)
-                return
+                        logger.warning(
+                            "Failed to resume after rate-limited tracepoint: %s", e
+                        )
+                return True
 
             # Evaluate with short timeout
             value: str
+            uncertain = False
+            dispatched = False
+
+            def admit_evaluation() -> bool:
+                nonlocal dispatched
+                if is_current is not None and not is_current():
+                    return False
+                dispatched = True
+                return True
+
             try:
                 frame_id = top_frame.id if top_frame else None
                 if frame_id is None:
-                    frames = await session.get_stack_trace(thread_id=thread_id, levels=1)
+                    frames = await session.get_stack_trace(
+                        thread_id=thread_id, levels=1
+                    )
                     frame_id = frames[0].id if frames else None
 
-                response = await asyncio.wait_for(
-                    session._client.evaluate(tp.expression, frame_id),
-                    timeout=EVALUATE_TIMEOUT_SECONDS,
-                )
+                if is_current is None:
+                    dispatched = True
+                    evaluation = session._client.evaluate(tp.expression, frame_id)
+                else:
+                    evaluation = session._client.evaluate(
+                        tp.expression, frame_id, admission=admit_evaluation
+                    )
+                response = await asyncio.wait_for(evaluation, timeout=EVALUATE_TIMEOUT_SECONDS)
                 if response.success:
                     value = response.body.get("result", "")
                 else:
                     value = f"<error: {response.message or 'evaluation failed'}>"
+            except asyncio.CancelledError:
+                if dispatched and on_uncertain is not None:
+                    on_uncertain()
+                raise
             except asyncio.TimeoutError:
                 value = "<timeout>"
+                uncertain = True
             except Exception as e:
                 value = f"<error: {type(e).__name__}>"
-
-            # Log entry
-            self._trace_buffer.append(
-                TraceEntry(
-                    timestamp=time.monotonic(),
-                    file=tp.file,
-                    line=tp.line,
-                    expression=tp.expression,
-                    value=value,
-                    thread_id=thread_id,
-                    tracepoint_id=tp.id,
+                uncertain = True
+            current = is_current is None or is_current()
+            if current:
+                self._trace_buffer.append(
+                    TraceEntry(
+                        timestamp=time.monotonic(),
+                        file=tp.file,
+                        line=tp.line,
+                        expression=tp.expression,
+                        value=value,
+                        thread_id=thread_id,
+                        tracepoint_id=tp.id,
+                    )
                 )
-            )
+            if uncertain:
+                if dispatched and on_uncertain is not None:
+                    on_uncertain()
+                return False
+            if not current:
+                return False
 
             # Resume only if no user breakpoint at this location
-            if not has_user_breakpoint:
+            if not has_user_breakpoint and not uncertain:
                 try:
                     session.prepare_for_execution()
-                    await session._client.continue_execution(thread_id)
+                    await session._request_execution(
+                        lambda: session._client.continue_execution(thread_id)
+                    )
                 except Exception as e:
-                    logger.warning("Failed to resume after tracepoint evaluation: %s", e)
+                    logger.warning(
+                        "Failed to resume after tracepoint evaluation: %s", e
+                    )
+            return not uncertain

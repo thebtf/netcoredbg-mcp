@@ -97,27 +97,25 @@ public sealed class SessionSlotLifecycleTests
     [Fact]
     public async Task GetThreads_UnusableSessionEviction_ReturnsNotFoundWithoutDapIo()
     {
-        // Arrange
-        await using var driver = await ModernMcpProcessDriver.StartAsync(Threads("success"));
-        var debugSessionId = await StartSessionAsync(driver, "slot-unusable-start");
-        var beforeTermination = await driver.ReadNativeActionsAsync();
-        await driver.TerminateControlledAdapterAsync();
+        using var observation = new CancellationTokenSource(DrainDeadline);
+        await using var session = await NetCoreDbgSessionContractDriver.StartAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, ExitAfterLaunchResponse: true),
+            "D:\\fixtures\\program.dll", ObservationTimeout, ObservationTimeout,
+            TimeSpan.FromMilliseconds(300), observation.Token);
+        await session.WaitForReaderCompletionAsync(observation.Token);
+        Assert.False(session.IsUsable);
+        var before = await session.Fixture.ReadTranscriptAsync();
 
-        // Act
-        var response = await driver.CallToolRawAsync(
-            GetThreads,
-            SessionArguments(debugSessionId),
-            Meta(),
-            new RequestId("slot-unusable-threads"));
+        await using var hosted = await session.StartHostedThreadsLeaseAsync(observation.Token);
+        var response = await hosted.Threads.WaitAsync(DrainDeadline);
 
-        // Assert
-        AssertNotFound(AssertApplicationEnvelope(response, isError: true));
-        Assert.Equal(beforeTermination.Count, (await driver.ReadNativeActionsAsync()).Count);
-        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(
-            "get_debug_state",
-            SessionArguments(debugSessionId),
-            Meta(),
-            new RequestId("slot-unusable-state")), isError: true));
+        Assert.Equal("complete", response.ResultType);
+        Assert.True(response.IsError == true);
+        var content = Assert.IsType<JsonElement>(response.StructuredContent);
+        AssertNotFound(Assert.IsType<JsonObject>(JsonNode.Parse(content.GetRawText())));
+        await hosted.AdmissionClosed.WaitAsync(DrainDeadline);
+        Assert.Equal(before.Count, (await session.Fixture.ReadTranscriptAsync()).Count);
+        await hosted.StopAsync(observation.Token);
     }
 
     [Fact]
@@ -144,6 +142,9 @@ public sealed class SessionSlotLifecycleTests
 
         // Assert
         AssertNotFound(AssertApplicationEnvelope(response, isError: true));
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "get_debug_state", SessionArguments(debugSessionId), Meta(),
+            new RequestId("slot-reader-idle-state")), isError: true));
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 

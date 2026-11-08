@@ -1,0 +1,31 @@
+# Native Runtime Inventory
+
+Status: implemented and exercised with a controlled DAP adapter; a real debugger and installed delivery remain pending. This additive source batch starts from `9732184ecf8af20944deacad5e3421def3a287f7`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
+
+## Consumer outcome
+
+A native MCP client can inspect assemblies observed during a debug session and active adapter progress without reading an entire output log. These are session-local snapshots of DAP events actually received by this host, not an operating-system module scan or a claim that the adapter reported every possible module or operation.
+
+## Contract
+
+- Add `get_modules(debugSessionId)` and `get_progress(debugSessionId)` to the existing stateful host. Each accepts only a required nonblank opaque session ID; invalid arguments fail before DAP I/O, and unknown or retired sessions use the existing not-found result. These tools read retained state and send no DAP request.
+- The existing DAP reader owns both inventories, including events received during startup. Serialize updates and snapshots with session-owned synchronization; no global/shared process cache or second event reader is introduced. Snapshots are consistent with one reader-ordered point in the session, not an atomic snapshot of the debuggee.
+- Track `module` events by the DAP module ID, retaining numeric and string IDs distinctly. Match the existing Python event semantics: `new` adds only an unknown ID, `changed` replaces fields only for a known ID, and `removed` removes that ID; unknown changes/removals do not create a module. Preserve insertion order. Return each module's `id`, `name`, nullable `path`, nullable `version`, `isOptimized` (false when omitted), and nullable `symbolStatus`; report `kind: modules_success`, `modules`, and `count`.
+- Advertise the client capability `supportsProgressReporting: true` during DAP initialization, then track `progressStart`, `progressUpdate`, and `progressEnd` by progress ID. A start creates/replaces the active entry; updates change only supplied non-null message/percentage fields for a known ID; end removes the entry. Unknown updates/end events do not create one. Percentages must be finite numbers in the inclusive DAP range 0–100. Return insertion-ordered active entries with `progressId`, `title`, nullable `message`, nullable `percentage`, `cancellable` (false when omitted), and monotonic `startedAt` in seconds; report `kind: progress_success`, `progress`, and `count`. Legacy snake_case aliases and cached-resource notifications are not claimed as parity.
+  Message equality is evaluated on decoded text, so an escaped representation cannot suppress a distinct update.
+- Do not silently present an incomplete inventory as complete. Keep each retained inventory bounded by the existing 16 MiB DAP payload limit; if a malformed relevant event or retention overflow prevents a complete view, return a fixed redacted `runtime_inventory_incomplete` result naming the affected tool and keep the debug session usable. Apply the existing 256 KiB complete serialized inspection-content limit to successful snapshots; if exceeded, return a fixed redacted `runtime_inventory_too_large` result without silently truncating the list. Do not infer unseen module/progress events or retry.
+- Preserve existing session stop, retirement, output retention and default-selection behavior. The native tools are available only while their session registry entry is live; Python's post-termination state and envelope behavior remain separate parity obligations. Do not change Python, the preview channel, UI input or publication state.
+
+## Proof and owners
+
+Extend the existing `NetCoreDbgSession` reader/state owner, `Program.cs` session registry/catalog, `modern-front-door.schema.json`, controlled DAP adapter and existing modern MCP/session tests. First add a test-only public discovery regression for both tools and observe it fail on the base. Then prove event ordering, new/change/remove and start/update/end transitions, duplicate/unknown handling, snapshots across separate sessions, invalid/unknown arguments without DAP writes, bounded/incomplete behavior and unchanged adjacent inspection/output paths. Reuse existing test classes and fixtures; do not create a new verification harness or test suite.
+
+Before product changes, the existing MCP process driver's discovery theory failed both cases (2 failed, 0 passed): neither `get_modules` nor `get_progress` existed in the native catalog. This establishes missing public routes against the controlled process, not installed or real-debugger behavior.
+
+The final controlled inventory selection passed 59/59; the existing module-transition test then passed with an ID-only removal event. A separate schema and progress-boundary selection passed 39/39, and malformed-call plus existing pause input checks passed 26/26. An independent source review identified out-of-range progress percentages; four new cases reproduced the defect before the 0–100 repair, and the repaired selection passed. The review's follow-up found no remaining material defect in that correction. These are source-process results, not installed or real-debugger proof.
+
+An external review identified a decoded-versus-encoded message comparison. The controlled MCP regression first returned a newline instead of the requested literal `\n`; after the repair it passed 1/1, and ten neighboring progress and serialized-size checks passed.
+
+A controlled MCP/DAP consumer proves the source path, not installed delivery or a real debugger's event completeness. Real netcoredbg evidence and the full installed migration remain separate obligations; do not use an unqualified owned-consumer harness or interact with the operator desktop.
+
+Sources: `docs/dap-protocol/specification.md` Module and Progress events; `src/netcoredbg_mcp/session/manager.py` module/progress event handlers; `src/netcoredbg_mcp/tools/inspection.py`. The pinned adapter source [`vscodeprotocol.cpp`](https://github.com/thebtf/netcoredbg/blob/a5528f7ef61492a384017c885fb23b51ab90ddde/src/protocols/vscodeprotocol.cpp) emits module events; that source observation does not establish current installed runtime behavior.

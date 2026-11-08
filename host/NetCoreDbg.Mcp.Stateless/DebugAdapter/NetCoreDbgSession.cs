@@ -15,10 +15,15 @@ using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
-internal sealed class NetCoreDbgSession : IAsyncDisposable
+internal enum MemoryInspectionCommand { ReadMemory, Disassemble, Locations }
+
+internal readonly record struct LegacyObservedProcess(int Pid, string Role, string? Program, double RegisteredAt, bool? Alive);
+
+internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
+    private const int MaximumLegacyProcessObservations = 256;
     private const int MaximumThreadCount = 256;
     private const int MaximumThreadNameBytes = 1024;
     private const int MaximumStackFrameCount = 256;
@@ -26,21 +31,35 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private const int MaximumStackFramePathBytes = 4096;
     private const int MaximumInspectionEntryCount = 256;
     private const int MaximumInspectionNameBytes = 1024;
-    private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
+    internal const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
     private const int MaximumContinueReasonBytes = 1024;
     private const int MaximumBreakpointCount = 256;
     private static readonly TimeSpan ContinueTimeout = TimeSpan.FromSeconds(30);
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
+    private static readonly DapSessionState LegacyLaunchRunningState = new("continued", null, null);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
     };
 
     private readonly Process _process;
+    private readonly int _adapterProcessId;
+    private readonly double _adapterObservedAt;
+    private int _adapterExitConfirmed;
+    private int _legacyForcedRootTerminations;
+    private int _legacyForcedRootPending;
     private readonly Stream _input;
     private readonly Stream _output;
     private readonly Stream _error;
     private readonly IProcessTreeOwnership? _processTreeOwnership;
+    private SafeProcessHandle? _attachTarget;
+    private int _attachProcessId;
+    private bool _attachMayHaveDispatched;
+    private bool _attachClosing;
+    private volatile bool _attachStreamUncertain;
+    private volatile bool _attachFrameWritten;
+    private Task? _attachHandshake;
+    private Task<bool>? _attachDisconnect;
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _stopTimeout;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
@@ -48,10 +67,42 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly SemaphoreSlim _breakpointUpdateGate = new(1, 1);
     private readonly Dictionary<string, DapRequestedBreakpoint[]> _requestedBreakpoints = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private readonly Dictionary<string, List<LegacyBreakpointObservation>> _legacyBreakpointObservations = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private readonly Dictionary<long, LegacyBreakpointObservation> _legacyRemovedBreakpoints = [];
+    private readonly Dictionary<int, long> _legacyBreakpointIds = [];
+    private readonly HashSet<int> _legacyFunctionBreakpointIds = [];
+    private readonly List<(int Id, bool Removed, bool Verified, int? Line)> _deferredLegacyBreakpointEvents = [];
+    private LegacyFunctionBreakpoint[] _legacyFunctionObservations = [];
+    private bool _legacyBreakpointEventsIncomplete;
+    private readonly Dictionary<string, Dictionary<int, long>> _legacyHitCounts = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private int _legacyHitCountLocations;
+    private int _legacyHitObservationActive;
+    private bool _legacyHitCountsIncomplete;
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
+    private TaskCompletionSource<(int ThreadId, string Context)?>? _quickPauseStop;
+    private PauseRecord? _quickPauseRecord;
+    private readonly Dictionary<string, (DapLoadedSource Source, int Bytes)> _loadedSources = new(StringComparer.Ordinal);
+    private int _loadedSourceBytes;
+    private bool _loadedSourcesIncomplete;
+    private const int MaximumLoadedSourceStateBytes = 256 * 1024 - 4096;
     private readonly DapOutputBuffer _outputBuffer = new();
+    private readonly object _runtimeInventoryGate = new();
+    private readonly Dictionary<RuntimeModuleId, LinkedListNode<RuntimeModuleEntry>> _modules = [];
+    private readonly LinkedList<RuntimeModuleEntry> _moduleOrder = [];
+    private readonly Dictionary<string, LinkedListNode<RuntimeProgressEntry>> _progress = new(StringComparer.Ordinal);
+    private readonly LinkedList<RuntimeProgressEntry> _progressOrder = [];
+    private long _moduleBytes;
+    private long _progressBytes;
+    private bool _modulesIncomplete;
+    private bool _progressIncomplete;
+    private static readonly int ModuleEntrySyntaxBytes = "{\"id\":,\"name\":,\"path\":,\"version\":,\"isOptimized\":,\"symbolStatus\":}".Length;
+    private static readonly int ProgressEntrySyntaxBytes = "{\"progressId\":,\"title\":,\"message\":,\"percentage\":,\"cancellable\":,\"startedAt\":}".Length;
+    private static readonly int ModulesSnapshotSyntaxBytes = "{\"kind\":\"modules_success\",\"modules\":[],\"count\":}".Length;
+    private static readonly int ProgressSnapshotSyntaxBytes = "{\"kind\":\"progress_success\",\"progress\":[],\"count\":}".Length;
     private readonly object _cleanupGate = new();
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _forceCleanup = new();
@@ -59,7 +110,26 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly byte[] _headerByte = new byte[1];
 
     private DapSessionState _state = new(null, null, null);
+    private bool _legacyLaunchRunning;
+    private string? _stopDescription;
+    private string? _stopText;
+    private DapThread[]? _legacyThreads;
+    private int? _legacyProcessId;
+    private string? _legacyProcessName;
+    private Dictionary<int, (string? Name, double ObservedAt)>? _legacyProcessObservations;
+    private bool _legacyProcessObservationsIncomplete;
+    private double? _legacyLastStopAt;
+    private double? _legacyLastResumeAt;
+    private long _activityContinued, _activityStopped, _activityStepStops, _activityOutput;
+    private long _activityModuleNew, _activityModuleChanged, _activityModuleRemoved;
+    private long _legacyBreakpointRevision;
+    private JsonElement? _legacyInvalidation;
+    private JsonElement? _legacyMemoryEvent;
+    private bool _legacyEventDetailsIncomplete;
+    private JsonElement? _legacyExceptionInfo;
     private Task? _cleanupTask;
+    private Task? _cleanupRootTask;
+    private Task? _cleanupPreparationTask;
     private Exception? _readerFailure;
     private int _retirementRequested;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
@@ -67,19 +137,38 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private int _nativeSceneCaptureAuthorityInvalidated;
     private int _nativeUiInvokeAuthorityInvalidated;
     private int _outgoingSequence;
+    private bool _encHookPresent;
+    private bool _encEnabled;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
+    private bool _legacyTerminateDispatched;
+    private TaskCompletionSource<bool>? _legacyTermination;
     private DapStackTraceCapabilities _stackTraceCapabilities;
+    private bool _supportsExceptionInfoRequest;
+    private bool _supportsStepInTargetsRequest;
+    private bool _supportsLoadedSourcesRequest;
+    private bool _supportsReadMemoryRequest;
+    private bool _supportsWriteMemoryRequest;
+    private bool _supportsDisassembleRequest;
+    private bool _supportsLocationsRequest;
+    private bool _supportsSetVariable;
+    private bool _supportsExceptionFilters;
+    private bool _supportsConditionalBreakpoints;
+    private bool _supportsHitConditionalBreakpoints;
+    private bool _supportsFunctionBreakpoints;
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
     private HashSet<int>? _invalidatedAllThreadTargets;
     private string? _inspectionContextId;
     private bool _inspectionClosed;
     private int _inspectionWriteDrainRequired;
+    private int _loadedSourcesWriteDrainRequired;
     private StepOverRecord? _activeStepOver;
     private int _stepOverDrainRequired;
     private ContinueRecord? _activeContinue;
+    private PauseRecord? _activePause;
     private ExecutionAdmission _executionAdmission;
+    private TaskCompletionSource<bool>? _executionSettled;
     private BreakpointUpdate? _activeBreakpointUpdate;
     private int _requestedBreakpointCount;
     private bool _breakpointUpdatesClosed;
@@ -89,6 +178,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly Task? _initializeResponseContinuationRelease;
     private readonly Func<CancellationToken, Task>? _preHeaderWriteGate;
     private readonly TimeProvider _stepOverTimeProvider;
+    private readonly Action<string>? _resourceEventObserver;
     private NetCoreDbgSession(
         Process process,
         Stream input,
@@ -100,9 +190,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TaskCompletionSource<bool>? initializeResponseContinuationReached = null,
         Task? initializeResponseContinuationRelease = null,
         Func<CancellationToken, Task>? preHeaderWriteGate = null,
-        TimeProvider? stepOverTimeProvider = null)
+        TimeProvider? stepOverTimeProvider = null,
+        Action<string>? resourceEventObserver = null)
     {
         _process = process;
+        _adapterProcessId = resourceEventObserver is null ? 0 : process.Id;
+        _adapterObservedAt = resourceEventObserver is null ? 0 : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000d;
         _input = input;
         _output = output;
         _error = error;
@@ -113,6 +206,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _initializeResponseContinuationRelease = initializeResponseContinuationRelease;
         _preHeaderWriteGate = preHeaderWriteGate;
         _stepOverTimeProvider = stepOverTimeProvider ?? TimeProvider.System;
+        _resourceEventObserver = resourceEventObserver;
         _readerTask = ReadMessagesAsync();
         _stderrTask = DrainStandardErrorAsync();
     }
@@ -127,13 +221,321 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
-    internal bool IsUsable => !IsRetirementRequested && !_readerTask.IsCompleted && !HasExited();
+
+    // Python's legacy state treats a successful launch as running until a lifecycle event arrives.
+    // This projection is not a DAP continued event or evidence of executed instructions.
+    private DapSessionState LegacyStateUnderLock() =>
+        _legacyLaunchRunning && _state.Event is null && !_inspectionClosed ? LegacyLaunchRunningState : _state;
+
+    internal DapSessionState LegacyState
+    {
+        get { lock (_stateGate) return LegacyStateUnderLock(); }
+    }
+
+    internal (DapSessionState State, int? ProcessId, double CapturedAt, long Continued, long Stopped,
+        long StepStops, long Output, long ModuleNew, long ModuleChanged, long ModuleRemoved) CaptureLegacyActivity()
+    {
+        lock (_stateGate)
+            return (LegacyStateUnderLock(), _legacyProcessId, (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency,
+                _activityContinued, _activityStopped, _activityStepStops, _activityOutput,
+                _activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
+    }
+
+    internal (DapSessionState State, IReadOnlyDictionary<string, DapLoadedSource>? Sources, bool Complete) GetStateWithSources()
+    {
+        lock (_stateGate)
+        {
+            return (_state, _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
+                static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete);
+        }
+    }
+
+    internal (DapSessionState State, IReadOnlyDictionary<string, DapLoadedSource>? Sources, bool Complete,
+        DapThread[]? Threads, int? ProcessId, string? ProcessName, string? Description, string? Text,
+        double? LastStopAt, double? LastResumeAt, JsonElement? Invalidation, JsonElement? MemoryEvent, JsonElement? ExceptionInfo, bool DetailsComplete) GetLegacyResourceState()
+    {
+        lock (_stateGate)
+        {
+            return (LegacyStateUnderLock(), _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
+                static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete,
+                _legacyThreads, _legacyProcessId, _legacyProcessName, _stopDescription, _stopText,
+                _legacyLastStopAt, _legacyLastResumeAt, _legacyInvalidation, _legacyMemoryEvent, _legacyExceptionInfo, !_legacyEventDetailsIncomplete);
+        }
+    }
+
+    internal int LegacyForcedRootTerminations => Volatile.Read(ref _legacyForcedRootTerminations);
+
+    internal LegacyObservedProcess[] CaptureLegacyProcessObservations(out bool complete)
+    {
+        KeyValuePair<int, (string? Name, double ObservedAt)>[] observed;
+        bool adapterReplaced;
+        lock (_stateGate)
+        {
+            complete = !_legacyProcessObservationsIncomplete;
+            observed = _legacyProcessObservations?.ToArray() ?? [];
+            adapterReplaced = _legacyProcessObservations?.ContainsKey(_adapterProcessId) == true;
+        }
+
+        var result = new LegacyObservedProcess[Math.Min(MaximumLegacyProcessObservations, observed.Length + (adapterReplaced ? 0 : 1))];
+        var index = 0;
+        var budget = 256;
+        if (!adapterReplaced)
+        {
+            bool? alive;
+            try { alive = !_process.HasExited; }
+            catch (InvalidOperationException) { alive = Volatile.Read(ref _adapterExitConfirmed) != 0 ? false : null; }
+            catch (Win32Exception) { alive = null; }
+            result[index++] = new(_adapterProcessId, OperatingSystem.IsWindows() ? "netcoredbg" : "adapter_guardian", null, _adapterObservedAt, alive);
+        }
+        foreach (var entry in observed)
+        {
+            var bytes = 256 + 6 * Encoding.UTF8.GetByteCount(entry.Value.Name ?? string.Empty);
+            if (index == result.Length || budget + bytes > 192 * 1024) { complete = false; break; }
+            budget += bytes;
+            result[index++] = new(entry.Key, "debuggee", entry.Value.Name, entry.Value.ObservedAt, ObservePidAlive(entry.Key));
+        }
+        if (index != result.Length) Array.Resize(ref result, index);
+        return result;
+    }
+
+    private static bool? ObservePidAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var process = WindowsNativeSceneProcess.Open(pid);
+                if (process.IsInvalid) return Marshal.GetLastWin32Error() == 87 ? false : null;
+                if (WindowsNativeSceneProcess.IsAlive(process)) return true;
+                if (WindowsNativeSceneProcess.IsExited(process)) return false;
+                return null;
+            }
+            using var observed = Process.GetProcessById(pid);
+            return !observed.HasExited;
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (Win32Exception) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private void InvalidateLoadedSources()
+    {
+        _loadedSources.Clear();
+        _loadedSourceBytes = 0;
+        _loadedSourcesIncomplete = true;
+    }
+
+    private void StoreLoadedSource(DapLoadedSource source)
+    {
+        var key = DapLoadedSources.Key(source);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(key).Length + JsonSerializer.SerializeToUtf8Bytes(source).Length + 2;
+        _loadedSources.TryGetValue(key, out var previous);
+        if ((_loadedSources.Count >= MaximumInspectionEntryCount && previous.Source is null)
+            || (long)_loadedSourceBytes - previous.Bytes + bytes > MaximumLoadedSourceStateBytes)
+        {
+            InvalidateLoadedSources();
+            return;
+        }
+        _loadedSourceBytes += bytes - previous.Bytes;
+        _loadedSources[key] = (source, bytes);
+    }
+
+    private void RefreshLoadedSources(JsonElement body)
+    {
+        lock (_stateGate)
+        {
+            try
+            {
+                var sources = DapLoadedSources.Parse(body);
+                _loadedSources.Clear();
+                _loadedSourceBytes = 0;
+                _loadedSourcesIncomplete = false;
+                foreach (var source in sources)
+                {
+                    StoreLoadedSource(source);
+                    if (_loadedSourcesIncomplete) break;
+                }
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException or OverflowException)
+            {
+                InvalidateLoadedSources();
+            }
+        }
+    }
+
+    private void HandleLoadedSourceEvent(JsonElement body)
+    {
+        lock (_stateGate)
+        {
+            if (_loadedSourcesIncomplete) return;
+            try
+            {
+                var reason = RequireString(body, "reason");
+                if (reason is not "new" and not "changed" and not "removed"
+                    || !body.TryGetProperty("source", out var sourceElement))
+                    throw new InvalidDataException("Malformed loadedSource transition.");
+                var source = DapLoadedSources.ParseSource(sourceElement);
+                if (reason == "removed")
+                {
+                    if (_loadedSources.Remove(DapLoadedSources.Key(source), out var removed))
+                        _loadedSourceBytes -= removed.Bytes;
+                }
+                else StoreLoadedSource(source);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException or OverflowException)
+            {
+                InvalidateLoadedSources();
+            }
+        }
+    }
+    internal bool IsUsable => !IsRetirementRequested && Volatile.Read(ref _loadedSourcesWriteDrainRequired) == 0 && !_readerTask.IsCompleted && !HasExited();
     internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
 
     internal string GetOutput(bool clear, string? category) => _outputBuffer.Snapshot(clear, category);
 
     internal (long TotalLines, long ReturnedLines, string Output) GetOutputTail(long lines, string? category) => _outputBuffer.Tail(lines, category);
     internal DapOutputBuffer OutputBuffer => _outputBuffer;
+
+    internal (DapSessionState State, string Context, string? Description, string? Text)? CaptureStoppedContext()
+    {
+        lock (_stateGate)
+        {
+            if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing
+                || _state.Event != "stopped" || _state.StopReason is null || _state.CurrentThreadId is not { } threadId
+                || !HasStepOverAuthority(threadId))
+                return null;
+            return (_state, GetOrCreateInspectionContext(), _stopDescription, _stopText);
+        }
+    }
+
+    internal bool IsStoppedContextCurrent(int threadId, string context)
+    {
+        lock (_stateGate)
+            return !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing
+                && _state.Event == "stopped" && _state.CurrentThreadId == threadId
+                && HasStepOverAuthority(threadId) && StringComparer.Ordinal.Equals(_inspectionContextId, context);
+    }
+
+    internal DapSessionState? CaptureInspectionState(string context)
+    {
+        lock (_stateGate)
+        {
+            return !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing
+                && StringComparer.Ordinal.Equals(_inspectionContextId, context) ? _state : null;
+        }
+    }
+
+    internal DapRuntimeInventorySnapshot GetRuntimeInventory(bool modules, int maximumSerializedBytes)
+    {
+        lock (_runtimeInventoryGate)
+        {
+            if (modules ? _modulesIncomplete : _progressIncomplete)
+            {
+                return new(DapRuntimeInventoryStatus.Incomplete);
+            }
+
+            var count = modules ? _modules.Count : _progress.Count;
+            var bytes = (modules ? ModulesSnapshotSyntaxBytes + _moduleBytes : ProgressSnapshotSyntaxBytes + _progressBytes)
+                + Math.Max(0, count - 1) + RuntimeIntegerBytes(count);
+            if (bytes > maximumSerializedBytes)
+            {
+                return new(DapRuntimeInventoryStatus.TooLarge);
+            }
+
+            // Encoded fields and incremental sizes are retained at ingestion. Only an
+            // admitted, bounded snapshot traverses the inventory, under the reader's gate.
+            using var stream = new MemoryStream((int)bytes);
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("kind", modules ? "modules_success" : "progress_success");
+                writer.WriteStartArray(modules ? "modules" : "progress");
+                if (modules)
+                {
+                    foreach (var entry in _moduleOrder)
+                    {
+                        writer.WriteStartObject();
+                        if (entry.Id.Text is null) writer.WriteNumber("id", entry.Id.Number);
+                        else writer.WriteString("id", entry.EncodedId!.Value);
+                        WriteRuntimeText(writer, "name", entry.Name);
+                        WriteRuntimeText(writer, "path", entry.Path);
+                        WriteRuntimeText(writer, "version", entry.Version);
+                        writer.WriteBoolean("isOptimized", entry.IsOptimized);
+                        WriteRuntimeText(writer, "symbolStatus", entry.SymbolStatus);
+                        writer.WriteEndObject();
+                    }
+                }
+                else
+                {
+                    foreach (var entry in _progressOrder)
+                    {
+                        writer.WriteStartObject();
+                        WriteRuntimeText(writer, "progressId", entry.Id);
+                        WriteRuntimeText(writer, "title", entry.Title);
+                        WriteRuntimeText(writer, "message", entry.Message);
+                        if (entry.Percentage is { } percentage) writer.WriteNumber("percentage", percentage);
+                        else writer.WriteNull("percentage");
+                        writer.WriteBoolean("cancellable", entry.Cancellable);
+                        writer.WriteNumber("startedAt", entry.StartedAt);
+                        writer.WriteEndObject();
+                    }
+                }
+                writer.WriteEndArray();
+                writer.WriteNumber("count", count);
+                writer.WriteEndObject();
+            }
+
+            if (stream.Length > maximumSerializedBytes)
+            {
+                return new(DapRuntimeInventoryStatus.TooLarge);
+            }
+            return new(DapRuntimeInventoryStatus.Success, Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length));
+        }
+    }
+
+    private static void WriteRuntimeText(Utf8JsonWriter writer, string name, JsonEncodedText? value)
+    {
+        if (value is { } text) writer.WriteString(name, text);
+        else writer.WriteNull(name);
+    }
+
+    private static int RuntimeTextBytes(JsonEncodedText? value) => value is { } text ? text.EncodedUtf8Bytes.Length + 2 : 4;
+
+    private static int RuntimeIntegerBytes(long value)
+    {
+        Span<char> buffer = stackalloc char[20];
+        _ = value.TryFormat(buffer, out var written, provider: CultureInfo.InvariantCulture);
+        return written;
+    }
+
+    private static int RuntimeNumberBytes(double value)
+    {
+        Span<char> buffer = stackalloc char[32];
+        _ = value.TryFormat(buffer, out var written, provider: CultureInfo.InvariantCulture);
+        return written;
+    }
+
+    private readonly record struct RuntimeModuleId(long Number, string? Text);
+
+    private sealed record RuntimeModuleEntry(RuntimeModuleId Id, JsonEncodedText? EncodedId, JsonEncodedText Name,
+        JsonEncodedText? Path, JsonEncodedText? Version, bool IsOptimized, JsonEncodedText? SymbolStatus)
+    {
+        internal long Bytes => ModuleEntrySyntaxBytes
+            + (Id.Text is null ? RuntimeIntegerBytes(Id.Number) : RuntimeTextBytes(EncodedId))
+            + RuntimeTextBytes(Name) + RuntimeTextBytes(Path) + RuntimeTextBytes(Version)
+            + (IsOptimized ? 4 : 5) + RuntimeTextBytes(SymbolStatus);
+    }
+
+    private sealed record RuntimeProgressEntry(JsonEncodedText Id, JsonEncodedText Title, string? MessageText,
+        JsonEncodedText? Message, double? Percentage, bool Cancellable, double StartedAt)
+    {
+        internal long Bytes => ProgressEntrySyntaxBytes + RuntimeTextBytes(Id) + RuntimeTextBytes(Title)
+            + RuntimeTextBytes(Message) + (Percentage is { } percentage ? RuntimeNumberBytes(percentage) : 4)
+            + (Cancellable ? 4 : 5) + RuntimeNumberBytes(StartedAt);
+    }
+
     internal bool IsRetirementRequested => Volatile.Read(ref _retirementRequested) != 0;
     internal event Action<NetCoreDbgSession>? RetirementRequested;
 
@@ -215,6 +617,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StartAsync(debuggerPath, programPath, initializeTimeout, requestTimeout, stopTimeout,
             launchEnvironment, breakpoints, failedStartCleanupCompleted: null, cancellationToken);
 
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        Action? failedStartCleanupCompleted,
+        CancellationToken cancellationToken) =>
+        StartAsync(debuggerPath, programPath, initializeTimeout, requestTimeout, stopTimeout,
+            launchEnvironment, breakpoints, failedStartCleanupCompleted, launchOptions: null, cancellationToken);
+
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
         string programPath,
@@ -224,13 +639,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         IReadOnlyDictionary<string, string>? launchEnvironment,
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
         Action? failedStartCleanupCompleted,
-        CancellationToken cancellationToken)
+        DapLaunchOptions? launchOptions,
+        CancellationToken cancellationToken, Action<string>? resourceEventObserver = null, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(programPath);
         RequirePositiveTimeout(initializeTimeout, nameof(initializeTimeout));
         RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
         RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
+        var removals = DapLaunchEnvironment.Removals(launchOptions?.Environment);
+        var dapEnvironment = DapLaunchEnvironment.Merge(launchEnvironment, launchOptions?.Environment);
 
         Process? process = null;
         IProcessTreeOwnership? processTreeOwnership = null;
@@ -240,7 +658,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (OperatingSystem.IsWindows())
             {
-                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath);
+                using var childEnvironment = WindowsChildEnvironmentBlock.Create(removals, dapEnvironment?.Keys);
+                dapEnvironment = childEnvironment.MatchInheritedSpellings(dapEnvironment);
+                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath, childEnvironment);
                 process = windowsLaunch.Process;
                 session = new NetCoreDbgSession(
                     process,
@@ -249,12 +669,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     windowsLaunch.Error,
                     requestTimeout,
                     stopTimeout,
-                    windowsLaunch.Ownership);
+                    windowsLaunch.Ownership, resourceEventObserver: resourceEventObserver);
                 windowsLaunch = null;
             }
             else
             {
-                var unixLaunch = UnixProcessGroupOwnership.Start(debuggerPath);
+                var unixLaunch = UnixProcessGroupOwnership.Start(debuggerPath, removals);
                 process = unixLaunch.Process;
                 processTreeOwnership = unixLaunch.Ownership;
                 session = new NetCoreDbgSession(
@@ -264,10 +684,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     process.StandardError.BaseStream,
                     requestTimeout,
                     stopTimeout,
-                    processTreeOwnership);
+                    processTreeOwnership, resourceEventObserver: resourceEventObserver);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, cancellationToken).ConfigureAwait(false);
+            var resolvedDebugger = Path.IsPathFullyQualified(debuggerPath)
+                ? debuggerPath : DapLaunchEnvironment.FindExecutable(debuggerPath);
+            session._encHookPresent = OperatingSystem.IsWindows() && resolvedDebugger is not null
+                && File.Exists(Path.Combine(Path.GetDirectoryName(resolvedDebugger)!, "ncdbhook.dll"));
+            await session.StartProtocolAsync(programPath, initializeTimeout, dapEnvironment, breakpoints, launchOptions, cancellationToken, functionBreakpoints).ConfigureAwait(false);
             return session;
         }
         catch (Exception startupFailure)
@@ -301,6 +725,174 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             throw;
         }
     }
+    internal static async Task<NetCoreDbgSession> PrepareAttachAsync(
+        string debuggerPath, int processId, TimeSpan initializeTimeout, TimeSpan requestTimeout,
+        TimeSpan stopTimeout, CancellationToken cancellationToken, Action<string>? resourceEventObserver = null)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Attach is supported only on Windows.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
+        if (processId <= 0) throw new ArgumentOutOfRangeException(nameof(processId));
+        RequirePositiveTimeout(initializeTimeout, nameof(initializeTimeout));
+        RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
+        RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
+        SafeProcessHandle? target = WindowsNativeSceneProcess.Open(processId);
+        WindowsProcessTreeLaunch? launch = null;
+        NetCoreDbgSession? session = null;
+        try
+        {
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process is unavailable or access is denied.");
+            using var environment = WindowsChildEnvironmentBlock.Create(null, null);
+            launch = WindowsProcessTreeOwnership.Start(debuggerPath, environment);
+            session = new NetCoreDbgSession(launch.Process, launch.Input, launch.Output, launch.Error,
+                requestTimeout, stopTimeout, launch.Ownership, resourceEventObserver: resourceEventObserver);
+            launch = null;
+            await session.InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process exited before attach preparation completed.");
+            ((WindowsProcessTreeOwnership)session._processTreeOwnership!).MakeAttachPassive();
+            session._attachProcessId = processId;
+            session._attachTarget = target;
+            target = null;
+            return session;
+        }
+        catch (Exception startupFailure)
+        {
+            try
+            {
+                if (session is not null)
+                {
+                    session._forceCleanup.Cancel();
+                    await session.EnsureCleanupAsync().ConfigureAwait(false);
+                }
+                else launch?.Dispose();
+            }
+            catch (Exception cleanupFailure) { throw new DapStartupCleanupException(startupFailure, cleanupFailure); }
+            throw;
+        }
+        finally { target?.Dispose(); }
+    }
+
+    internal bool AttachMayHaveDispatched { get { lock (_cleanupGate) return _attachMayHaveDispatched; } }
+    internal bool AttachTargetExited => _attachTarget is { } target && WindowsNativeSceneProcess.IsExited(target);
+    internal bool AttachFrameWritten => _attachFrameWritten;
+    internal bool AttachStreamUncertain => _attachStreamUncertain;
+    internal Task? AttachOperation { get { lock (_cleanupGate) return _attachHandshake; } }
+    internal Task<bool>? AttachDisconnectOperation { get { lock (_cleanupGate) return _attachDisconnect; } }
+
+    internal async Task WaitForAttachTargetExitAsync()
+    {
+        var target = _attachTarget ?? throw new InvalidOperationException("The attach target is unavailable.");
+        if (WindowsNativeSceneProcess.IsExited(target)) return;
+        try
+        {
+            // The retained target handle prevents this PID from being reused while opening the wait handle.
+            using var process = Process.GetProcessById(_attachProcessId);
+            await process.WaitForExitAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            if (!WindowsNativeSceneProcess.IsExited(target)) throw;
+        }
+        if (!WindowsNativeSceneProcess.IsExited(target))
+            throw new InvalidOperationException("Attached target exit is unconfirmed.");
+    }
+
+    internal Task AttachPreparedAsync(IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        LegacyFunctionBreakpoint[]? functionBreakpoints, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Task operation;
+        lock (_cleanupGate)
+        {
+            if (_attachTarget is null || _attachClosing) throw new InvalidOperationException("The provisional attach owner is unavailable.");
+            if (_attachHandshake is not null) throw new InvalidOperationException("Attach was already admitted and cannot be replayed.");
+            operation = _attachHandshake = AttachPreparedCoreAsync(breakpoints, functionBreakpoints, cancellationToken);
+        }
+        return operation.WaitAsync(cancellationToken);
+    }
+
+    private async Task AttachPreparedCoreAsync(IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        LegacyFunctionBreakpoint[]? functionBreakpoints, CancellationToken cancellationToken)
+    {
+        using var cancellation = cancellationToken.Register(static state =>
+        {
+            var session = (NetCoreDbgSession)state!;
+            lock (session._cleanupGate)
+                if (!session._attachMayHaveDispatched) session._attachClosing = true;
+        }, this);
+        await ConfigureBreakpointsAsync(breakpoints, CancellationToken.None).ConfigureAwait(false);
+        if (functionBreakpoints is { Length: > 0 })
+        {
+            var result = await ReplaceFunctionBreakpointsAsync(functionBreakpoints, CancellationToken.None).ConfigureAwait(false);
+            if (result.Outcome != DapBreakpointUpdateOutcome.Added) throw new DapBreakpointsException(isRefused: true);
+        }
+        _ = await SendRequestAsync("setExceptionBreakpoints", new { filters = Array.Empty<string>() }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        if (_attachTarget is not { } target || !WindowsNativeSceneProcess.IsAlive(target))
+            throw new InvalidOperationException("The requested process is unavailable before attach.");
+        lock (_cleanupGate)
+        {
+            if (_attachClosing || cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException("Attach admission was cancelled before dispatch.", cancellationToken);
+            _attachMayHaveDispatched = true;
+        }
+        _attachStreamUncertain = true;
+        var attach = await BeginRequestAsync("attach", new { processId = _attachProcessId, justMyCode = false }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        _attachFrameWritten = true;
+        _attachStreamUncertain = false;
+        try
+        {
+            if (_supportsConfigurationDone)
+            {
+                _attachStreamUncertain = true;
+                var configuration = await BeginRequestAsync("configurationDone", null, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+                _attachStreamUncertain = false;
+                DapResponse configurationResponse;
+                try { configurationResponse = await configuration.Completion.Task.ConfigureAwait(false); }
+                catch { _attachStreamUncertain = true; throw; }
+                finally { RemovePending(configuration); }
+                if (!configurationResponse.Success) throw new InvalidDataException("The debugger refused configurationDone.");
+            }
+            DapResponse attachResponse;
+            try { attachResponse = await attach.Completion.Task.ConfigureAwait(false); }
+            catch { _attachStreamUncertain = true; throw; }
+            if (!attachResponse.Success) throw new DapLaunchRefusedException();
+            if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process exited during attach.");
+            lock (_stateGate)
+            {
+                _legacyProcessId = _attachProcessId;
+                if (_state.Event is null && !_inspectionClosed) _legacyLaunchRunning = true;
+            }
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
+        }
+        finally { RemovePending(attach); }
+    }
+
+    internal Task<bool> DisconnectAttachOnceAsync(CancellationToken cancellationToken)
+    {
+        Task<bool> operation;
+        lock (_cleanupGate)
+        {
+            if (_attachTarget is null) throw new InvalidOperationException("The provisional attach owner is unavailable.");
+            if (_cleanupTask is not null) throw new InvalidOperationException("The provisional attach owner is already being disposed.");
+            _attachClosing = true;
+            operation = _attachDisconnect ??= DisconnectAttachCoreAsync();
+        }
+        return operation.WaitAsync(cancellationToken);
+    }
+
+    private async Task<bool> DisconnectAttachCoreAsync()
+    {
+        Task? handshake;
+        lock (_cleanupGate) handshake = _attachHandshake;
+        if (handshake is not null) { try { await handshake.ConfigureAwait(false); } catch (Exception) { } }
+        if (!_attachFrameWritten || _attachStreamUncertain)
+            throw new InvalidOperationException("The attach stream outcome is unconfirmed; disconnect was not sent.");
+        _attachStreamUncertain = true;
+        var request = await BeginRequestAsync("disconnect", new { restart = false, terminateDebuggee = false }, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+        _attachStreamUncertain = false;
+        try { return (await request.Completion.Task.ConfigureAwait(false)).Success; }
+        finally { RemovePending(request); }
+    }
+
 
     internal async Task StopAsync(CancellationToken cancellationToken)
     {
@@ -324,6 +916,85 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             static state => ((CancellationTokenSource)state!).Cancel(), _forceCleanup);
         await EnsureCleanupAsync().ConfigureAwait(false);
     }
+    internal async Task<string> TerminateLegacyAsync(CancellationToken cancellationToken)
+    {
+        PendingRequest? request = null;
+        TaskCompletionSource<bool>? terminal = null;
+        var acknowledged = false;
+        var outcome = "unknown";
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsTerminate) return "unsupported";
+                if (_legacyTerminateDispatched || _executionAdmission != ExecutionAdmission.Available || _inspectionClosed || IsRetirementRequested)
+                    return "unknown";
+                _legacyTerminateDispatched = true;
+                _executionAdmission = ExecutionAdmission.Closing;
+                terminal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _legacyTermination = terminal;
+            }
+            await BeginRequestAsync("terminate", new { restart = false }, _requestTimeout,
+                cancellationToken, trackLoadedSourcesWrite: true, requestCreated: created => request = created).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or OperationCanceledException or TimeoutException)
+        {
+            lock (_stateGate)
+            {
+                if (request is null || !request.WriteStarted)
+                {
+                    _legacyTerminateDispatched = false;
+                    if (!_inspectionClosed && !IsRetirementRequested && _executionAdmission == ExecutionAdmission.Closing)
+                        _executionAdmission = ExecutionAdmission.Available;
+                }
+                if (ReferenceEquals(_legacyTermination, terminal)) _legacyTermination = null;
+            }
+            return "unknown";
+        }
+        finally { _callStackAdmissionGate.Release(); }
+
+        try
+        {
+            var response = WaitForResponseAsync(request!, _requestTimeout, cancellationToken);
+            _ = response.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var first = await Task.WhenAny(response, terminal!.Task).WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (first == terminal.Task && await terminal.Task.ConfigureAwait(false))
+            {
+                outcome = "terminated";
+            }
+            else
+            {
+                _ = await response.ConfigureAwait(false);
+                acknowledged = true;
+                try
+                {
+                    outcome = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false) ? "terminated" : "unknown";
+                }
+                catch (TimeoutException) { outcome = "timeout"; }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or OperationCanceledException or TimeoutException)
+        {
+            outcome = "unknown";
+        }
+        finally
+        {
+            if (request is not null) RemovePending(request);
+            lock (_stateGate)
+            {
+                acknowledged |= request?.Completion.Task.IsCompletedSuccessfully == true;
+                if (_state.Event is "exited" or "terminated") outcome = "terminated";
+                else if (acknowledged && !_inspectionClosed && !IsRetirementRequested && Volatile.Read(ref _readerFailure) is null
+                    && _executionAdmission == ExecutionAdmission.Closing)
+                    _executionAdmission = ExecutionAdmission.Available;
+                if (ReferenceEquals(_legacyTermination, terminal)) _legacyTermination = null;
+            }
+        }
+        return outcome;
+    }
+
 
     internal async Task<DapThreadsResult> GetThreadsAsync(CancellationToken cancellationToken)
     {
@@ -337,15 +1008,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return DapThreadsResult.Refused;
         }
 
-        if (response.Body.ValueKind != JsonValueKind.Object
-            || !response.Body.TryGetProperty("threads", out var threads)
+        var threads = RequireThreads(response.Body);
+        var normalized = new DapThread[threads.GetArrayLength()];
+        _ = ReadThreads(threads, normalized);
+        return DapThreadsResult.Succeeded(normalized);
+    }
+
+    private static JsonElement RequireThreads(JsonElement body)
+    {
+        if (body.ValueKind != JsonValueKind.Object
+            || !body.TryGetProperty("threads", out var threads)
             || threads.ValueKind != JsonValueKind.Array
             || threads.GetArrayLength() > MaximumThreadCount)
         {
             throw new InvalidDataException("DAP threads response body is invalid.");
         }
 
-        var normalized = new DapThread[threads.GetArrayLength()];
+        return threads;
+    }
+
+    private static int? ReadThreads(JsonElement threads, DapThread[]? normalized)
+    {
+        int? firstThread = null;
         var index = 0;
         foreach (var thread in threads.EnumerateArray())
         {
@@ -356,11 +1040,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 throw new InvalidDataException("DAP thread name exceeds the supported maximum.");
             }
 
-            normalized[index++] = new DapThread(id, name);
+            if (index == 0)
+            {
+                firstThread = id;
+            }
+            if (normalized is not null)
+            {
+                normalized[index] = new DapThread(id, name);
+            }
+            index++;
         }
 
-        return DapThreadsResult.Succeeded(normalized);
+        return firstThread;
     }
+
     internal Task<DapCallStackResult> GetCallStackAsync(
         int threadId,
         uint startFrame,
@@ -368,8 +1061,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken) =>
         GetCallStackAsync(threadId, startFrame, levels, false, cancellationToken);
 
-    internal async Task<DapCallStackResult> GetCallStackAsync(
+    internal Task<DapCallStackResult> GetCallStackAsync(
         int threadId,
+        uint startFrame,
+        uint levels,
+        bool includeInspectionContext,
+        CancellationToken cancellationToken) =>
+        GetCallStackForOptionalThreadAsync(threadId, startFrame, levels, includeInspectionContext, cancellationToken);
+
+    internal async Task<DapCallStackResult> GetCallStackForOptionalThreadAsync(
+        int? threadId,
         uint startFrame,
         uint levels,
         bool includeInspectionContext,
@@ -426,6 +1127,230 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return DapCallStackResult.Succeeded(normalized, totalFrames, response.InspectionContextId);
     }
 
+    internal Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken) =>
+        GetExceptionInfoForOptionalThreadAsync(threadId, cancellationToken);
+
+    internal async Task<DapExceptionInfoResult> GetExceptionInfoForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsExceptionInfoRequest)
+                {
+                    return DapExceptionInfoResult.Unsupported;
+                }
+            }
+
+            var target = CaptureOptionalCallStackTarget(threadId, includeInspectionContext: true);
+            if (target is null)
+            {
+                return DapExceptionInfoResult.Refused;
+            }
+
+            request = await BeginRequestAsync("exceptionInfo", new { threadId = target.Value.ThreadId }, _requestTimeout,
+                cancellationToken, stackTraceTarget: target).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success || !response.TargetCurrent)
+            {
+                return DapExceptionInfoResult.Refused;
+            }
+
+            var body = response.Body;
+            _ = RequireString(body, "exceptionId");
+            if (RequireString(body, "breakMode") is not ("never" or "always" or "unhandled" or "userUnhandled"))
+            {
+                throw new InvalidDataException("DAP exceptionInfo breakMode is invalid.");
+            }
+            if (body.TryGetProperty("description", out _))
+            {
+                _ = RequireString(body, "description");
+            }
+            if (body.TryGetProperty("details", out var details) && details.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("DAP exceptionInfo details must be an object.");
+            }
+
+            return new DapExceptionInfoResult(DapExceptionInfoOutcome.Success, body);
+        }
+        finally
+        {
+            RemovePending(request);
+        }
+    }
+
+    internal async Task<DapLoadedSourcesResult> GetLoadedSourcesAsync(CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsLoadedSourcesRequest) return DapLoadedSourcesResult.Unsupported;
+            }
+
+            request = await BeginRequestAsync("loadedSources", new { }, _requestTimeout, cancellationToken, trackLoadedSourcesWrite: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            return response.Success
+                ? new DapLoadedSourcesResult(DapLoadedSourcesOutcome.Success, DapLoadedSources.Parse(response.Body))
+                : DapLoadedSourcesResult.Refused;
+        }
+        finally
+        {
+            RemovePending(request);
+        }
+    }
+
+    internal bool RequiresLoadedSourcesDrain() => Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0;
+
+    internal async Task<(string Status, JsonElement Body, string? Context)> ReadMemoryInspectionAsync(
+        MemoryInspectionCommand operation, object arguments, bool emptyRead, CancellationToken cancellationToken)
+    {
+        var command = operation switch
+        {
+            MemoryInspectionCommand.ReadMemory => "readMemory",
+            MemoryInspectionCommand.Disassemble => "disassemble",
+            MemoryInspectionCommand.Locations => "locations",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+        PendingRequest request;
+        string context;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                var supported = operation switch
+                {
+                    MemoryInspectionCommand.ReadMemory => _supportsReadMemoryRequest,
+                    MemoryInspectionCommand.Disassemble => _supportsDisassembleRequest,
+                    MemoryInspectionCommand.Locations => _supportsLocationsRequest,
+                    _ => false,
+                };
+                if (!supported) return ("unsupported", default, null);
+                if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing || IsRetirementRequested)
+                    return ("stale", default, null);
+                context = GetOrCreateInspectionContext();
+                if (emptyRead) return ("empty", default, context);
+            }
+            request = await BeginRequestAsync(command, arguments, _requestTimeout, cancellationToken,
+                inspectionContextId: context).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent) return ("stale", default, null);
+            if (!response.Success) return ("refused", default, null);
+            if (response.Body.ValueKind != JsonValueKind.Object || Encoding.UTF8.GetByteCount(response.Body.GetRawText()) > 256 * 1024)
+                throw new InvalidDataException("DAP memory inspection response is invalid or too large.");
+            return ("success", response.Body, context);
+        }
+        catch (OperationCanceledException) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally { RemovePending(request); }
+    }
+
+    internal async Task<(string Status, JsonElement Body, string? Context)> WriteMemoryAsync(
+        object arguments, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            string context;
+            lock (_stateGate)
+            {
+                if (!_supportsWriteMemoryRequest) return ("unsupported", default, null);
+                if (_inspectionClosed || _executionAdmission == ExecutionAdmission.Closing || IsRetirementRequested
+                    || LegacyStateUnderLock().Event is not ("stopped" or "continued"))
+                    return ("unavailable", default, null);
+                context = GetOrCreateInspectionContext();
+            }
+            request = await BeginRequestAsync("writeMemory", arguments, _requestTimeout, cancellationToken,
+                inspectionContextId: context).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent) return ("unknown", default, null);
+            if (!response.Success) return ("refused", default, response.InspectionContextId);
+            return ("success", response.Body, response.InspectionContextId);
+        }
+        catch (Exception) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally { RemovePending(request); }
+    }
+
+    internal async Task<DapStepTargetsResult> GetStepInTargetsAsync(string inspectionContextId, int frameId, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsStepInTargetsRequest) return new(DapStepTargetsOutcome.Unsupported, null);
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                    return new(DapStepTargetsOutcome.Refused, null);
+            }
+            request = await BeginRequestAsync("stepInTargets", new { frameId }, _requestTimeout, cancellationToken,
+                inspectionContextId: inspectionContextId).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success || !response.TargetCurrent) return new(DapStepTargetsOutcome.Refused, null);
+            var entries = RequireInspectionArray(response.Body, "targets");
+            var targets = new DapStepTarget[entries.GetArrayLength()];
+            var index = 0;
+            foreach (var entry in entries.EnumerateArray())
+            {
+                int? Position(string name)
+                {
+                    if (!entry.TryGetProperty(name, out var value)) return null;
+                    if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number) || number < 0)
+                        throw new InvalidDataException("DAP step target position is invalid.");
+                    return number;
+                }
+                targets[index++] = new DapStepTarget(RequireInt32(entry, "id"), RequireInspectionName(entry, "label"),
+                    Position("line"), Position("column"), Position("endLine"), Position("endColumn"));
+            }
+            return new(DapStepTargetsOutcome.Success, targets);
+        }
+        finally { RemovePending(request); }
+    }
+
     internal async Task<DapScopesResult> GetScopesAsync(
         string inspectionContextId,
         int frameId,
@@ -460,16 +1385,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal async Task<DapVariablesResult> GetVariablesAsync(
         string inspectionContextId,
         int variablesReference,
+        int? start,
+        int? count,
         CancellationToken cancellationToken)
     {
         var response = await SendInspectionRequestAsync(
-            "variables", new { variablesReference }, inspectionContextId, cancellationToken).ConfigureAwait(false);
+            "variables", new DapVariablesArguments(variablesReference, start, count), inspectionContextId, cancellationToken).ConfigureAwait(false);
         if (response is null || !response.Success || !response.TargetCurrent)
         {
             return DapVariablesResult.Refused;
         }
 
         var variables = RequireInspectionArray(response.Body, "variables");
+        if (count is > 0 && variables.GetArrayLength() > count.Value)
+        {
+            throw new InvalidDataException("DAP variables response exceeds the requested count.");
+        }
+
         var normalized = new DapVariable[variables.GetArrayLength()];
         var index = 0;
         foreach (var variable in variables.EnumerateArray())
@@ -481,6 +1413,97 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         return new DapVariablesResult(false, response.InspectionContextId!, normalized);
+    }
+
+    internal Task<DapEvaluateResult> EvaluateExpressionAsync(
+        string inspectionContextId, int frameId, string expression, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken, null);
+
+    internal Task<DapEvaluateResult> EvaluateExpressionForSmokeAsync(
+        string inspectionContextId, int frameId, string expression, Action onWriteStarted, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, null, null, cancellationToken, onWriteStarted);
+
+    internal Task<DapEvaluateResult> EvaluateTracepointAsync(
+        string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool> admissionFinished,
+        long breakpointRevision, CancellationToken cancellationToken) =>
+        EvaluateExpressionCoreAsync(inspectionContextId, frameId, expression, admissionFinished, breakpointRevision, cancellationToken, null);
+
+    private async Task<DapEvaluateResult> EvaluateExpressionCoreAsync(
+        string inspectionContextId, int frameId, string expression, TaskCompletionSource<bool>? admissionFinished,
+        long? breakpointRevision, CancellationToken cancellationToken, Action? onWriteStarted)
+    {
+        var response = await SendInspectionRequestAsync(
+            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken, admissionFinished, breakpointRevision, onWriteStarted).ConfigureAwait(false);
+        if (response is null)
+        {
+            return DapEvaluateResult.Refused;
+        }
+        if (!response.TargetCurrent)
+        {
+            return DapEvaluateResult.OutcomeUnknown;
+        }
+        if (!response.Success)
+        {
+            // An adapter failure does not prove that the expression had no side effects.
+            return DapEvaluateResult.Failed;
+        }
+
+        var result = RequireString(response.Body, "result");
+        var type = response.Body.TryGetProperty("type", out var typeElement) && typeElement.ValueKind != JsonValueKind.Null
+            ? RequireInspectionName(response.Body, "type") : null;
+        return new DapEvaluateResult(DapEvaluateOutcome.Success, response.InspectionContextId!, result, type,
+            RequireVariablesReference(response.Body));
+    }
+
+    internal async Task<DapSetVariableResult> SetVariableAsync(
+        string inspectionContextId, int variablesReference, string name, string value, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                {
+                    return DapSetVariableResult.Refused;
+                }
+                if (!_supportsSetVariable)
+                {
+                    return DapSetVariableResult.Unsupported;
+                }
+            }
+            request = await BeginRequestAsync("setVariable", new { variablesReference, name, value }, _requestTimeout,
+                cancellationToken, inspectionContextId: inspectionContextId).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent)
+            {
+                return DapSetVariableResult.OutcomeUnknown;
+            }
+            if (!response.Success)
+            {
+                return DapSetVariableResult.Failed;
+            }
+            return new DapSetVariableResult(DapSetVariableOutcome.Success, response.SerializedContent);
+        }
+        catch (Exception) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally
+        {
+            RemovePending(request);
+        }
     }
 
     internal bool RequiresInspectionDrain() => Volatile.Read(ref _inspectionWriteDrainRequired) != 0;
@@ -520,7 +1543,312 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return reference;
     }
 
-    internal async Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken)
+    internal const string QuickEvaluationFailedAfterResume = "Evaluation failed; the pause was resumed.";
+
+    internal async Task<(DapEvaluateResult? Value, string? Error, bool Drain)> QuickEvaluateAsync(
+        string expression, int? frameId, CancellationToken cancellationToken)
+    {
+        var observed = new TaskCompletionSource<(int ThreadId, string Context)?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_stateGate)
+        {
+            if (_quickPauseStop is not null || _inspectionClosed || IsRetirementRequested || LegacyStateUnderLock().Event != "continued")
+                return (null, "Program is not running or another quick evaluation is active.", false);
+            _quickPauseStop = observed;
+        }
+        try
+        {
+            var pause = await PauseCoreAsync(null, cancellationToken, requireRunning: true).ConfigureAwait(false);
+            if (pause.Outcome != DapPauseOutcome.Acknowledged)
+                return (null, "Pause was not confirmed; do not retry automatically.", pause.RequiresDrain);
+            (int ThreadId, string Context)? stopped;
+            try { stopped = await observed.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false); }
+            catch (TimeoutException) { return (null, "No pause stop was observed; do not retry automatically.", false); }
+            if (stopped is not { } target || target.ThreadId != pause.ThreadId || !IsStoppedContextCurrent(target.ThreadId, target.Context))
+                return (null, "The stop was not owned by this pause or has changed.", false);
+            var selectedFrame = frameId;
+            if (selectedFrame is null)
+            {
+                var stack = await GetCallStackAsync(target.ThreadId, 0, 1, true, cancellationToken).ConfigureAwait(false);
+                if (stack.IsRefused || stack.Frames.Count == 0 || stack.InspectionContextId != target.Context)
+                    return (null, "Stopped context changed or no frame is available.", RequiresInspectionDrain());
+                selectedFrame = stack.Frames[0].Id;
+            }
+            var value = await EvaluateExpressionAsync(target.Context, selectedFrame.Value, expression, cancellationToken).ConfigureAwait(false);
+            if (value.Outcome is not (DapEvaluateOutcome.Success or DapEvaluateOutcome.Failed)
+                || !IsStoppedContextCurrent(target.ThreadId, target.Context))
+                return (null, "Evaluation outcome is unknown; do not retry automatically.", RequiresInspectionDrain());
+            cancellationToken.ThrowIfCancellationRequested();
+            var continued = await ContinueCoreAsync(target.ThreadId, cancellationToken, target.Context, null, null, acknowledgementOnly: true).ConfigureAwait(false);
+            if (!continued.Acknowledged || continued.Outcome != DapContinueOutcome.TimedOut)
+                return (null, "Resume was not confirmed or execution stopped again; do not retry automatically.", continued.RequiresDrain);
+            return value.Outcome == DapEvaluateOutcome.Failed
+                ? (null, QuickEvaluationFailedAfterResume, continued.RequiresDrain)
+                : (value, null, continued.RequiresDrain);
+        }
+        finally
+        {
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_quickPauseStop, observed)) { _quickPauseStop = null; _quickPauseRecord = null; }
+            }
+        }
+    }
+
+    internal void VetoQuickPause()
+    {
+        lock (_stateGate)
+        {
+            _quickPauseStop?.TrySetResult(null);
+            _quickPauseRecord = null;
+        }
+    }
+
+    internal Task<DapPauseResult> PauseAsync(int? threadId, CancellationToken cancellationToken) =>
+        PauseCoreAsync(threadId, cancellationToken, requireRunning: false);
+
+    private async Task<DapPauseResult> PauseCoreAsync(int? threadId, CancellationToken cancellationToken, bool requireRunning)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PauseRecord active;
+        lock (_stateGate)
+        {
+            if (requireRunning && LegacyStateUnderLock().Event != "continued") return DapPauseResult.Refused;
+            if (!requireRunning && _quickPauseStop is { } quick)
+            {
+                quick.TrySetResult(null);
+                _quickPauseRecord = null;
+            }
+            if (_inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing
+                || _activePause is not null || _activeStepOver is not null
+                || (_executionAdmission == ExecutionAdmission.Active && _activeContinue is not { CommittedWrite: true }))
+            {
+                return DapPauseResult.Refused;
+            }
+
+            if (_state.Event is "exited" or "terminated")
+            {
+                FencePause();
+                return new DapPauseResult(DapPauseOutcome.Terminal, Terminal: _state.Event,
+                    ExitCode: _state.ExitCode, RequiresDrain: true);
+            }
+
+            active = new PauseRecord(_requestTimeout, _stepOverTimeProvider, cancellationToken);
+            active.RequireRunning = requireRunning;
+            if (requireRunning) _quickPauseRecord = active;
+            _activePause = active;
+        }
+
+        try
+        {
+            int? selectedThread = threadId is { } explicitThread && explicitThread != 0 ? explicitThread : null;
+            PendingRequest request;
+            await _callStackAdmissionGate.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (!CanWritePause(active))
+                    {
+                        return CompletePause(active, active.ProtocolFailure is not null
+                            ? new DapPauseResult(DapPauseOutcome.ProtocolError) : active.Outcome ?? DapPauseResult.Refused);
+                    }
+
+                    selectedThread ??= _state.CurrentThreadId;
+                    active.ThreadId = selectedThread;
+                }
+
+                request = await BeginRequestAsync(selectedThread.HasValue ? "pause" : "threads",
+                    selectedThread.HasValue ? new DapPauseArguments(selectedThread.Value) : null,
+                    _requestTimeout, active.DeadlineToken, pause: active).ConfigureAwait(false);
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
+            }
+
+            if (!selectedThread.HasValue)
+            {
+                var response = await WaitForPauseResponseAsync(request, active).ConfigureAwait(false);
+                lock (_stateGate)
+                {
+                    if (active.Outcome is { } observed)
+                    {
+                        return CompletePause(active, observed);
+                    }
+                }
+
+                if (!response!.Success)
+                {
+                    return CompletePause(active, DapPauseResult.Refused);
+                }
+
+                var discoveredThread = ReadThreads(RequireThreads(response.Body), normalized: null);
+                RemovePending(request);
+                await _callStackAdmissionGate.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+                try
+                {
+                    lock (_stateGate)
+                    {
+                        if (!CanWritePause(active))
+                        {
+                            return CompletePause(active, active.ProtocolFailure is not null
+                                ? new DapPauseResult(DapPauseOutcome.ProtocolError) : active.Outcome ?? DapPauseResult.Refused);
+                        }
+
+                        selectedThread = _state.CurrentThreadId ?? discoveredThread;
+                        if (!selectedThread.HasValue)
+                        {
+                            return CompletePause(active, new DapPauseResult(DapPauseOutcome.NoThreads));
+                        }
+
+                        active.ThreadId = selectedThread;
+                    }
+
+                    request = await BeginRequestAsync("pause", new DapPauseArguments(selectedThread.Value),
+                        _requestTimeout, active.DeadlineToken, pause: active).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _callStackAdmissionGate.Release();
+                }
+            }
+
+            _ = await WaitForPauseResponseAsync(request, active).ConfigureAwait(false);
+            lock (_stateGate)
+            {
+                return CompletePause(active, active.Outcome
+                    ?? throw new InvalidDataException("DAP pause completed without an acknowledgement."));
+            }
+        }
+        catch (OperationCanceledException exception)
+        {
+            lock (_stateGate)
+            {
+                var requiresDrain = PauseWriteRequiresDrain(active);
+                if (requiresDrain)
+                {
+                    FencePause();
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new DapPauseCanceledException(requiresDrain, exception, cancellationToken);
+                }
+
+                if (active.Outcome is { } observed && active.Request is { CommittedWrite: true })
+                {
+                    return CompletePause(active, observed);
+                }
+
+                return CompletePause(active, new DapPauseResult(active.ProtocolFailure is null && active.DeadlineToken.IsCancellationRequested
+                    ? DapPauseOutcome.TimedOut : DapPauseOutcome.ProtocolError));
+            }
+        }
+        catch (Exception)
+        {
+            return CompletePause(active, new DapPauseResult(DapPauseOutcome.ProtocolError));
+        }
+        finally
+        {
+            lock (_stateGate)
+            {
+                active.Finalized = true;
+                if (active.Request is { } pending)
+                {
+                    RemovePending(pending);
+                }
+
+                if (ReferenceEquals(_activePause, active))
+                {
+                    _activePause = null;
+                }
+            }
+
+            active.Dispose();
+        }
+    }
+
+    private bool CanWritePause(PauseRecord active) =>
+        ReferenceEquals(_activePause, active) && active.Outcome is null && active.ProtocolFailure is null
+        && !_inspectionClosed && !IsRetirementRequested && _executionAdmission != ExecutionAdmission.Closing
+        && _state.Event is not "exited" and not "terminated"
+        && (!active.RequireRunning || LegacyStateUnderLock().Event == "continued");
+
+    private static bool PauseWriteRequiresDrain(PauseRecord active) =>
+        active.ProtocolFailure is not null || active.Outcome?.Outcome == DapPauseOutcome.Terminal
+        || (active.Request is { WriteStarted: true } request
+            && (!request.CommittedWrite || (request.Command == "pause" && !active.AcknowledgementObserved)));
+
+    private DapPauseResult CompletePause(PauseRecord active, DapPauseResult result)
+    {
+        lock (_stateGate)
+        {
+            var requiresDrain = result.Outcome is DapPauseOutcome.ProtocolError or DapPauseOutcome.Terminal
+                || PauseWriteRequiresDrain(active);
+            if (requiresDrain)
+            {
+                FencePause();
+            }
+            active.Finalized = true;
+
+            return result with { RequiresDrain = requiresDrain };
+        }
+    }
+
+    private void FencePause()
+    {
+        _executionAdmission = ExecutionAdmission.Closing;
+        _inspectionClosed = true;
+        _inspectionContextId = null;
+        ClearCallStackEligibility();
+    }
+
+    private async Task<DapResponse?> WaitForPauseResponseAsync(PendingRequest request, PauseRecord active)
+    {
+        await Task.WhenAny(request.Completion.Task, active.Completion.Task)
+            .WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+        lock (_stateGate)
+        {
+            if (active.ProtocolFailure is { } failure)
+            {
+                throw new InvalidDataException("DAP pause exchange failed.", failure);
+            }
+
+            if (active.Outcome is not null)
+            {
+                return null;
+            }
+            active.DeadlineToken.ThrowIfCancellationRequested();
+        }
+
+        var response = await request.Completion.Task.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+        lock (_stateGate)
+        {
+            if (active.Outcome is null)
+            {
+                active.DeadlineToken.ThrowIfCancellationRequested();
+            }
+        }
+        return response;
+    }
+
+    internal Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Over, cancellationToken);
+
+    internal Task<DapStepOverResult> StepIntoAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Into, cancellationToken);
+
+    internal Task<DapStepOverResult> StepOutAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Out, cancellationToken);
+
+    internal Task<DapStepOverResult> StepForOptionalThreadAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken) =>
+        StepAsync(threadId, kind, cancellationToken);
+
+    internal Task<DapStepOverResult> StepIntoTargetAsync(int? threadId, int targetId, string inspectionContextId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Into, cancellationToken, targetId, inspectionContextId);
+
+    private async Task<DapStepOverResult> StepAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken,
+        int? targetId = null, string? inspectionContextId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -536,14 +1864,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                int selectedThreadId;
                 lock (_stateGate)
                 {
-                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    if (targetId is not null && !_supportsStepInTargetsRequest) return DapStepOverResult.Unsupported;
+                    if (targetId is not null && (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId)))
+                        return DapStepOverResult.Refused;
+                    var selected = threadId ?? _state.CurrentThreadId;
+                    if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapStepOverResult.Refused;
                     }
 
-                    active = new StepOverRecord(threadId, cancellationToken);
+                    selectedThreadId = resolved;
+                    active = new StepOverRecord(selectedThreadId, kind, cancellationToken);
                     _activeStepOver = active;
                     _state = _state with { CurrentThreadId = null };
                     ClearCallStackEligibility();
@@ -551,8 +1886,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 request = await BeginRequestAsync(
-                    "next",
-                    new { threadId },
+                    active.Command,
+                    targetId is null ? new { threadId = selectedThreadId } : (object)new { threadId = selectedThreadId, targetId = targetId.Value },
                     _requestTimeout,
                     cancellationToken,
                     stepOver: active).ConfigureAwait(false);
@@ -582,7 +1917,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 Interlocked.Exchange(ref _stepOverDrainRequired, 1);
                 closeAdmission = true;
-                return DapStepOverResult.TimedOut(threadId);
+                return DapStepOverResult.TimedOut(active!.ThreadId);
             }
             catch (Exception exception)
             {
@@ -609,9 +1944,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _activeStepOver = null;
                 }
 
-                _executionAdmission = closeAdmission || RequiresStepOverDrain()
+                _executionAdmission = _executionAdmission == ExecutionAdmission.Closing
+                    || closeAdmission || RequiresStepOverDrain()
                     ? ExecutionAdmission.Closing
                     : ExecutionAdmission.Available;
+                _executionSettled?.TrySetResult(true);
+                _executionSettled = null;
             }
 
             active?.Dispose();
@@ -624,7 +1962,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_stateGate)
         {
-            if (_executionAdmission != ExecutionAdmission.Available || _inspectionClosed)
+            if (_executionAdmission != ExecutionAdmission.Available || _inspectionClosed || _activePause is not null)
             {
                 return false;
             }
@@ -634,11 +1972,33 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    internal async Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken)
+    internal Task WaitForExecutionSettlementAsync()
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!TryAdmitExecution())
+        lock (_stateGate)
+            return _executionAdmission == ExecutionAdmission.Active
+                ? (_executionSettled ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task
+                : Task.CompletedTask;
+    }
+
+    internal Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken) =>
+        ContinueForOptionalThreadAsync(threadId, cancellationToken);
+
+    internal Task<DapContinueResult> ContinueForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken) =>
+        ContinueCoreAsync(threadId, cancellationToken, null, null, null);
+
+    internal Task<DapContinueResult> ContinueTracepointAsync(int threadId, string expectedContext,
+        TaskCompletionSource<bool> admissionFinished, long breakpointRevision, CancellationToken cancellationToken) =>
+        ContinueCoreAsync(threadId, cancellationToken, expectedContext, admissionFinished, breakpointRevision);
+
+    private sealed class QuickContinueVetoException : Exception { }
+
+    private async Task<DapContinueResult> ContinueCoreAsync(int? threadId, CancellationToken cancellationToken,
+        string? expectedContext, TaskCompletionSource<bool>? admissionFinished, long? breakpointRevision, bool acknowledgementOnly = false)
+    {
+        if (cancellationToken.IsCancellationRequested || !TryAdmitExecution())
         {
+            admissionFinished?.TrySetResult(false);
+            cancellationToken.ThrowIfCancellationRequested();
             return DapContinueResult.Refused;
         }
 
@@ -649,23 +2009,35 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                int selectedThreadId;
                 lock (_stateGate)
                 {
-                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    var selected = threadId ?? _state.CurrentThreadId;
+                    if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || (expectedContext is not null && (_state.Event != "stopped" || _state.CurrentThreadId != threadId
+                            || !StringComparer.Ordinal.Equals(_inspectionContextId, expectedContext)))
+                        || (breakpointRevision is not null && _legacyBreakpointRevision != breakpointRevision)
+                        || (acknowledgementOnly && _quickPauseRecord is null)
+                        || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapContinueResult.Refused;
                     }
 
-                    active = new ContinueRecord(threadId, cancellationToken);
+                    selectedThreadId = resolved;
+                    active = new ContinueRecord(selectedThreadId, cancellationToken);
+                    if (acknowledgementOnly) { active.QuickPause = _quickPauseRecord; active.QuickContext = expectedContext; }
                     _activeContinue = active;
-                    _state = new DapSessionState(null, null, null);
-                    ClearCallStackEligibility();
-                    _inspectionContextId = null;
+                    if (!acknowledgementOnly)
+                    {
+                        _state = new DapSessionState(null, null, null);
+                        ClearCallStackEligibility();
+                        _inspectionContextId = null;
+                    }
                 }
 
                 request = await BeginRequestAsync(
                     "continue",
-                    new DapContinueArguments(threadId),
+                    new DapContinueArguments(selectedThreadId),
                     ContinueTimeout,
                     cancellationToken,
                     continueExecution: active).ConfigureAwait(false);
@@ -673,10 +2045,26 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             finally
             {
                 _callStackAdmissionGate.Release();
+                admissionFinished?.TrySetResult(request is not null);
+            }
+
+            if (acknowledgementOnly)
+            {
+                _ = await request!.Completion.Task.WaitAsync(active!.DeadlineToken).ConfigureAwait(false);
+                lock (_stateGate)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (active.ProtocolFailure is { } failure) throw new InvalidDataException("DAP continue exchange failed.", failure);
+                    return FinalizeContinue(active, interrupted: true);
+                }
             }
 
             return await WaitForContinueOutcomeAsync(
                 active!, active!.DeadlineToken, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QuickContinueVetoException)
+        {
+            return DapContinueResult.Refused;
         }
         catch (OperationCanceledException exception)
         {
@@ -723,6 +2111,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         finally
         {
+            admissionFinished?.TrySetResult(false);
             if (request is not null)
             {
                 RemovePending(request);
@@ -735,10 +2124,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _activeContinue = null;
                 }
 
-                if (active is null || _executionAdmission == ExecutionAdmission.Active)
+                if (_executionAdmission == ExecutionAdmission.Active)
                 {
                     _executionAdmission = ExecutionAdmission.Available;
                 }
+                _executionSettled?.TrySetResult(true);
+                _executionSettled = null;
             }
 
             active?.Dispose();
@@ -762,7 +2153,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var requiresDrain = active.ProtocolFailure is not null || result.Outcome == DapContinueOutcome.Terminal
             || (interrupted && active.WriteStarted && !(active.CommittedWrite && acknowledged));
         active.Finalized = true;
-        _executionAdmission = requiresDrain ? ExecutionAdmission.Closing : ExecutionAdmission.Active;
+        if (requiresDrain)
+        {
+            _executionAdmission = ExecutionAdmission.Closing;
+        }
+        else if (_executionAdmission != ExecutionAdmission.Closing)
+        {
+            _executionAdmission = ExecutionAdmission.Active;
+        }
         if (requiresDrain)
         {
             _inspectionClosed = true;
@@ -786,36 +2184,75 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken) =>
         StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, Array.Empty<DapSourceBreakpoint>(), cancellationToken);
 
+    private Task StartProtocolAsync(
+        string programPath,
+        TimeSpan initializeTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        CancellationToken cancellationToken) =>
+        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, launchOptions: null, cancellationToken);
+
+    private async Task InitializeProtocolAsync(TimeSpan initializeTimeout, CancellationToken cancellationToken)
+    {
+        _ = await SendRequestAsync("initialize", new
+        {
+            clientID = "netcoredbg-mcp-stateless",
+            clientName = "netcoredbg-mcp-stateless",
+            adapterID = "coreclr",
+            pathFormat = "path",
+            linesStartAt1 = true,
+            columnsStartAt1 = true,
+            supportsRunInTerminalRequest = false,
+            supportsVariableType = true,
+            supportsVariablePaging = true,
+            supportsInvalidatedEvent = true,
+            supportsProgressReporting = true,
+        }, initializeTimeout, cancellationToken).ConfigureAwait(false);
+        await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task StartProtocolAsync(
         string programPath,
         TimeSpan initializeTimeout,
         IReadOnlyDictionary<string, string>? launchEnvironment,
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
-        CancellationToken cancellationToken)
+        DapLaunchOptions? launchOptions,
+        CancellationToken cancellationToken, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
     {
-        _ = await SendRequestAsync(
-            "initialize",
-            new
-            {
-                clientID = "netcoredbg-mcp-stateless",
-                clientName = "netcoredbg-mcp-stateless",
-                adapterID = "coreclr",
-                pathFormat = "path",
-                linesStartAt1 = true,
-                columnsStartAt1 = true,
-                supportsRunInTerminalRequest = false,
-                supportsVariableType = true,
-                supportsInvalidatedEvent = true,
-            },
-            initializeTimeout,
-            cancellationToken).ConfigureAwait(false);
-
-        await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+        await InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+        if (_encHookPresent)
+        {
+            _ = await SendRequestAsync("setHotReload", new { enable = true }, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            _encEnabled = true;
+        }
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
+        if (functionBreakpoints is not null)
+        {
+            DapBreakpointUpdateResult result;
+            try
+            {
+                result = await ReplaceFunctionBreakpointsAsync(functionBreakpoints, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new DapBreakpointsException(isRefused: false);
+            }
+            if (result.Outcome is not (DapBreakpointUpdateOutcome.Added or DapBreakpointUpdateOutcome.Unsupported or DapBreakpointUpdateOutcome.Refused))
+                throw new DapBreakpointsException(isRefused: false);
+        }
 
-        object launchArguments = launchEnvironment is { Count: > 0 }
-            ? new { program = programPath, env = launchEnvironment }
-            : new { program = programPath };
+        var debuggeeProgram = programPath;
+        var debuggeeArguments = launchOptions?.Arguments;
+        if (launchOptions?.DotnetHostPath is { } dotnetHost)
+        {
+            debuggeeProgram = dotnetHost;
+            debuggeeArguments = new string[(launchOptions.Arguments?.Length ?? 0) + 1];
+            debuggeeArguments[0] = programPath;
+            launchOptions.Arguments?.CopyTo(debuggeeArguments, 1);
+        }
+        var launchArguments = new DapLaunchArguments(debuggeeProgram,
+            launchEnvironment is { Count: > 0 } ? launchEnvironment : null,
+            launchOptions?.WorkingDirectory, debuggeeArguments, launchOptions?.StopAtEntry, launchOptions?.JustMyCode);
         var launch = await BeginRequestAsync(
             "launch",
             launchArguments,
@@ -832,7 +2269,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     cancellationToken).ConfigureAwait(false);
             }
 
-            _ = await WaitForResponseAsync(launch, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            var response = await WaitForResponseAsync(launch, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success)
+            {
+                throw new DapLaunchRefusedException();
+            }
         }
         finally
         {
@@ -873,14 +2314,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 var requested = new DapRequestedBreakpoint[fileBreakpoints.Count];
                 for (var index = 0; index < requested.Length; index++)
                 {
-                    requested[index] = new DapRequestedBreakpoint(fileBreakpoints[index].Line);
+                    var entry = fileBreakpoints[index];
+                    requested[index] = new DapRequestedBreakpoint(entry.Line, entry.Incarnation,
+                        string.IsNullOrEmpty(entry.Condition) ? null : entry.Condition,
+                        string.IsNullOrEmpty(entry.HitCondition) ? null : entry.HitCondition, entry.Identity);
                 }
-
-                var response = await SendRequestAcceptingRefusalAsync(
-                    "setBreakpoints",
-                    new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
-                    _requestTimeout,
-                    deadline.Token).ConfigureAwait(false);
+                PendingRequest request;
+                await _callStackAdmissionGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+                try
+                {
+                    lock (_stateGate)
+                    {
+                        if (requested.Any(bp => (!string.IsNullOrEmpty(bp.Condition) && !_supportsConditionalBreakpoints)
+                            || (!string.IsNullOrEmpty(bp.HitCondition) && !_supportsHitConditionalBreakpoints)))
+                            throw new DapBreakpointOptionsUnsupportedException();
+                    }
+                    request = await BeginRequestAsync("setBreakpoints", new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
+                        _requestTimeout, deadline.Token, initialBreakpoints: new InitialBreakpointRequest(file, requested)).ConfigureAwait(false);
+                }
+                finally { _callStackAdmissionGate.Release(); }
+                DapResponse response;
+                try { response = await WaitForResponseAsync(request, _requestTimeout, deadline.Token).ConfigureAwait(false); }
+                finally { RemovePending(request); }
                 if (!response.Success)
                 {
                     throw new DapBreakpointsException(isRefused: true);
@@ -910,6 +2365,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 InitialBreakpoints = initial;
             }
         }
+        catch (DapBreakpointOptionsUnsupportedException)
+        {
+            throw;
+        }
         catch (DapBreakpointsException)
         {
             throw;
@@ -933,15 +2392,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return results;
     }
 
-    private static DapBreakpointObservation ReadBreakpointObservation(JsonElement result)
+    private static bool ReadBreakpointVerification(JsonElement result)
     {
         if (result.ValueKind != JsonValueKind.Object
             || !result.TryGetProperty("verified", out var verified)
             || verified.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
-        {
             throw new InvalidDataException("DAP breakpoint verification must be a boolean.");
-        }
+        return verified.GetBoolean();
+    }
 
+    private static DapBreakpointObservation ReadBreakpointObservation(JsonElement result)
+    {
+        var verified = ReadBreakpointVerification(result);
         int? actualLine = null;
         if (result.TryGetProperty("line", out _))
         {
@@ -952,8 +2414,242 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
 
-        return new DapBreakpointObservation(verified.GetBoolean(), actualLine);
+        return new DapBreakpointObservation(verified, actualLine);
     }
+
+    private void ObserveLegacyBreakpointResponse(string file, DapRequestedBreakpoint[] requested, JsonElement body)
+    {
+        _legacyBreakpointRevision++;
+        var results = RequireBreakpointResults(body, requested.Length);
+        var next = new List<LegacyBreakpointObservation>(requested.Length);
+        var index = 0;
+        foreach (var result in results.EnumerateArray())
+        {
+            var observation = ReadBreakpointObservation(result);
+            var line = requested[index++].Line;
+            var incarnation = requested[index - 1].Incarnation;
+            var count = GetLegacyHitCount(file, line);
+            var id = TryGetInt32(result, "id");
+            if (id is not { } observedId) MarkLegacyBreakpointEventsIncomplete();
+            else if (_legacyFunctionBreakpointIds.Contains(observedId)) MarkLegacyBreakpointEventsIncomplete();
+            else if (_legacyBreakpointIds.TryGetValue(observedId, out var owner))
+            {
+                if (owner != requested[index - 1].Identity) MarkLegacyBreakpointEventsIncomplete();
+            }
+            else if (_legacyBreakpointIds.Count >= 4096) MarkLegacyBreakpointEventsIncomplete();
+            else _legacyBreakpointIds[observedId] = requested[index - 1].Identity;
+            next.Add(new LegacyBreakpointObservation(file, line, incarnation, observation.Verified,
+                observation.ActualLine == line ? null : observation.ActualLine, id, count, false));
+        }
+        if (next.Count == 0) _legacyBreakpointObservations.Remove(file);
+        else _legacyBreakpointObservations[file] = next;
+        try { _resourceEventObserver?.Invoke("breakpoint"); } catch (Exception) { }
+    }
+
+    private void ObserveLegacyBreakpointEvent(JsonElement body)
+    {
+        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty("breakpoint", out var value) || value.ValueKind != JsonValueKind.Object
+            || TryGetInt32(value, "id") is not { } id || TryGetString(body, "reason") is not { } reason)
+            return;
+        var removed = reason == "removed";
+        if (!removed && reason is not ("changed" or "new")) return;
+        var verified = false;
+        if (!removed)
+        {
+            if (!value.TryGetProperty("verified", out var verification) || verification.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return;
+            verified = verification.GetBoolean();
+        }
+        var line = removed ? null : TryGetInt32(value, "line");
+        lock (_stateGate)
+        {
+            if (_legacyBreakpointEventsIncomplete) return;
+            if (_legacyFunctionBreakpointIds.Contains(id))
+            {
+                if (_legacyBreakpointIds.ContainsKey(id)) MarkLegacyBreakpointEventsIncomplete();
+                return;
+            }
+            if (_activeBreakpointUpdate is { FunctionBreakpoints: not null, Result: null } && _legacyBreakpointIds.ContainsKey(id))
+            {
+                if (_deferredLegacyBreakpointEvents.Count >= MaximumBreakpointCount)
+                {
+                    MarkLegacyBreakpointEventsIncomplete();
+                    _deferredLegacyBreakpointEvents.Clear();
+                }
+                else
+                {
+                    _deferredLegacyBreakpointEvents.Add((id, removed, verified, line));
+                    if (_deferredLegacyBreakpointEvents.Count == 1) SignalLegacyBreakpointChange();
+                }
+                return;
+            }
+            ApplyLegacyBreakpointEvent(id, removed, verified, line);
+        }
+    }
+
+    private void ApplyLegacyBreakpointEvent(int id, bool removed, bool verified, int? line)
+    {
+        foreach (var observations in _legacyBreakpointObservations.Values)
+        {
+            for (var index = 0; index < observations.Count; index++)
+            {
+                var previous = observations[index];
+                if (previous.Id != id || previous.Removed) continue;
+                var updated = removed ? previous with { Removed = true }
+                    : previous with { Verified = verified, DapLine = line is null ? previous.DapLine : line == previous.Line ? null : line };
+                if (updated != previous)
+                {
+                    if (updated.Removed) _legacyRemovedBreakpoints[updated.Incarnation] = updated;
+                    observations[index] = updated;
+                    try { _resourceEventObserver?.Invoke("breakpoint"); } catch (Exception) { }
+                }
+                return;
+            }
+        }
+    }
+
+    private void FinishDeferredLegacyBreakpointEvents(bool ownershipKnown)
+    {
+        if (_deferredLegacyBreakpointEvents.Count == 0) return;
+        if (!ownershipKnown) MarkLegacyBreakpointEventsIncomplete();
+        if (!_legacyBreakpointEventsIncomplete)
+            foreach (var item in _deferredLegacyBreakpointEvents)
+                ApplyLegacyBreakpointEvent(item.Id, item.Removed, item.Verified, item.Line);
+        _deferredLegacyBreakpointEvents.Clear();
+        SignalLegacyBreakpointChange();
+    }
+
+    private void MarkLegacyBreakpointEventsIncomplete()
+    {
+        if (_legacyBreakpointEventsIncomplete) return;
+        _legacyBreakpointEventsIncomplete = true;
+        _legacyBreakpointRevision++;
+        SignalLegacyBreakpointChange();
+    }
+
+    private void SignalLegacyBreakpointChange()
+    {
+        try { _resourceEventObserver?.Invoke("breakpoint"); } catch (Exception) { }
+    }
+
+    internal LegacyBreakpointObservation[] CaptureLegacyBreakpoints()
+    {
+        lock (_stateGate)
+        {
+            var result = _legacyRemovedBreakpoints.Values.Concat(_legacyBreakpointObservations.Values.SelectMany(static value => value)).ToArray();
+            _legacyRemovedBreakpoints.Clear();
+            return result;
+        }
+    }
+
+    internal long GetLegacyHitCount(string file, int line)
+    {
+        lock (_stateGate)
+            return _legacyHitCounts.TryGetValue(file, out var counts) && counts.TryGetValue(line, out var count) ? count : 0;
+    }
+
+    internal T WithLegacyBreakpointLock<T>(Func<T> action)
+    {
+        lock (_stateGate) return action();
+    }
+
+    internal bool LegacyBreakpointEventsComplete { get { lock (_stateGate) return !_legacyBreakpointEventsIncomplete && _deferredLegacyBreakpointEvents.Count == 0; } }
+    internal long LegacyBreakpointRevision { get { lock (_stateGate) return _legacyBreakpointRevision; } }
+
+    internal static bool TryNormalizeLegacyBreakpointSource(string file, out string normalized, bool requireExistingFile)
+    {
+        normalized = string.Empty;
+        try
+        {
+            var fullPath = Path.GetFullPath(file, Environment.CurrentDirectory);
+            if (requireExistingFile && !File.Exists(fullPath)) return false;
+            var root = Path.GetPathRoot(fullPath)!;
+            var components = fullPath[root.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+            var path = root;
+            for (var index = 0; index < components.Length; index++)
+            {
+                path = Path.Combine(path, components[index]);
+                FileSystemInfo entry = index == components.Length - 1 ? new FileInfo(path) : new DirectoryInfo(path);
+                if (entry.Exists && entry.LinkTarget is not null)
+                {
+                    var target = entry.ResolveLinkTarget(returnFinalTarget: true);
+                    if (target is null) return false;
+                    path = target.FullName;
+                }
+            }
+            if (requireExistingFile && !File.Exists(path)) return false;
+            normalized = path;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or IOException or NotSupportedException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private void ScheduleLegacyBreakpointHit(int threadId, string context, LegacyBreakpointObservation[] captured)
+    {
+        if (Interlocked.CompareExchange(ref _legacyHitObservationActive, 1, 0) != 0)
+        {
+            lock (_stateGate) _legacyHitCountsIncomplete = true;
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var stack = await GetCallStackAsync(threadId, 0, 1, true, timeout.Token).ConfigureAwait(false);
+                if (stack.IsRefused || stack.Frames.Count == 0 || stack.Frames[0].Source is not { } frameSource
+                    || stack.Frames[0].Line <= 0 || !TryNormalizeLegacyBreakpointSource(frameSource, out var source, requireExistingFile: false))
+                {
+                    lock (_stateGate) _legacyHitCountsIncomplete = true;
+                    return;
+                }
+                var frame = stack.Frames[0];
+                lock (_stateGate)
+                {
+                    if (_inspectionClosed || _state.Event != "stopped" || _state.CurrentThreadId != threadId
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, context))
+                    {
+                        _legacyHitCountsIncomplete = true;
+                        return;
+                    }
+                    LegacyBreakpointObservation? matching = null;
+                    foreach (var item in captured)
+                    {
+                        if (item.Removed || !_requestedBreakpoints.Comparer.Equals(item.File, source) || (item.DapLine ?? item.Line) != frame.Line) continue;
+                        if (matching is not null) { _legacyHitCountsIncomplete = true; return; }
+                        matching = item;
+                    }
+                    if (matching is { } match)
+                    {
+                        if (!_legacyHitCounts.TryGetValue(source, out var counts))
+                        {
+                            if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                            _legacyHitCounts[source] = counts = [];
+                        }
+                        if (!counts.TryGetValue(match.Line, out var count))
+                        {
+                            if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                            _legacyHitCountLocations++;
+                        }
+                        counts[match.Line] = checked(count + 1);
+                        if (_legacyBreakpointObservations.TryGetValue(source, out var current))
+                        {
+                            var index = current.FindIndex(entry => entry.Incarnation == match.Incarnation);
+                            if (index >= 0) current[index] = current[index] with { HitCount = counts[match.Line] };
+                        }
+                    }
+                }
+            }
+            catch (Exception) { lock (_stateGate) _legacyHitCountsIncomplete = true; }
+            finally { Volatile.Write(ref _legacyHitObservationActive, 0); }
+        });
+    }
+
+    internal bool LegacyHitCountsComplete { get { lock (_stateGate) return !_legacyHitCountsIncomplete && Volatile.Read(ref _legacyHitObservationActive) == 0; } }
+    internal bool LegacyHitCountsUnavailable { get { lock (_stateGate) return _legacyHitCountsIncomplete; } }
 
     internal Task<DapBreakpointUpdateResult> AddBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: false, cancellationToken);
@@ -961,7 +2657,189 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapBreakpointUpdateResult> RemoveBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: true, cancellationToken);
 
-    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken)
+    internal Task<DapBreakpointUpdateResult> ReplaceBreakpointsAsync(string file, int line, bool remove, LegacyRequestedLine[] requestedLines, CancellationToken cancellationToken) =>
+        UpdateBreakpointAsync(file, line, remove, cancellationToken, requestedLines);
+
+    internal bool SupportsFunctionBreakpoints { get { lock (_stateGate) return _supportsFunctionBreakpoints; } }
+
+    internal LegacyFunctionBreakpoint[] CaptureLegacyFunctionBreakpoints()
+    {
+        lock (_stateGate) return (LegacyFunctionBreakpoint[])_legacyFunctionObservations.Clone();
+    }
+
+    internal async Task<DapBreakpointUpdateResult> ReplaceFunctionBreakpointsAsync(LegacyFunctionBreakpoint[] functions, CancellationToken cancellationToken)
+    {
+        await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        BreakpointUpdate? update = null;
+        PendingRequest? request = null;
+        try
+        {
+            using var deadline = CreateDeadline(_requestTimeout, cancellationToken);
+            await _callStackAdmissionGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (_breakpointUpdatesClosed || _inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing)
+                        return DapBreakpointUpdateResult.Unavailable;
+                    if (!_supportsFunctionBreakpoints)
+                        return new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Unsupported);
+                    update = new BreakpointUpdate(string.Empty, [], -1, 0) { FunctionBreakpoints = functions };
+                    _activeBreakpointUpdate = update;
+                }
+                request = await BeginRequestAsync("setFunctionBreakpoints", new { breakpoints = functions.Select(static point => point with { Condition = string.IsNullOrEmpty(point.Condition) ? null : point.Condition, HitCondition = string.IsNullOrEmpty(point.HitCondition) ? null : point.HitCondition }).ToArray() }, _requestTimeout,
+                    deadline.Token, breakpointUpdate: update).ConfigureAwait(false);
+            }
+            finally { _callStackAdmissionGate.Release(); }
+            await update.Completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+            lock (_stateGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (update.Failure is { } failure) throw new InvalidDataException("DAP function breakpoint update failed.", failure);
+                var result = update.Result ?? throw new InvalidOperationException("Function breakpoint update has no result.");
+                update.Finalized = true;
+                if (update.RequiresDrain) FenceBreakpointUpdates();
+                return result with { RequiresDrain = update.RequiresDrain };
+            }
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            bool requiresDrain;
+            lock (_stateGate)
+            {
+                var outcomeKnown = update is { CommittedWrite: true, Result: not null, Failure: null, RequiresDrain: false };
+                if (outcomeKnown)
+                {
+                    update!.Finalized = true;
+                    return update.Result!;
+                }
+                requiresDrain = update is not null && (update.RequiresDrain || (update.WriteStarted && !outcomeKnown));
+                if (update is not null) update.Finalized = true;
+                if (requiresDrain) FenceBreakpointUpdates();
+            }
+            throw new DapBreakpointCanceledException(requiresDrain, exception, cancellationToken);
+        }
+        catch
+        {
+            lock (_stateGate)
+            {
+                if (update is not null) update.Finalized = true;
+                FenceBreakpointUpdates();
+            }
+            throw;
+        }
+        finally
+        {
+            if (request is not null) RemovePending(request);
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeBreakpointUpdate, update))
+                {
+                    FinishDeferredLegacyBreakpointEvents(ownershipKnown: update is { WriteStarted: false });
+                    _activeBreakpointUpdate = null;
+                }
+            }
+            _breakpointUpdateGate.Release();
+        }
+    }
+
+    internal async Task<DapBreakpointUpdateResult> ConfigureExceptionsAsync(string[] filters, CancellationToken cancellationToken)
+    {
+        await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        BreakpointUpdate? update = null;
+        PendingRequest? request = null;
+        try
+        {
+            using var deadline = CreateDeadline(_requestTimeout, cancellationToken);
+            await _callStackAdmissionGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (_breakpointUpdatesClosed || _inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing)
+                    {
+                        return DapBreakpointUpdateResult.Refused;
+                    }
+                    if (!_supportsExceptionFilters)
+                    {
+                        return new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Unsupported);
+                    }
+                    update = new BreakpointUpdate(string.Empty, [], -1, 0) { ExceptionFilters = filters };
+                    _activeBreakpointUpdate = update;
+                }
+                request = await BeginRequestAsync("setExceptionBreakpoints", new { filters }, _requestTimeout,
+                    deadline.Token, breakpointUpdate: update).ConfigureAwait(false);
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
+            }
+
+            await update.Completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+            lock (_stateGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (update.Failure is { } failure)
+                {
+                    throw new InvalidDataException("DAP exception filter update failed.", failure);
+                }
+                var result = update.Result ?? throw new InvalidOperationException("Exception filter update has no result.");
+                update.Finalized = true;
+                if (update.RequiresDrain)
+                {
+                    FenceBreakpointUpdates();
+                }
+                return result with { RequiresDrain = update.RequiresDrain };
+            }
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            bool requiresDrain;
+            lock (_stateGate)
+            {
+                var outcomeKnown = update is { CommittedWrite: true, Result: not null, Failure: null, RequiresDrain: false };
+                requiresDrain = update is not null && (update.RequiresDrain || (update.WriteStarted && !outcomeKnown));
+                if (update is not null)
+                {
+                    update.Finalized = true;
+                }
+                if (requiresDrain)
+                {
+                    FenceBreakpointUpdates();
+                }
+            }
+            throw new DapBreakpointCanceledException(requiresDrain, exception, cancellationToken);
+        }
+        catch
+        {
+            lock (_stateGate)
+            {
+                if (update is not null)
+                {
+                    update.Finalized = true;
+                }
+                FenceBreakpointUpdates();
+            }
+            throw;
+        }
+        finally
+        {
+            if (request is not null)
+            {
+                RemovePending(request);
+            }
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeBreakpointUpdate, update))
+                {
+                    _activeBreakpointUpdate = null;
+                }
+            }
+            _breakpointUpdateGate.Release();
+        }
+    }
+
+    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken, LegacyRequestedLine[]? requestedLines = null)
     {
         await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         BreakpointUpdate? update = null;
@@ -976,7 +2854,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     if (_breakpointUpdatesClosed || _inspectionClosed || _executionAdmission == ExecutionAdmission.Closing)
                     {
-                        return DapBreakpointUpdateResult.Refused;
+                        return requestedLines is null ? DapBreakpointUpdateResult.Refused : DapBreakpointUpdateResult.Unavailable;
                     }
 
                     var previous = _requestedBreakpoints.TryGetValue(file, out var existing)
@@ -984,7 +2862,24 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         : Array.Empty<DapRequestedBreakpoint>();
                     var targetIndex = -1;
                     var requested = previous;
-                    if (remove)
+                    if (requestedLines is not null)
+                    {
+                        if (_requestedBreakpointCount - previous.Length + requestedLines.Length > MaximumBreakpointCount)
+                            return DapBreakpointUpdateResult.LimitReached;
+                        requested = new DapRequestedBreakpoint[requestedLines.Length];
+                        for (var index = 0; index < requestedLines.Length; index++)
+                        {
+                            var entry = requestedLines[index];
+                            requested[index] = new DapRequestedBreakpoint(entry.Line, entry.Incarnation,
+                                string.IsNullOrEmpty(entry.Condition) ? null : entry.Condition,
+                                string.IsNullOrEmpty(entry.HitCondition) ? null : entry.HitCondition, entry.Identity);
+                            if (!remove && requestedLines[index].Line == line) targetIndex = index;
+                        }
+                        if (requested.Any(bp => (!string.IsNullOrEmpty(bp.Condition) && !_supportsConditionalBreakpoints)
+                            || (!string.IsNullOrEmpty(bp.HitCondition) && !_supportsHitConditionalBreakpoints)))
+                            return new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Unsupported);
+                    }
+                    else if (remove)
                     {
                         var remainingCount = 0;
                         foreach (var breakpoint in previous)
@@ -1042,7 +2937,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         }
                     }
 
-                    update = new BreakpointUpdate(file, requested, targetIndex, requested.Length - previous.Length);
+                    update = new BreakpointUpdate(file, requested, targetIndex, requested.Length - previous.Length, remove);
                     _activeBreakpointUpdate = update;
                 }
 
@@ -1180,9 +3075,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string command,
         object? arguments,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        InitialBreakpointRequest? initialBreakpoints = null)
     {
-        var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken).ConfigureAwait(false);
+        var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken, initialBreakpoints: initialBreakpoints).ConfigureAwait(false);
         try
         {
             return await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
@@ -1193,7 +3089,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     private async Task<(DapResponse? Response, bool IsPaged)> SendStackTraceRequestAsync(
-        int threadId,
+        int? threadId,
         uint startFrame,
         uint levels,
         bool includeInspectionContext,
@@ -1204,14 +3100,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var target = CaptureCallStackTarget(threadId, includeInspectionContext);
+            var target = CaptureOptionalCallStackTarget(threadId, includeInspectionContext);
             if (target is null)
             {
                 return (null, false);
             }
 
             isPaged = target.Value.SupportsPaging;
-            object arguments = isPaged ? new { threadId, startFrame, levels } : new { threadId };
+            var selectedThreadId = target.Value.ThreadId;
+            object arguments = isPaged ? new { threadId = selectedThreadId, startFrame, levels } : new { threadId = selectedThreadId };
             request = await BeginRequestAsync(
                 "stackTrace",
                 arguments,
@@ -1239,31 +3136,49 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string command,
         object arguments,
         string inspectionContextId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TaskCompletionSource<bool>? admissionFinished = null, long? breakpointRevision = null, Action? onWriteStarted = null)
     {
-        PendingRequest request;
-        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        PendingRequest? request = null;
+        try
+        {
+            await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            admissionFinished?.TrySetResult(false);
+            throw;
+        }
         try
         {
             lock (_stateGate)
             {
-                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId)
+                    || (breakpointRevision is not null && _legacyBreakpointRevision != breakpointRevision))
                 {
                     return null;
                 }
             }
 
             request = await BeginRequestAsync(command, arguments, _requestTimeout, cancellationToken,
-                inspectionContextId: inspectionContextId).ConfigureAwait(false);
+                inspectionContextId: inspectionContextId, onWriteStarted: onWriteStarted).ConfigureAwait(false);
         }
         finally
         {
             _callStackAdmissionGate.Release();
+            admissionFinished?.TrySetResult(request is not null);
         }
 
         try
         {
             return await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (command == "evaluate" && request.WriteStarted)
+        {
+            // A committed evaluate can still be executing after its caller stops waiting.
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
         }
         finally
         {
@@ -1280,7 +3195,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StepOverRecord? stepOver = null,
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
-        BreakpointUpdate? breakpointUpdate = null)
+        BreakpointUpdate? breakpointUpdate = null,
+        PauseRecord? pause = null,
+        bool trackLoadedSourcesWrite = false,
+        InitialBreakpointRequest? initialBreakpoints = null,
+        Action<PendingRequest>? requestCreated = null,
+        Action? onWriteStarted = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -1292,7 +3212,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         continueExecution?.SetRequestSequence(sequence);
         breakpointUpdate?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
-            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate);
+            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause, initialBreakpoints, onWriteStarted);
+        requestCreated?.Invoke(request);
+        if (pause is not null)
+        {
+            lock (_stateGate)
+            {
+                pause.Request = request;
+            }
+        }
         if (!_pending.TryAdd(sequence, request))
         {
             throw new InvalidOperationException($"DAP request sequence '{sequence}' was reused.");
@@ -1300,7 +3228,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var deadline = stepOver is null && continueExecution is null && breakpointUpdate is null
+            using var deadline = stepOver is null && continueExecution is null && breakpointUpdate is null && pause is null
                 ? CreateDeadline(timeout, cancellationToken) : null;
             await WriteMessageAsync(new
             {
@@ -1309,12 +3237,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 command,
                 arguments,
             }, deadline?.Token ?? cancellationToken, stepOver,
-                request.InspectionContextId is null ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
+                request.InspectionContextId is null && pause is null && !trackLoadedSourcesWrite ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
         {
-            if (exception is OperationCanceledException && request.InspectionContextId is not null && request.WriteStarted)
+            if (request.InspectionContextId is not null && request.WriteStarted
+                && (exception is OperationCanceledException || request.Command is "setVariable" or "writeMemory" or "applyDeltas"))
             {
                 Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
                 lock (_stateGate)
@@ -1326,6 +3255,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             RemovePending(request);
             request.Completion.TrySetException(exception);
+            if (pause is not null || command == "terminate" || exception is QuickContinueVetoException)
+            {
+                _ = request.Completion.Task.Exception;
+            }
             throw;
         }
     }
@@ -1393,18 +3326,84 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0)
+            {
+                throw new IOException("The DAP stream has an incomplete loadedSources request.");
+            }
             await (_preHeaderWriteGate?.Invoke(cancellationToken) ?? Task.CompletedTask).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            if (inspectionRequest?.Pause is { } pause)
+            {
+                lock (_stateGate)
+                {
+                    if (!CanWritePause(pause))
+                    {
+                        throw new InvalidDataException("DAP pause lost write admission.");
+                    }
+                }
+            }
             stepOver?.MarkWriteStarted();
-            continueExecution?.MarkWriteStarted();
-            inspectionRequest?.MarkWriteStarted();
-            breakpointUpdate?.MarkWriteStarted();
+            if (continueExecution?.QuickPause is { } quickPause)
+            {
+                lock (_stateGate)
+                {
+                    if (!ReferenceEquals(_quickPauseRecord, quickPause) || _inspectionClosed || IsRetirementRequested
+                        || _state.Event != "stopped" || _state.CurrentThreadId != continueExecution.ThreadId
+                        || !HasStepOverAuthority(continueExecution.ThreadId)
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, continueExecution.QuickContext))
+                        throw new QuickContinueVetoException();
+                    _state = new DapSessionState(null, null, null);
+                    ClearCallStackEligibility();
+                    _inspectionContextId = null;
+                    continueExecution.MarkWriteStarted();
+                }
+            }
+            else continueExecution?.MarkWriteStarted();
+            if (inspectionRequest is { Command: "setVariable" or "writeMemory" or "applyDeltas" } mutation)
+            {
+                lock (_stateGate)
+                {
+                    if (Volatile.Read(ref _readerFailure) is not null || IsRetirementRequested || _inspectionClosed
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, mutation.InspectionContextId)
+                        || (mutation.Command == "applyDeltas" && _legacyEncModuleRevision != (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved)))
+                    {
+                        throw new InvalidDataException("DAP variable update lost write admission.");
+                    }
+                    mutation.MarkWriteStarted();
+                }
+            }
+            else
+            {
+                inspectionRequest?.MarkWriteStarted();
+            }
+            if (breakpointUpdate?.ExceptionFilters is not null)
+            {
+                lock (_stateGate)
+                {
+                    if (IsRetirementRequested || _breakpointUpdatesClosed || _inspectionClosed || _executionAdmission == ExecutionAdmission.Closing)
+                    {
+                        throw new InvalidDataException("DAP exception filter update lost write admission.");
+                    }
+                    breakpointUpdate.MarkWriteStarted();
+                }
+            }
+            else
+            {
+                breakpointUpdate?.MarkWriteStarted();
+            }
             await _input.WriteAsync(header, cancellationToken).ConfigureAwait(false);
             await _input.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
             await _input.FlushAsync(cancellationToken).ConfigureAwait(false);
+            inspectionRequest?.CommitWrite();
             breakpointUpdate?.CommitWrite();
             stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
             continueExecution?.Commit(_stepOverTimeProvider);
+        }
+        catch when (inspectionRequest is { Command: "loadedSources" or "terminate", WriteStarted: true, CommittedWrite: false })
+        {
+            // Fence queued writers before releasing the gate after an incomplete frame.
+            Interlocked.Exchange(ref _loadedSourcesWriteDrainRequired, 1);
+            throw;
         }
         finally
         {
@@ -1435,9 +3434,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (failure is not null)
             {
-                Volatile.Write(ref _readerFailure, failure);
+                lock (_stateGate)
+                {
+                    Volatile.Write(ref _readerFailure, failure);
+                    _inspectionContextId = null;
+                    _inspectionClosed = true;
+                    _legacyTermination?.TrySetResult(false);
+                }
                 _initialized.TrySetException(failure);
                 FailPending(failure);
+                lock (_stateGate)
+                {
+                    if (_activePause is { Finalized: false, Outcome: null } pause)
+                    {
+                        pause.ObserveFailure(failure);
+                        FencePause();
+                    }
+                }
                 try
                 {
                     ReaderFailed?.Invoke(this);
@@ -1446,6 +3459,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                 }
                 RequestRetirement();
+                try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
             }
             InvalidateInspectionContext(close: true);
         }
@@ -1462,7 +3476,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         switch (type)
         {
             case "response":
-                HandleResponse(message);
+                if (message.TryGetProperty("request_seq", out var requestSequence)
+                    && requestSequence.TryGetInt32(out var sequence)
+                    && _pending.TryGetValue(sequence, out var pending)
+                    && pending.Command is "setVariable" or "writeMemory" or "applyDeltas")
+                {
+                    _callStackAdmissionGate.Wait();
+                    try { HandleResponse(message); }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                else
+                {
+                    HandleResponse(message);
+                }
                 break;
             case "event":
                 HandleEvent(message);
@@ -1472,20 +3498,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private bool FailActiveStepOverForWrongCorrelation(int requestSequence, string? command)
     {
-        if (!string.Equals(command, "next", StringComparison.Ordinal))
+        if (command is not ("next" or "stepIn" or "stepOut"))
         {
             return false;
         }
 
         lock (_stateGate)
         {
-            if (_activeStepOver is not { } active || active.RequestSequence == requestSequence)
+            if (_activeStepOver is not { } active || active.RequestSequence == requestSequence
+                || !string.Equals(command, active.Command, StringComparison.Ordinal))
             {
                 return false;
             }
 
             active.Completion.TrySetException(new InvalidDataException(
-                $"DAP next response for request '{requestSequence}' did not match active request '{active.RequestSequence}'."));
+                $"DAP {active.Command} response for request '{requestSequence}' did not match active request '{active.RequestSequence}'."));
             return true;
         }
     }
@@ -1511,14 +3538,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private bool FailActiveBreakpointForWrongCorrelation(int requestSequence, string? command)
     {
-        if (!string.Equals(command, "setBreakpoints", StringComparison.Ordinal))
+        if (command is not ("setBreakpoints" or "setExceptionBreakpoints" or "setFunctionBreakpoints"))
         {
             return false;
         }
 
         lock (_stateGate)
         {
-            if (_activeBreakpointUpdate is not { Finalized: false } update || update.RequestSequence == requestSequence)
+            if (_activeBreakpointUpdate is not { Finalized: false } update || update.RequestSequence == requestSequence
+                || update.Command != command)
             {
                 return false;
             }
@@ -1532,14 +3560,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private void HandleResponse(JsonElement message)
     {
         var requestSequence = RequireInt32(message, "request_seq");
-        if (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command"))
+        var pauseOwned = _pending.TryGetValue(requestSequence, out var request) && request.Pause is not null;
+        if (!pauseOwned && (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command"))
             || FailActiveContinueForWrongCorrelation(requestSequence, TryGetString(message, "command"))
-            || FailActiveBreakpointForWrongCorrelation(requestSequence, TryGetString(message, "command")))
+            || FailActiveBreakpointForWrongCorrelation(requestSequence, TryGetString(message, "command"))))
         {
             return;
         }
 
-        if (!_pending.TryGetValue(requestSequence, out var request))
+        if (request is null)
         {
             return;
         }
@@ -1560,13 +3589,48 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return;
         }
 
-        var body = message.TryGetProperty("body", out var bodyElement)
+        var body = (request.Pause is null || request.Command != "pause")
+            && message.TryGetProperty("body", out var bodyElement)
             ? bodyElement.Clone()
             : default;
         if (success.ValueKind == JsonValueKind.True && request.Command == "initialize")
         {
             ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
+        }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.Command == "launch")
+        {
+            var changed = false;
+            lock (_stateGate)
+            {
+                if (_state.Event is null && !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing)
+                    changed = _legacyLaunchRunning = true;
+            }
+            if (changed) { try { _resourceEventObserver("state"); } catch (Exception) { } }
+        }
+        if (success.ValueKind == JsonValueKind.True && request.Command == "loadedSources")
+        {
+            RefreshLoadedSources(body);
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
+        }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.Command == "threads")
+        {
+            try
+            {
+                var array = RequireThreads(body);
+                var threads = new DapThread[array.GetArrayLength()];
+                ReadThreads(array, threads);
+                lock (_stateGate) _legacyThreads = threads;
+                _resourceEventObserver("state");
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException)
+            {
+                lock (_stateGate) _legacyThreads = null;
+            }
+        }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.InitialBreakpoints is { } initial)
+        {
+            lock (_stateGate) ObserveLegacyBreakpointResponse(initial.File, initial.Requested, body);
         }
 
         if (request.StepOver is { } stepOver)
@@ -1598,9 +3662,41 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (success.ValueKind == JsonValueKind.False)
                 {
                     update.Complete(DapBreakpointUpdateResult.Refused);
+                    if (update.FunctionBreakpoints is not null) FinishDeferredLegacyBreakpointEvents(ownershipKnown: false);
+                }
+                else if (update.ExceptionFilters is { } filters)
+                {
+                    var verified = ReadExceptionFilterResults(body, filters.Length);
+                    update.Complete(new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Acknowledged, ExceptionVerification: verified));
+                }
+                else if (update.FunctionBreakpoints is { } functions)
+                {
+                    var results = RequireBreakpointResults(body, functions.Length);
+                    var observations = new LegacyFunctionBreakpoint[functions.Length];
+                    var index = 0;
+                    foreach (var item in results.EnumerateArray())
+                    {
+                        var verified = ReadBreakpointVerification(item);
+                        if (item.TryGetProperty("line", out _)) _ = RequireSafeDapInteger(item, "line");
+                        var id = TryGetInt32(item, "id");
+                        if (id is { } value)
+                        {
+                            if (_legacyBreakpointIds.ContainsKey(value)) MarkLegacyBreakpointEventsIncomplete();
+                            if (_legacyFunctionBreakpointIds.Count >= 4096 && !_legacyFunctionBreakpointIds.Contains(value))
+                                MarkLegacyBreakpointEventsIncomplete();
+                            else _legacyFunctionBreakpointIds.Add(value);
+                        }
+                        else MarkLegacyBreakpointEventsIncomplete();
+                        observations[index] = functions[index] with { Verified = verified };
+                        index++;
+                    }
+                    _legacyFunctionObservations = observations;
+                    update.Complete(new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Added));
+                    FinishDeferredLegacyBreakpointEvents(ownershipKnown: true);
                 }
                 else
                 {
+                    if (_resourceEventObserver is not null) ObserveLegacyBreakpointResponse(update.File, update.Requested, body);
                     var results = RequireBreakpointResults(body, update.Requested.Length);
                     var selected = default(DapBreakpointObservation);
                     var index = 0;
@@ -1624,7 +3720,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _requestedBreakpointCount += update.CountDelta;
 
                     update.Complete(new DapBreakpointUpdateResult(
-                        update.CountDelta < 0 ? DapBreakpointUpdateOutcome.Removed : DapBreakpointUpdateOutcome.Added,
+                        update.IsRemoval ? DapBreakpointUpdateOutcome.Removed : DapBreakpointUpdateOutcome.Added,
                         selected.Verified, selected.ActualLine));
                 }
             }
@@ -1644,7 +3740,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _ = ReadOptionalBoolean(body, "allThreadsContinued");
                 }
 
-                if (acknowledged && !continued.HasObservedLifecycle)
+                if (acknowledged && !continued.HasObservedLifecycle
+                    && !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing)
                 {
                     _state = _state with { Event = "continued", StopReason = null, CurrentThreadId = null };
                 }
@@ -1652,11 +3749,106 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 continued.ObserveAcknowledgement(acknowledged);
             }
 
+            if (request.Pause is { Finalized: false } pause && ReferenceEquals(_activePause, pause)
+                && ReferenceEquals(pause.Request, request))
+            {
+                if (RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP pause acknowledgement is invalid.");
+                }
+
+                if (request.Command == "pause")
+                {
+                    pause.ObserveAcknowledgement(success.ValueKind == JsonValueKind.True);
+                }
+            }
+
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
                 && (request.InspectionContextId is null
                     || (!_inspectionClosed && StringComparer.Ordinal.Equals(_inspectionContextId, request.InspectionContextId)));
+            if (request.Command == "applyDeltas"
+                && _legacyEncModuleRevision != (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved))
+                targetCurrent = false;
+            if (_resourceEventObserver is not null && request.Command == "exceptionInfo" && targetCurrent && success.ValueKind == JsonValueKind.True)
+            {
+                if (body.ValueKind == JsonValueKind.Object && Encoding.UTF8.GetByteCount(body.GetRawText()) <= 64 * 1024)
+                    _legacyExceptionInfo = body.Clone();
+                else _legacyEventDetailsIncomplete = true;
+                try { _resourceEventObserver("state"); } catch (Exception) { }
+            }
+            var responseContext = request.InspectionContextId;
+            string? serializedContent = null;
+            if (request.Command == "setVariable")
+            {
+                try
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP setVariable response sequence must be positive.");
+                    }
+                    _inspectionContextId = null;
+                    if (!targetCurrent)
+                    {
+                        _inspectionClosed = true;
+                        Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                    }
+                    else if (success.ValueKind == JsonValueKind.True)
+                    {
+                        var value = RequireString(body, "value");
+                        var type = body.TryGetProperty("type", out var typeElement) && typeElement.ValueKind != JsonValueKind.Null
+                            ? RequireString(body, "type") : null;
+                        var reference = body.TryGetProperty("variablesReference", out _) ? RequireVariablesReference(body) : 0;
+                        responseContext = GetOrCreateInspectionContext();
+                        serializedContent = JsonSerializer.Serialize(new
+                        {
+                            kind = "set_variable_success",
+                            inspectionContextId = responseContext,
+                            value,
+                            type,
+                            variablesReference = reference,
+                        });
+                        if (Encoding.UTF8.GetByteCount(serializedContent) > 256 * 1024)
+                        {
+                            throw new InvalidDataException("DAP setVariable result exceeds the inspection response bound.");
+                        }
+                    }
+                }
+                catch
+                {
+                    _inspectionContextId = null;
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                    throw;
+                }
+            }
+            if (request.Command == "writeMemory")
+            {
+                _inspectionContextId = null;
+                if (!targetCurrent)
+                {
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                }
+                else
+                {
+                    responseContext = GetOrCreateInspectionContext();
+                }
+            }
+            if (request.Command == "applyDeltas")
+            {
+                _inspectionContextId = null;
+                if (!targetCurrent || success.ValueKind != JsonValueKind.True)
+                {
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                }
+                else
+                {
+                    responseContext = GetOrCreateInspectionContext();
+                }
+            }
             request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True,
-                targetCurrent, request.InspectionContextId));
+                targetCurrent, responseContext, serializedContent));
         }
     }
 
@@ -1671,9 +3863,66 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             case "process":
                 CaptureNativeSceneTargetIdentity(body);
+                if (_resourceEventObserver is not null)
+                {
+                    lock (_stateGate)
+                    {
+                        _legacyProcessId = TryGetInt32(body, "systemProcessId");
+                        var name = TryGetString(body, "name");
+                        _legacyProcessName = name is not null && Encoding.UTF8.GetByteCount(name) <= 4096 ? name : null;
+                        if (_legacyProcessId is { } observedPid)
+                        {
+                            _legacyProcessObservations ??= [];
+                            if (_legacyProcessObservations.Count < MaximumLegacyProcessObservations || _legacyProcessObservations.ContainsKey(observedPid))
+                                _legacyProcessObservations[observedPid] = (_legacyProcessName, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000d);
+                            else _legacyProcessObservationsIncomplete = true;
+                        }
+                    }
+                }
                 break;
             case "output":
-                HandleOutputEvent(body);
+                if (HandleOutputEvent(body))
+                {
+                    try { _resourceEventObserver?.Invoke("output"); }
+                    catch (Exception) { }
+                }
+                break;
+            case "breakpoint":
+                if (_resourceEventObserver is not null)
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate) _legacyBreakpointRevision++;
+                        ObserveLegacyBreakpointEvent(body);
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                break;
+            case "loadedSource":
+                HandleLoadedSourceEvent(body);
+                break;
+            case "module":
+                _callStackAdmissionGate.Wait();
+                try
+                {
+                    lock (_stateGate)
+                    {
+                        switch (TryGetString(body, "reason"))
+                        {
+                            case "new": _activityModuleNew++; break;
+                            case "changed": _activityModuleChanged++; break;
+                            case "removed": _activityModuleRemoved++; break;
+                        }
+                    }
+                    HandleRuntimeInventoryEvent(eventName, body);
+                }
+                finally { _callStackAdmissionGate.Release(); }
+                break;
+            case "progressStart":
+            case "progressUpdate":
+            case "progressEnd":
+                HandleRuntimeInventoryEvent(eventName, body);
                 break;
             case "initialized":
                 if (_initializeResponseObserved)
@@ -1690,12 +3939,117 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
                 if (capabilities.TryGetProperty("supportsTerminateRequest", out _))
                 {
-                    _supportsTerminate = ReadOptionalBoolean(capabilities, "supportsTerminateRequest");
+                    _callStackAdmissionGate.Wait();
+                    try { lock (_stateGate) _supportsTerminate = ReadOptionalBoolean(capabilities, "supportsTerminateRequest"); }
+                    finally { _callStackAdmissionGate.Release(); }
                 }
 
                 if (capabilities.TryGetProperty("supportsConfigurationDoneRequest", out _))
                 {
                     _supportsConfigurationDone = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
+                }
+                if (capabilities.TryGetProperty("supportsConditionalBreakpoints", out _) || capabilities.TryGetProperty("supportsHitConditionalBreakpoints", out _) || capabilities.TryGetProperty("supportsFunctionBreakpoints", out _))
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            if (capabilities.TryGetProperty("supportsConditionalBreakpoints", out _))
+                                _supportsConditionalBreakpoints = ReadOptionalBoolean(capabilities, "supportsConditionalBreakpoints");
+                            if (capabilities.TryGetProperty("supportsHitConditionalBreakpoints", out _))
+                                _supportsHitConditionalBreakpoints = ReadOptionalBoolean(capabilities, "supportsHitConditionalBreakpoints");
+                            if (capabilities.TryGetProperty("supportsFunctionBreakpoints", out _))
+                                _supportsFunctionBreakpoints = ReadOptionalBoolean(capabilities, "supportsFunctionBreakpoints");
+                        }
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                if (capabilities.TryGetProperty("supportsSetVariable", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsSetVariable");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsSetVariable = supported;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
+                if (capabilities.TryGetProperty("supportsExceptionInfoRequest", out _))
+                {
+                    var supportsExceptionInfo = ReadOptionalBoolean(capabilities, "supportsExceptionInfoRequest");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsExceptionInfoRequest = supportsExceptionInfo;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
+                if (capabilities.TryGetProperty("supportsStepInTargetsRequest", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsStepInTargetsRequest");
+                    _callStackAdmissionGate.Wait();
+                    try { lock (_stateGate) { _supportsStepInTargetsRequest = supported; } }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                if (capabilities.TryGetProperty("supportsLoadedSourcesRequest", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsLoadedSourcesRequest");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate) { _supportsLoadedSourcesRequest = supported; }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
+                if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _) ||
+                    capabilities.TryGetProperty("supportsWriteMemoryRequest", out _) ||
+                    capabilities.TryGetProperty("supportsDisassembleRequest", out _) ||
+                    capabilities.TryGetProperty("supportsLocationsRequest", out _))
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            if (capabilities.TryGetProperty("supportsReadMemoryRequest", out _)) _supportsReadMemoryRequest = ReadOptionalBoolean(capabilities, "supportsReadMemoryRequest");
+                            if (capabilities.TryGetProperty("supportsWriteMemoryRequest", out _)) _supportsWriteMemoryRequest = ReadOptionalBoolean(capabilities, "supportsWriteMemoryRequest");
+                            if (capabilities.TryGetProperty("supportsDisassembleRequest", out _)) _supportsDisassembleRequest = ReadOptionalBoolean(capabilities, "supportsDisassembleRequest");
+                            if (capabilities.TryGetProperty("supportsLocationsRequest", out _)) _supportsLocationsRequest = ReadOptionalBoolean(capabilities, "supportsLocationsRequest");
+                        }
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                if (capabilities.TryGetProperty("exceptionBreakpointFilters", out _))
+                {
+                    var supportsFilters = ReadExceptionFilterSupport(capabilities);
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsExceptionFilters = supportsFilters;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
                 }
 
                 CapabilitiesObserved = true;
@@ -1717,13 +4071,219 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 HandleTerminalEvent(message, eventName, body);
                 break;
         }
+        if (eventName is "thread" or "stopped" or "continued" or "exited" or "terminated")
+        {
+            try { _resourceEventObserver?.Invoke(eventName); }
+            catch (Exception) { }
+        }
+        if (eventName is "process" or "loadedSource" or "module" or "progressStart" or "progressUpdate" or "progressEnd"
+            or "thread" or "stopped" or "continued" or "exited" or "terminated" or "invalidated" or "memory")
+        {
+            if (_resourceEventObserver is not null && eventName is ("invalidated" or "memory"))
+            {
+                lock (_stateGate)
+                {
+                    try
+                    {
+                        if (body.ValueKind != JsonValueKind.Object || Encoding.UTF8.GetByteCount(body.GetRawText()) > 4096)
+                            throw new InvalidDataException("Invalid event detail.");
+                        if (eventName == "invalidated")
+                        {
+                            var fields = new Dictionary<string, object?>();
+                            fields["areas"] = body.TryGetProperty("areas", out var areas) ? areas.Clone() : JsonSerializer.SerializeToElement(Array.Empty<string>());
+                            if (body.TryGetProperty("threadId", out var thread) && thread.ValueKind != JsonValueKind.Null) fields["threadId"] = thread.Clone();
+                            if (body.TryGetProperty("stackFrameId", out var frame) && frame.ValueKind != JsonValueKind.Null) fields["stackFrameId"] = frame.Clone();
+                            _legacyInvalidation = JsonSerializer.SerializeToElement(fields);
+                        }
+                        else
+                        {
+                            var reference = body.TryGetProperty("memoryReference", out var referenceElement)
+                                ? referenceElement.ValueKind == JsonValueKind.String
+                                    ? referenceElement.GetString()!
+                                    : throw new InvalidDataException("DAP memoryReference must be a string.")
+                                : string.Empty;
+                            var offset = ReadOptionalMemoryInteger(body, "offset", -MaximumSafeDapInteger);
+                            var count = ReadOptionalMemoryInteger(body, "count", 0);
+                            _legacyMemoryEvent = JsonSerializer.SerializeToElement(new { memoryReference = reference, offset, count });
+                        }
+                    }
+                    catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException)
+                    {
+                        _legacyEventDetailsIncomplete = true;
+                    }
+                }
+            }
+            if (eventName == "thread") { lock (_stateGate) _legacyThreads = null; }
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
+        }
     }
 
-    private void HandleOutputEvent(JsonElement body)
+    private void HandleRuntimeInventoryEvent(string eventName, JsonElement body)
+    {
+        var modules = eventName == "module";
+        lock (_runtimeInventoryGate)
+        {
+            if (modules ? _modulesIncomplete : _progressIncomplete) return;
+            try
+            {
+                if (modules) UpdateModuleInventory(body);
+                else UpdateProgressInventory(eventName, body);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException
+                or ArgumentException or JsonException or OverflowException)
+            {
+                // A lost transition cannot be repaired by later events. Release its
+                // retained values, latch only this inventory, and keep the reader usable.
+                InvalidateRuntimeInventory(modules);
+            }
+        }
+    }
+
+    private void InvalidateRuntimeInventory(bool modules)
+    {
+        if (modules)
+        {
+            _modulesIncomplete = true;
+            _modules.Clear();
+            _moduleOrder.Clear();
+            _moduleBytes = 0;
+        }
+        else
+        {
+            _progressIncomplete = true;
+            _progress.Clear();
+            _progressOrder.Clear();
+            _progressBytes = 0;
+        }
+    }
+
+    private void UpdateModuleInventory(JsonElement body)
+    {
+        var reason = RequireString(body, "reason");
+        if (reason is not "new" and not "changed" and not "removed"
+            || !body.TryGetProperty("module", out var module) || module.ValueKind != JsonValueKind.Object
+            || !module.TryGetProperty("id", out var idElement))
+        {
+            throw new InvalidDataException("Malformed module transition.");
+        }
+
+        RuntimeModuleId id;
+        if (idElement.ValueKind == JsonValueKind.String) id = new(0, idElement.GetString()!);
+        else if (idElement.ValueKind == JsonValueKind.Number && idElement.TryGetInt64(out var number)) id = new(number, null);
+        else throw new InvalidDataException("Malformed module identifier.");
+
+        _modules.TryGetValue(id, out var previous);
+        if (reason == "removed")
+        {
+            if (previous is not null)
+            {
+                _moduleBytes -= previous.Value.Bytes;
+                _moduleOrder.Remove(previous);
+                _modules.Remove(id);
+            }
+            return;
+        }
+
+        var name = RequireString(module, "name");
+        var path = ReadRuntimeOptionalString(module, "path");
+        var version = ReadRuntimeOptionalString(module, "version");
+        var optimized = ReadOptionalBoolean(module, "isOptimized");
+        var symbols = ReadRuntimeOptionalString(module, "symbolStatus");
+        if (reason == "new" ? previous is not null : previous is null) return;
+
+        var entry = new RuntimeModuleEntry(id, EncodeRuntimeOptionalText(id.Text), JsonEncodedText.Encode(name),
+            EncodeRuntimeOptionalText(path), EncodeRuntimeOptionalText(version), optimized, EncodeRuntimeOptionalText(symbols));
+        var nextBytes = _moduleBytes - (previous?.Value.Bytes ?? 0) + entry.Bytes;
+        var nextCount = _modules.Count + (previous is null ? 1 : 0);
+        if (RuntimeArrayBytes(nextBytes, nextCount) > MaximumPayloadBytes)
+        {
+            InvalidateRuntimeInventory(modules: true);
+            return;
+        }
+        if (previous is null) _modules.Add(id, _moduleOrder.AddLast(entry));
+        else previous.Value = entry;
+        _moduleBytes = nextBytes;
+    }
+
+    private void UpdateProgressInventory(string eventName, JsonElement body)
+    {
+        var id = RequireString(body, "progressId");
+        _progress.TryGetValue(id, out var previous);
+        if (eventName == "progressEnd")
+        {
+            if (previous is not null)
+            {
+                _progressBytes -= previous.Value.Bytes;
+                _progressOrder.Remove(previous);
+                _progress.Remove(id);
+            }
+            return;
+        }
+
+        var message = ReadRuntimeOptionalString(body, "message");
+        var percentage = ReadRuntimeOptionalPercentage(body);
+        RuntimeProgressEntry entry;
+        if (eventName == "progressStart")
+        {
+            var title = RequireString(body, "title");
+            var cancellable = ReadOptionalBoolean(body, "cancellable");
+            entry = new RuntimeProgressEntry(JsonEncodedText.Encode(id), JsonEncodedText.Encode(title),
+                message, EncodeRuntimeOptionalText(message), percentage, cancellable, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
+        }
+        else
+        {
+            if (previous is null) return;
+            var prior = previous.Value;
+            var messageChanged = message is not null && !string.Equals(message, prior.MessageText, StringComparison.Ordinal);
+            if (!messageChanged && (percentage is null || percentage == prior.Percentage)) return;
+            entry = prior with
+            {
+                MessageText = messageChanged ? message : prior.MessageText,
+                Message = messageChanged ? JsonEncodedText.Encode(message!) : prior.Message,
+                Percentage = percentage ?? prior.Percentage,
+            };
+        }
+
+        var nextBytes = _progressBytes - (previous?.Value.Bytes ?? 0) + entry.Bytes;
+        var nextCount = _progress.Count + (previous is null ? 1 : 0);
+        if (RuntimeArrayBytes(nextBytes, nextCount) > MaximumPayloadBytes)
+        {
+            InvalidateRuntimeInventory(modules: false);
+            return;
+        }
+        if (previous is null) _progress.Add(id, _progressOrder.AddLast(entry));
+        else previous.Value = entry;
+        _progressBytes = nextBytes;
+    }
+
+    private static long RuntimeArrayBytes(long entryBytes, int count) => entryBytes + Math.Max(0, count - 1) + 2;
+
+    private static JsonEncodedText? EncodeRuntimeOptionalText(string? value) => value is null ? null : JsonEncodedText.Encode(value);
+
+    private static string? ReadRuntimeOptionalString(JsonElement body, string name)
+    {
+        if (!body.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String) throw new InvalidDataException("Malformed runtime inventory text.");
+        return value.GetString();
+    }
+
+    private static double? ReadRuntimeOptionalPercentage(JsonElement body)
+    {
+        if (!body.TryGetProperty("percentage", out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var percentage)
+            || !double.IsFinite(percentage) || percentage is < 0 or > 100)
+        {
+            throw new InvalidDataException("Malformed runtime inventory percentage.");
+        }
+        return percentage;
+    }
+
+
+    private bool HandleOutputEvent(JsonElement body)
     {
         if (body.ValueKind != JsonValueKind.Object)
         {
-            return;
+            return false;
         }
 
         var category = "console";
@@ -1731,22 +4291,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (!TryDecodeOutputString(categoryElement, out category))
             {
-                return;
+                return false;
             }
 
             if (category is not "console" and not "stdout" and not "stderr" and not "telemetry")
             {
-                return;
+                return false;
             }
         }
 
         var text = string.Empty;
         if (body.TryGetProperty("output", out var outputElement) && !TryDecodeOutputString(outputElement, out text))
         {
-            return;
+            return false;
         }
 
-        _outputBuffer.Append(text, category);
+        lock (_stateGate) _activityOutput++;
+        return _outputBuffer.Append(text, category);
     }
 
     private static bool TryDecodeOutputString(JsonElement element, out string text)
@@ -1790,6 +4351,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         try
         {
             using var windowsProcess = OperatingSystem.IsWindows() ? WindowsNativeSceneProcess.Open(processId) : null;
+
+            // Job membership rejects other sessions, but does not prove an incarnation reused within this job.
+            if (windowsProcess is not null
+                && (_processTreeOwnership is not WindowsProcessTreeOwnership windowsOwnership
+                    || !windowsOwnership.Contains(windowsProcess)))
+            {
+                return;
+            }
+
             using var process = windowsProcess is null ? Process.GetProcessById(processId) : null;
             string? executablePath;
             long windowsCreationUtcTicks = 0;
@@ -1861,6 +4431,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         public static bool IsAlive(SafeProcessHandle process) =>
             !process.IsInvalid && WaitForSingleObject(process, 0) == WaitTimeout;
+
+        public static bool IsExited(SafeProcessHandle process) =>
+            !process.IsInvalid && !process.IsClosed && WaitForSingleObject(process, 0) == 0;
 
         public static bool TryReadIdentity(SafeProcessHandle process, out string executablePath, out long creationUtcTicks)
         {
@@ -1970,6 +4543,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             lock (_stateGate)
             {
                 _stackTraceCapabilities = default;
+                _supportsExceptionInfoRequest = false;
+                _supportsStepInTargetsRequest = false;
+                _supportsLoadedSourcesRequest = false;
+                _supportsReadMemoryRequest = false;
+                _supportsWriteMemoryRequest = false;
+                _supportsDisassembleRequest = false;
+                _supportsLocationsRequest = false;
+                _supportsExceptionFilters = false;
+                _supportsSetVariable = false;
             }
 
             return;
@@ -1983,9 +4565,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _supportsConfigurationDone = ReadOptionalBoolean(body, "supportsConfigurationDoneRequest");
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
+        var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
+        var supportsStepInTargets = ReadOptionalBoolean(body, "supportsStepInTargetsRequest");
+        var supportsSetVariable = ReadOptionalBoolean(body, "supportsSetVariable");
+        var supportsLoadedSources = ReadOptionalBoolean(body, "supportsLoadedSourcesRequest");
+        var supportsExceptionFilters = ReadExceptionFilterSupport(body);
+        var supportsConditional = ReadOptionalBoolean(body, "supportsConditionalBreakpoints");
+        var supportsHitConditional = ReadOptionalBoolean(body, "supportsHitConditionalBreakpoints");
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
+            _supportsExceptionInfoRequest = supportsExceptionInfo;
+            _supportsStepInTargetsRequest = supportsStepInTargets;
+            _supportsLoadedSourcesRequest = supportsLoadedSources;
+            _supportsReadMemoryRequest = ReadOptionalBoolean(body, "supportsReadMemoryRequest");
+            _supportsWriteMemoryRequest = ReadOptionalBoolean(body, "supportsWriteMemoryRequest");
+            _supportsDisassembleRequest = ReadOptionalBoolean(body, "supportsDisassembleRequest");
+            _supportsLocationsRequest = ReadOptionalBoolean(body, "supportsLocationsRequest");
+            _supportsExceptionFilters = supportsExceptionFilters;
+            _supportsSetVariable = supportsSetVariable;
+            _supportsConditionalBreakpoints = supportsConditional;
+            _supportsHitConditionalBreakpoints = supportsHitConditional;
+            _supportsFunctionBreakpoints = ReadOptionalBoolean(body, "supportsFunctionBreakpoints");
         }
     }
 
@@ -2006,6 +4607,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
+                _activityStopped++;
+                if (reason == "step") _activityStepStops++;
                 if (_activeContinue is { Finalized: false } continued)
                 {
                     if (RequireInt32(message, "seq") <= 0
@@ -2030,15 +4634,32 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     StopReason = reason,
                     CurrentThreadId = threadId,
                 };
+                _stopDescription = TryGetString(body, "description");
+                _stopText = TryGetString(body, "text");
+                _legacyLastStopAt = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
-                if (allThreadsStopped)
+                if (!_inspectionClosed && allThreadsStopped)
                 {
                     _allThreadsStoppedEligibility = new CallStackEligibility();
                 }
-                else if (threadId is { } stoppedThreadId)
+                else if (!_inspectionClosed && threadId is { } stoppedThreadId)
                 {
                     (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
+                }
+                if (_resourceEventObserver is not null && _legacyBreakpointObservations.Count != 0 && reason == "breakpoint")
+                {
+                    if (_legacyFunctionObservations.Length != 0 || _activeBreakpointUpdate?.FunctionBreakpoints is { Length: > 0 }) _legacyHitCountsIncomplete = true;
+                    else if (threadId is { } hitThread && HasStepOverAuthority(hitThread))
+                        ScheduleLegacyBreakpointHit(hitThread, GetOrCreateInspectionContext(), _legacyBreakpointObservations.Values.SelectMany(static value => value).ToArray());
+                    else _legacyHitCountsIncomplete = true;
+                }
+                if (_quickPauseStop is { } quick)
+                {
+                    var owned = _quickPauseRecord?.Request is { Command: "pause", WriteStarted: true }
+                        && reason == "pause" && threadId is { } quickThread
+                        && _quickPauseRecord.ThreadId == quickThread && HasStepOverAuthority(quickThread);
+                    quick.TrySetResult(owned ? (threadId!.Value, GetOrCreateInspectionContext()) : null);
                 }
                 _activeStepOver?.ObserveStopped(message, reason, threadId);
             }
@@ -2060,11 +4681,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
+                _activityContinued++;
                 _activeContinue?.ObserveContinued();
                 _state = _state with { Event = "continued", CurrentThreadId = null };
+                _legacyLastResumeAt = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
                 _inspectionContextId = null;
                 if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
                 {
+                    if (_resourceEventObserver is not null && (!hasAllThreadsContinued || allThreadsContinued))
+                    {
+                        _state = _state with { StopReason = null };
+                        _stopDescription = null;
+                        _stopText = null;
+                    }
                     ClearCallStackEligibility();
                     return;
                 }
@@ -2090,9 +4720,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _legacyLaunchRunning = false;
                 if (_activeStepOver is not null && RequireInt32(message, "seq") <= 0)
                 {
                     throw new InvalidDataException("DAP step terminal event sequence must be positive.");
+                }
+
+                if (_activePause is not null)
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP pause terminal event sequence is invalid.");
+                    }
+                    if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("exitCode", out _))
+                    {
+                        _state = _state with { ExitCode = RequireInt32(body, "exitCode") };
+                    }
                 }
 
                 if (_activeContinue is { Finalized: false })
@@ -2119,8 +4762,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 revokeUiInvoke = Interlocked.Exchange(ref _nativeUiInvokeAuthorityInvalidated, 1) == 0;
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
+                _executionAdmission = ExecutionAdmission.Closing;
+                _inspectionClosed = true;
+                _activePause?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeContinue?.ObserveTerminal(eventName, _state.ExitCode);
+                _legacyTermination?.TrySetResult(true);
                 _breakpointUpdatesClosed = true;
                 _activeBreakpointUpdate?.ObserveFailure(new InvalidDataException("The debug session terminated during breakpoint update."));
             }
@@ -2137,9 +4784,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void RequestRetirement()
     {
-        if (Interlocked.Exchange(ref _retirementRequested, 1) != 0)
+        lock (_stateGate)
         {
-            return;
+            if (Interlocked.Exchange(ref _retirementRequested, 1) != 0)
+            {
+                return;
+            }
         }
 
         try
@@ -2157,7 +4807,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
         || (_threadEligibility is not null && _threadEligibility.ContainsKey(threadId));
 
-    private CapturedCallStackTarget? CaptureCallStackTarget(int threadId, bool includeInspectionContext)
+    private CapturedCallStackTarget? CaptureCallStackTarget(int threadId, bool includeInspectionContext) =>
+        CaptureOptionalCallStackTarget(threadId, includeInspectionContext);
+
+    private CapturedCallStackTarget? CaptureOptionalCallStackTarget(int? threadId, bool includeInspectionContext)
     {
         lock (_stateGate)
         {
@@ -2165,18 +4818,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 return null;
             }
+            if (threadId is null && _state.Event != "stopped") return null;
+            var selected = threadId ?? _state.CurrentThreadId;
+            if (selected is not { } resolved) return null;
 
             var supportsPaging = _stackTraceCapabilities.SupportsDelayedStackTraceLoading;
             if (_allThreadsStoppedEligibility is { } allTargets
-                && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
+                && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(resolved)))
             {
-                return new CapturedCallStackTarget(allTargets, threadId, supportsPaging,
+                return new CapturedCallStackTarget(allTargets, resolved, supportsPaging,
                     includeInspectionContext ? GetOrCreateInspectionContext() : null);
             }
 
             return _threadEligibility is not null
-                && _threadEligibility.TryGetValue(threadId, out var target)
-                    ? new CapturedCallStackTarget(target, threadId, supportsPaging,
+                && _threadEligibility.TryGetValue(resolved, out var target)
+                    ? new CapturedCallStackTarget(target, resolved, supportsPaging,
                         includeInspectionContext ? GetOrCreateInspectionContext() : null)
                     : null;
         }
@@ -2273,11 +4929,66 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_cleanupGate)
         {
+            if (_cleanupTask is { IsFaulted: true } previous && previous.Exception?.InnerException is WindowsJobCleanupUnconfirmedException)
+            {
+                _cleanupTask = null;
+                if (_cleanupRootTask is { IsFaulted: true } or { IsCanceled: true }) _cleanupRootTask = null;
+            }
+            if (_cleanupTask is not null) return _cleanupTask;
+            if (_attachTarget is { } target)
+            {
+                _attachClosing = true;
+                if (_attachHandshake is { IsCompleted: false } || _attachDisconnect is { IsCompleted: false })
+                    return Task.FromException(new InvalidOperationException("Attach protocol work is still pending; cleanup ownership must be retained."));
+                if (_attachMayHaveDispatched && !WindowsNativeSceneProcess.IsExited(target))
+                    return Task.FromException(new InvalidOperationException("Attached target is live or its exit is unconfirmed; cleanup ownership must be retained."));
+            }
             return _cleanupTask ??= CleanupAsync();
         }
     }
 
     private async Task CleanupAsync()
+    {
+        var retainOwnership = false;
+        try
+        {
+            try
+            {
+                await (_cleanupRootTask ??= CleanupRootAsync()).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (_processTreeOwnership is WindowsProcessTreeOwnership)
+            {
+                retainOwnership = true;
+                throw new WindowsJobCleanupUnconfirmedException(exception);
+            }
+            if (HasExited())
+            {
+                if (_processTreeOwnership is WindowsProcessTreeOwnership windowsOwnership)
+                {
+                    try
+                    {
+                        windowsOwnership.Terminate();
+                        await windowsOwnership.WaitForDrainAsync(_stopTimeout).ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        retainOwnership = true;
+                        throw new WindowsJobCleanupUnconfirmedException(exception);
+                    }
+                }
+                else
+                {
+                    _processTreeOwnership?.Terminate();
+                }
+            }
+        }
+        finally
+        {
+            if (!retainOwnership) await DisposeCleanupResourcesAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task PrepareCleanupAsync()
     {
         await _callStackAdmissionGate.WaitAsync().ConfigureAwait(false);
         try
@@ -2294,92 +5005,96 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _callStackAdmissionGate.Release();
         }
 
+        if ((!_attachMayHaveDispatched || _attachTarget is null) && !HasExited() && !_forceCleanup.IsCancellationRequested)
+        {
+            if (_supportsTerminate && !_legacyTerminateDispatched)
+            {
+                await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
+            }
+
+            if (!_forceCleanup.IsCancellationRequested)
+            {
+                await TrySendCleanupRequestAsync(
+                    "disconnect",
+                    new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
+            }
+        }
+
+        _input.Dispose();
+    }
+
+    private async Task CleanupRootAsync()
+    {
+        await (_cleanupPreparationTask ??= PrepareCleanupAsync()).ConfigureAwait(false);
+        var unixOwnership = _processTreeOwnership as UnixProcessGroupOwnership;
+        var guardianSignaled = unixOwnership is not null;
+
+        if (_forceCleanup.IsCancellationRequested)
+        {
+            unixOwnership?.Terminate();
+            if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
+            {
+                if (KillProcessTree()) Volatile.Write(ref _legacyForcedRootPending, 1);
+                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
+                }
+            }
+        }
+        else
+        {
+            unixOwnership?.SignalGracefulShutdown();
+            if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+            {
+                if (KillProcessTree()) Volatile.Write(ref _legacyForcedRootPending, 1);
+                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException("The owned debugger process did not exit after its process tree was killed.");
+                }
+            }
+        }
+        if (Volatile.Read(ref _legacyForcedRootPending) != 0) Volatile.Write(ref _legacyForcedRootTerminations, 1);
+    }
+
+    private async Task DisposeCleanupResourcesAsync()
+    {
         try
         {
-            if (!HasExited() && !_forceCleanup.IsCancellationRequested)
-            {
-                if (_supportsTerminate)
-                {
-                    await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
-                }
-
-                if (!_forceCleanup.IsCancellationRequested)
-                {
-                    await TrySendCleanupRequestAsync(
-                        "disconnect",
-                        new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
-                }
-            }
-
             _input.Dispose();
-            var unixOwnership = _processTreeOwnership as UnixProcessGroupOwnership;
-            var guardianSignaled = unixOwnership is not null;
-
-            if (_forceCleanup.IsCancellationRequested)
-            {
-                unixOwnership?.Terminate();
-                if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
-                {
-                    KillProcessTree();
-                    if (!await WaitForProcessExitAsync().ConfigureAwait(false))
-                    {
-                        throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
-                    }
-                }
-            }
-            else
-            {
-                unixOwnership?.SignalGracefulShutdown();
-                if (!HasExited() && !await WaitForProcessExitAsync().ConfigureAwait(false))
-                {
-                    KillProcessTree();
-                    if (!await WaitForProcessExitAsync().ConfigureAwait(false))
-                    {
-                        throw new InvalidOperationException("The owned debugger process did not exit after its process tree was killed.");
-                    }
-                }
-            }
-
-            if (HasExited())
-            {
-                _processTreeOwnership?.Terminate();
-            }
         }
         finally
         {
             try
             {
-                _input.Dispose();
+                await ObserveBackgroundTasksAsync().ConfigureAwait(false);
+                await DisposeLegacyEncGenerationsAsync().ConfigureAwait(false);
             }
             finally
             {
                 try
                 {
-                    await ObserveBackgroundTasksAsync().ConfigureAwait(false);
+                    _output.Dispose();
+                    _error.Dispose();
                 }
                 finally
                 {
                     try
                     {
-                        _output.Dispose();
-                        _error.Dispose();
+                        _writeGate.Dispose();
                     }
                     finally
                     {
                         try
                         {
-                            _writeGate.Dispose();
+                            try { if (_process.HasExited) Volatile.Write(ref _adapterExitConfirmed, 1); }
+                            catch (InvalidOperationException) { }
+                            catch (Win32Exception) { }
+                            _process.Dispose();
                         }
                         finally
                         {
-                            try
-                            {
-                                _process.Dispose();
-                            }
-                            finally
-                            {
-                                _processTreeOwnership?.Dispose();
-                            }
+                            try { _processTreeOwnership?.Dispose(); }
+                            finally { _attachTarget?.Dispose(); }
                         }
                     }
                 }
@@ -2402,6 +5117,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private async Task<bool> WaitForProcessExitAsync()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            var handle = _process.SafeHandle;
+            var started = Stopwatch.GetTimestamp();
+            while (!WindowsNativeSceneProcess.IsExited(handle))
+            {
+                var remaining = _stopTimeout - Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero) return false;
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(50) ? remaining : TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            }
+            return true;
+        }
+
         if (HasExited())
         {
             return true;
@@ -2419,19 +5147,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return HasExited();
     }
 
-    private void KillProcessTree()
+    private bool KillProcessTree()
     {
         try
         {
             if (!HasExited())
             {
+                if (OperatingSystem.IsWindows())
+                {
+                    if (_processTreeOwnership is not WindowsProcessTreeOwnership)
+                        throw new InvalidOperationException("The debugger job owner is unavailable.");
+                    var forcedRoot = WindowsProcessTreeOwnership.TryTerminateRoot(_process.SafeHandle);
+                    return forcedRoot && _resourceEventObserver is not null;
+                }
                 _process.Kill(entireProcessTree: true);
+                return false;
             }
         }
         catch (InvalidOperationException) when (HasExited())
         {
             // The owned process exited between the check and the kill request.
         }
+        return false;
     }
 
     private async Task ObserveBackgroundTasksAsync()
@@ -2549,6 +5286,51 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    private static bool ReadExceptionFilterSupport(JsonElement capabilities)
+    {
+        if (!capabilities.TryGetProperty("exceptionBreakpointFilters", out var filters))
+        {
+            return false;
+        }
+        if (filters.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("DAP exceptionBreakpointFilters must be an array.");
+        }
+        return filters.GetArrayLength() != 0;
+    }
+
+    private static bool[]? ReadExceptionFilterResults(JsonElement body, int expectedCount)
+    {
+        if (body.ValueKind == JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        if (body.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("DAP exception breakpoint response body must be an object.");
+        }
+        if (!body.TryGetProperty("breakpoints", out var results))
+        {
+            return null;
+        }
+        if (results.ValueKind != JsonValueKind.Array || results.GetArrayLength() != expectedCount)
+        {
+            throw new InvalidDataException("DAP exception breakpoint response count is invalid.");
+        }
+        var verified = new bool[expectedCount];
+        var index = 0;
+        foreach (var result in results.EnumerateArray())
+        {
+            if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("verified", out var value)
+                || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                throw new InvalidDataException("DAP exception breakpoint verification is invalid.");
+            }
+            verified[index++] = value.GetBoolean();
+        }
+        return verified;
+    }
+
     private static bool ReadOptionalBoolean(JsonElement objectElement, string name)
     {
         if (!objectElement.TryGetProperty(name, out var value))
@@ -2586,6 +5368,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         && value.TryGetInt32(out var number)
             ? number
             : null;
+    private static long ReadOptionalMemoryInteger(JsonElement body, string name, long minimum)
+    {
+        if (!body.TryGetProperty(name, out var value)) return 0;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var number)
+            || number < minimum || number > MaximumSafeDapInteger)
+            throw new InvalidDataException($"DAP memory {name} must be a safe integer in range.");
+        return number;
+    }
+
     private static long RequireSafeDapInteger(JsonElement objectElement, string name)
     {
         if (objectElement.ValueKind != JsonValueKind.Object
@@ -2618,6 +5409,29 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void FailRequest(PendingRequest request, Exception failure)
     {
+        if (request.Command == "setVariable")
+        {
+            lock (_stateGate)
+            {
+                _inspectionContextId = null;
+                _inspectionClosed = true;
+            }
+        }
+        if (request.Pause is { } pause)
+        {
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activePause, pause) && !pause.Finalized && pause.Outcome is null)
+                {
+                    pause.ObserveFailure(failure);
+                    FencePause();
+                }
+                request.Completion.TrySetException(failure);
+                _ = request.Completion.Task.Exception;
+            }
+            return;
+        }
+
         if (request.BreakpointUpdate is { } update)
         {
             lock (_stateGate)
@@ -2719,6 +5533,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    internal sealed class WindowsJobCleanupUnconfirmedException(Exception inner)
+        : InvalidOperationException("The owned debugger process tree cleanup is unconfirmed.", inner);
+
     internal interface IProcessTreeOwnership : IDisposable
     {
         void Terminate();
@@ -2731,7 +5548,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private UnixProcessGroupOwnership(System.IO.Pipes.AnonymousPipeServerStream terminationControl) =>
             _terminationControl = terminationControl;
 
-        public static UnixProcessGroupLaunch Start(string debuggerPath)
+        public static UnixProcessGroupLaunch Start(string debuggerPath, IReadOnlySet<string>? removals)
         {
             var terminationControl = new System.IO.Pipes.AnonymousPipeServerStream(
                 System.IO.Pipes.PipeDirection.Out,
@@ -2758,6 +5575,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
+                if (removals is not null)
+                {
+                    foreach (var name in removals) startInfo.Environment.Remove(name);
+                }
+                if (removals?.Contains("PATH") == true)
+                {
+                    if (!useAppHost && !Path.IsPathFullyQualified(startInfo.FileName))
+                        startInfo.FileName = DapLaunchEnvironment.FindExecutable(startInfo.FileName)
+                            ?? throw new InvalidOperationException("The .NET host executable is unavailable.");
+                    if (!Path.IsPathFullyQualified(debuggerPath))
+                        debuggerPath = DapLaunchEnvironment.FindExecutable(debuggerPath)
+                            ?? throw new InvalidOperationException("The debugger executable is unavailable.");
+                }
                 if (!useAppHost)
                 {
                     startInfo.ArgumentList.Add(proxyAssemblyPath);
@@ -2801,6 +5631,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
+        private const uint CreateUnicodeEnvironment = 0x00000400;
         private const uint ExtendedStartupInfoPresent = 0x00080000;
         private const uint HandleFlagInherit = 0x00000001;
         private const uint JobObjectExtendedLimitInformationClass = 9;
@@ -2811,14 +5642,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
 
-        public static WindowsProcessTreeLaunch Start(string debuggerPath) =>
-            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false);
+        public static WindowsProcessTreeLaunch Start(string debuggerPath, WindowsChildEnvironmentBlock environment) =>
+            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment, workingDirectory: null);
 
         internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments) =>
-            StartCore(executablePath, arguments, atomicJobAssignment: true);
+            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory: null);
+
+        internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments, string workingDirectory) =>
+            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory);
 
         private static WindowsProcessTreeLaunch StartCore(
-            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment)
+            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment, string? workingDirectory)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
             ArgumentNullException.ThrowIfNull(arguments);
@@ -2856,7 +5690,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     childInput.DangerousGetHandle(),
                     childOutput.DangerousGetHandle(),
                     childError.DangerousGetHandle(),
-                    atomicJobAssignment ? job : null);
+                    atomicJobAssignment ? job : null, environment, workingDirectory);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -2873,6 +5707,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 process = Process.GetProcessById(checked((int)processInformation.ProcessId));
+                // Keep the same process instance while the original creation handle still prevents PID reuse.
+                _ = process.SafeHandle;
                 if (ResumeThread(threadHandle) == uint.MaxValue)
                 {
                     throw LastWin32Error("Could not resume the debugger process.");
@@ -2886,17 +5722,33 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 standardOutput = null;
                 error = new FileStream(standardError, FileAccess.Read, bufferSize: 4096, isAsync: false);
                 standardError = null;
+                var ownership = new WindowsProcessTreeOwnership(job);
+                var launch = new WindowsProcessTreeLaunch(process, input, output, error, ownership);
                 CloseHandle(processHandle);
                 processHandle = IntPtr.Zero;
-                var ownership = new WindowsProcessTreeOwnership(job);
                 job = null;
-                return new WindowsProcessTreeLaunch(process, input, output, error, ownership);
+                return launch;
             }
-            catch
+            catch (Exception failure)
             {
+                Exception? cleanupFailure = null;
                 if (processHandle != IntPtr.Zero)
                 {
-                    TerminateProcess(processHandle, 1);
+                    if (atomicJobAssignment && job is not null)
+                    {
+                        try
+                        {
+                            TerminateAndDrainFailedLaunch(job, processHandle);
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = exception;
+                        }
+                    }
+                    else
+                    {
+                        TerminateProcess(processHandle, 1);
+                    }
                 }
 
                 input?.Dispose();
@@ -2904,6 +5756,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 error?.Dispose();
                 process?.Dispose();
                 job?.Dispose();
+                if (cleanupFailure is not null)
+                    throw new AggregateException("Process launch failed and owned job cleanup could not be confirmed.", failure, cleanupFailure);
                 throw;
             }
             finally
@@ -2928,6 +5782,72 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         public void Dispose() => _job.Dispose();
+
+        internal bool Contains(SafeProcessHandle process) =>
+            !process.IsInvalid && IsProcessInJob(process, _job, out var inJob) && inJob;
+
+        internal uint ActiveProcessCount() => ActiveProcessCount(_job);
+
+        internal async Task WaitForDrainAsync(TimeSpan timeout)
+        {
+            var started = Stopwatch.GetTimestamp();
+            while (ActiveProcessCount() != 0)
+            {
+                var remaining = timeout - Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero)
+                    throw new TimeoutException("The owned debugger job did not drain.");
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(50) ? remaining : TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            }
+        }
+
+        internal static bool TryTerminateRoot(SafeProcessHandle process)
+        {
+            if (TerminateOwnedProcess(process, uint.MaxValue)) return true;
+            var error = Marshal.GetLastWin32Error();
+            // Access denied can mean exit is still in progress; the caller must wait on this handle.
+            if (error == 5) return false;
+            throw new Win32Exception(error, "Could not terminate the owned debugger root.");
+        }
+
+        internal void MakeAttachPassive()
+        {
+            if (!QueryExtendedInformationJobObject(_job, JobObjectExtendedLimitInformationClass,
+                    out var limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>(), IntPtr.Zero))
+                throw LastWin32Error("Could not query debugger job limits.");
+            limits.BasicLimitInformation.LimitFlags &= ~JobObjectLimitKillOnJobClose;
+            if (!SetInformationJobObject(_job.DangerousGetHandle(), JobObjectExtendedLimitInformationClass,
+                    ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+                throw LastWin32Error("Could not make debugger job passive for attach.");
+        }
+
+        private static uint ActiveProcessCount(SafeKernelHandle job)
+        {
+            if (!QueryInformationJobObject(job, 1, out var accounting,
+                    (uint)Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero))
+            {
+                throw LastWin32Error("Could not query the process job object accounting.");
+            }
+
+            return accounting.ActiveProcesses;
+        }
+
+        private static void TerminateAndDrainFailedLaunch(SafeKernelHandle job, IntPtr process)
+        {
+            if (!TerminateJobObject(job.DangerousGetHandle(), 1))
+                throw LastWin32Error("Could not terminate the failed launch job object.");
+            var elapsed = Stopwatch.StartNew();
+            var wait = WaitForSingleObject(process, 5000);
+            if (wait == uint.MaxValue)
+                throw LastWin32Error("Could not wait for the failed launch process.");
+            if (wait != 0)
+                throw new TimeoutException("The failed launch process did not exit.");
+            while (ActiveProcessCount(job) != 0)
+            {
+                if (elapsed.Elapsed >= TimeSpan.FromSeconds(5))
+                    throw new TimeoutException("The failed launch job did not drain.");
+                Thread.Sleep(50);
+            }
+        }
 
         public void Terminate()
         {
@@ -3006,7 +5926,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             IntPtr standardInput,
             IntPtr standardOutput,
             IntPtr standardError,
-            SafeKernelHandle? atomicJob)
+            SafeKernelHandle? atomicJob,
+            WindowsChildEnvironmentBlock? environment,
+            string? workingDirectory)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
@@ -3082,9 +6004,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         IntPtr.Zero,
                         IntPtr.Zero,
                         inheritHandles: true,
-                        CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent,
-                        IntPtr.Zero,
-                        currentDirectory: null,
+                        CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent | (environment is null ? 0 : CreateUnicodeEnvironment),
+                        environment?.DangerousGetHandle() ?? IntPtr.Zero,
+                        currentDirectory: workingDirectory,
                         ref startupInfo,
                         out var processInformation))
                 {
@@ -3101,6 +6023,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 GC.KeepAlive(atomicJob);
+                GC.KeepAlive(environment);
                 if (jobHandleList != IntPtr.Zero)
                 {
                     Marshal.FreeHGlobal(jobHandleList);
@@ -3233,14 +6156,38 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryInformationJobObject(
+            SafeKernelHandle job, uint informationClass,
+            out JobObjectBasicAccountingInformation information, uint informationLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryExtendedInformationJobObject(
+            SafeKernelHandle job, uint informationClass,
+            out JobObjectExtendedLimitInformation information, uint informationLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsProcessInJob(
+            SafeProcessHandle process, SafeKernelHandle job, [MarshalAs(UnmanagedType.Bool)] out bool result);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateOwnedProcess(SafeProcessHandle process, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -3300,6 +6247,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             public IntPtr Thread;
             public uint ProcessId;
             public uint ThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicAccountingInformation
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -3401,7 +6361,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StepOverRecord? stepOver = null,
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
-        BreakpointUpdate? breakpointUpdate = null)
+        BreakpointUpdate? breakpointUpdate = null,
+        PauseRecord? pause = null,
+        InitialBreakpointRequest? initialBreakpoints = null,
+        Action? onWriteStarted = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
@@ -3409,13 +6372,83 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public StepOverRecord? StepOver { get; } = stepOver;
         public ContinueRecord? ContinueExecution { get; } = continueExecution;
         public BreakpointUpdate? BreakpointUpdate { get; } = breakpointUpdate;
+        public PauseRecord? Pause { get; } = pause;
+        public InitialBreakpointRequest? InitialBreakpoints { get; } = initialBreakpoints;
         public string? InspectionContextId { get; } = inspectionContextId;
-        public bool WriteStarted { get; private set; }
-        public void MarkWriteStarted() => WriteStarted = true;
+        private int _writeStarted;
+        private int _committedWrite;
+        public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
+        public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
+        public void MarkWriteStarted()
+        {
+            Volatile.Write(ref _writeStarted, 1);
+            onWriteStarted?.Invoke();
+        }
+        public void CommitWrite() => Volatile.Write(ref _committedWrite, 1);
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private sealed class StepOverRecord(int threadId, CancellationToken callerCancellation) : IDisposable
+    private sealed class PauseRecord : IDisposable
+    {
+        private readonly CancellationTokenSource _deadline;
+        private readonly CancellationTokenRegistration _callerCancellation;
+
+        internal PauseRecord(TimeSpan timeout, TimeProvider timeProvider, CancellationToken cancellationToken)
+        {
+            _deadline = new CancellationTokenSource(timeout, timeProvider);
+            _callerCancellation = cancellationToken.Register(static state => ((CancellationTokenSource)state!).Cancel(), _deadline);
+        }
+
+        public CancellationToken DeadlineToken => _deadline.Token;
+        public PendingRequest? Request { get; set; }
+        public int? ThreadId { get; set; }
+        public bool RequireRunning { get; set; }
+        public bool Finalized { get; set; }
+        public bool AcknowledgementObserved { get; private set; }
+        public DapPauseResult? Outcome { get; private set; }
+        public Exception? ProtocolFailure { get; private set; }
+        public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ObserveAcknowledgement(bool success)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null && !_deadline.IsCancellationRequested)
+            {
+                AcknowledgementObserved = true;
+                Outcome = success
+                    ? new DapPauseResult(DapPauseOutcome.Acknowledged, ThreadId)
+                    : DapPauseResult.Refused;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveTerminal(string terminal, int? exitCode)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null && !_deadline.IsCancellationRequested)
+            {
+                Outcome = new DapPauseResult(DapPauseOutcome.Terminal, Terminal: terminal, ExitCode: exitCode);
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveFailure(Exception failure)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null)
+            {
+                ProtocolFailure = failure;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void Dispose()
+        {
+            _callerCancellation.Dispose();
+            _deadline.Dispose();
+        }
+    }
+
+    private sealed record DapPauseArguments([property: JsonPropertyName("threadId")] int ThreadId);
+
+    private sealed class StepOverRecord(int threadId, DapStepKind kind, CancellationToken callerCancellation) : IDisposable
     {
         private bool _acknowledged;
         private int _writeStarted;
@@ -3425,6 +6458,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private CancellationTokenRegistration _callerCancellationRegistration;
 
         public int ThreadId { get; } = threadId;
+        public string Command { get; } = kind switch
+        {
+            DapStepKind.Over => "next",
+            DapStepKind.Into => "stepIn",
+            DapStepKind.Out => "stepOut",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
@@ -3513,6 +6553,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private DapContinueResult? _stoppedCandidate;
 
         public int ThreadId { get; } = threadId;
+        public PauseRecord? QuickPause { get; set; }
+        public string? QuickContext { get; set; }
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
@@ -3641,7 +6683,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         bool SupportsPaging,
         string? InspectionContextId = null);
 
-    private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true, string? InspectionContextId = null);
+    private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true, string? InspectionContextId = null, string? SerializedContent = null);
 
     private sealed record DapSetBreakpointsArguments(
         [property: JsonPropertyName("source")] DapBreakpointSource Source,
@@ -3649,11 +6691,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record DapBreakpointSource([property: JsonPropertyName("path")] string Path);
 
-    private readonly record struct DapRequestedBreakpoint([property: JsonPropertyName("line")] int Line);
+    private readonly record struct DapRequestedBreakpoint(
+        [property: JsonPropertyName("line")] int Line,
+        [property: JsonIgnore] long Incarnation = 0,
+        [property: JsonPropertyName("condition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Condition = null,
+        [property: JsonPropertyName("hitCondition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HitCondition = null,
+        [property: JsonIgnore] long Identity = 0);
+    private sealed record InitialBreakpointRequest(string File, DapRequestedBreakpoint[] Requested);
 
     private readonly record struct DapBreakpointObservation(bool Verified, int? ActualLine);
 
-    private sealed class BreakpointUpdate(string file, DapRequestedBreakpoint[] requested, int targetIndex, int countDelta)
+    private sealed class BreakpointUpdate(string file, DapRequestedBreakpoint[] requested, int targetIndex, int countDelta, bool isRemoval = false)
     {
         private int _writeStarted;
         private int _committedWrite;
@@ -3663,6 +6711,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public DapRequestedBreakpoint[] Requested { get; } = requested;
         public int TargetIndex { get; } = targetIndex;
         public int CountDelta { get; } = countDelta;
+        public bool IsRemoval { get; } = isRemoval;
+        public string[]? ExceptionFilters { get; init; }
+        public LegacyFunctionBreakpoint[]? FunctionBreakpoints { get; init; }
+        public string Command => FunctionBreakpoints is not null ? "setFunctionBreakpoints" : ExceptionFilters is not null ? "setExceptionBreakpoints" : "setBreakpoints";
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
@@ -3710,13 +6762,26 @@ internal sealed class DapStartupCleanupException(Exception startupFailure, Excep
     internal Exception CleanupFailure { get; } = cleanupFailure;
 }
 
-internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line);
+internal sealed class DapLaunchRefusedException() : Exception("DAP launch request was refused.");
+
+internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line, long Incarnation = 0, string? Condition = null, string? HitCondition = null, long Identity = 0);
+internal readonly record struct LegacyRequestedLine(int Line, long Incarnation, string? Condition = null, string? HitCondition = null, long Identity = 0);
+internal sealed record LegacyFunctionBreakpoint(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("condition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Condition,
+    [property: JsonPropertyName("hitCondition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HitCondition,
+    [property: JsonIgnore] bool Verified = false,
+    [property: JsonIgnore] long Incarnation = 0);
+
+internal sealed class DapBreakpointOptionsUnsupportedException() : Exception("DAP breakpoint options are unsupported.");
 
 internal readonly record struct DapInitialBreakpoint(
     [property: JsonPropertyName("index")] int Index,
     [property: JsonPropertyName("verified")] bool Verified,
     [property: JsonPropertyName("actualLine")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? ActualLine);
+
+internal sealed record LegacyBreakpointObservation(string File, int Line, long Incarnation, bool Verified, int? DapLine, int? Id, long HitCount, bool Removed);
 
 internal sealed class DapBreakpointsException(bool isRefused) : Exception(
     isRefused ? "DAP refused source breakpoint configuration." : "DAP source breakpoint configuration failed.")
@@ -3730,18 +6795,23 @@ internal enum DapBreakpointUpdateOutcome
     Removed,
     NotFound,
     Refused,
+    Unsupported,
+    Acknowledged,
     LimitReached,
+    Unavailable,
 }
 
 internal sealed record DapBreakpointUpdateResult(
     DapBreakpointUpdateOutcome Outcome,
     bool Verified = false,
     int? ActualLine = null,
-    bool RequiresDrain = false)
+    bool RequiresDrain = false,
+    bool[]? ExceptionVerification = null)
 {
     internal static DapBreakpointUpdateResult Refused { get; } = new(DapBreakpointUpdateOutcome.Refused);
     internal static DapBreakpointUpdateResult NotFound { get; } = new(DapBreakpointUpdateOutcome.NotFound);
     internal static DapBreakpointUpdateResult LimitReached { get; } = new(DapBreakpointUpdateOutcome.LimitReached);
+    internal static DapBreakpointUpdateResult Unavailable { get; } = new(DapBreakpointUpdateOutcome.Unavailable);
 }
 
 internal sealed class DapBreakpointCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)
@@ -3750,9 +6820,17 @@ internal sealed class DapBreakpointCanceledException(bool requiresDrain, Excepti
     internal bool RequiresDrain { get; } = requiresDrain;
 }
 
+internal enum DapStepKind
+{
+    Over,
+    Into,
+    Out,
+}
+
 internal enum DapStepOverOutcome
 {
     Refused,
+    Unsupported,
     Succeeded,
     Terminal,
     TimedOut,
@@ -3765,6 +6843,7 @@ internal sealed record DapStepOverResult(
     int? ExitCode = null)
 {
     internal static DapStepOverResult Refused { get; } = new(DapStepOverOutcome.Refused, 0);
+    internal static DapStepOverResult Unsupported { get; } = new(DapStepOverOutcome.Unsupported, 0);
     internal static DapStepOverResult Succeeded(int threadId) => new(DapStepOverOutcome.Succeeded, threadId);
     internal static DapStepOverResult ForTerminal(string terminal, int? exitCode) => new(DapStepOverOutcome.Terminal, 0, terminal, exitCode);
     internal static DapStepOverResult TimedOut(int threadId) => new(DapStepOverOutcome.TimedOut, threadId);
@@ -3797,6 +6876,48 @@ internal sealed class DapContinueCanceledException(bool requiresDrain, Exception
     internal bool RequiresDrain { get; } = requiresDrain;
 }
 
+internal enum DapPauseOutcome
+{
+    Refused,
+    Acknowledged,
+    NoThreads,
+    Terminal,
+    TimedOut,
+    ProtocolError,
+}
+
+internal sealed record DapPauseResult(
+    DapPauseOutcome Outcome,
+    int? ThreadId = null,
+    string? Terminal = null,
+    int? ExitCode = null,
+    bool RequiresDrain = false)
+{
+    internal static DapPauseResult Refused { get; } = new(DapPauseOutcome.Refused);
+}
+
+internal sealed class DapPauseCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)
+    : OperationCanceledException("Pause observation was cancelled.", innerException, cancellationToken)
+{
+    internal bool RequiresDrain { get; } = requiresDrain;
+}
+
+internal sealed record DapLaunchOptions(
+    string? WorkingDirectory,
+    string[]? Arguments,
+    bool? StopAtEntry,
+    bool? JustMyCode,
+    IReadOnlyDictionary<string, string?>? Environment,
+    string? DotnetHostPath = null);
+
+internal sealed record DapLaunchArguments(
+    [property: JsonPropertyName("program")] string Program,
+    [property: JsonPropertyName("env"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? Environment,
+    [property: JsonPropertyName("cwd"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkingDirectory,
+    [property: JsonPropertyName("args"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? Arguments,
+    [property: JsonPropertyName("stopAtEntry"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? StopAtEntry,
+    [property: JsonPropertyName("justMyCode"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? JustMyCode);
+
 internal sealed record DapThread(
     [property: JsonPropertyName("id")] int Id,
     [property: JsonPropertyName("name")] string Name);
@@ -3825,6 +6946,11 @@ internal sealed record DapCallStackResult(
         new(false, frames, totalFrames, inspectionContextId);
 }
 
+internal sealed record DapVariablesArguments(
+    [property: JsonPropertyName("variablesReference")] int VariablesReference,
+    [property: JsonPropertyName("start"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Start,
+    [property: JsonPropertyName("count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Count);
+
 internal sealed record DapScope(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("variablesReference")] int VariablesReference,
@@ -3841,7 +6967,64 @@ internal sealed record DapScopesResult(bool IsRefused, string? InspectionContext
     internal static DapScopesResult Refused { get; } = new(true, null, Array.Empty<DapScope>());
 }
 
+internal enum DapStepTargetsOutcome { Success, Unsupported, Refused }
+internal sealed record DapStepTargetsResult(DapStepTargetsOutcome Outcome, IReadOnlyList<DapStepTarget>? Targets);
+internal sealed record DapStepTarget(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("line"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Line,
+    [property: JsonPropertyName("column"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Column,
+    [property: JsonPropertyName("endLine"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine,
+    [property: JsonPropertyName("endColumn"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndColumn);
+
 internal sealed record DapVariablesResult(bool IsRefused, string? InspectionContextId, IReadOnlyList<DapVariable> Variables)
 {
     internal static DapVariablesResult Refused { get; } = new(true, null, Array.Empty<DapVariable>());
 }
+
+internal enum DapExceptionInfoOutcome
+{
+    Success,
+    Unsupported,
+    Refused,
+}
+
+internal sealed record DapExceptionInfoResult(DapExceptionInfoOutcome Outcome, JsonElement Body = default)
+{
+    internal static DapExceptionInfoResult Unsupported { get; } = new(DapExceptionInfoOutcome.Unsupported);
+    internal static DapExceptionInfoResult Refused { get; } = new(DapExceptionInfoOutcome.Refused);
+}
+
+internal enum DapEvaluateOutcome
+{
+    Success,
+    Refused,
+    Failed,
+    OutcomeUnknown,
+}
+
+internal sealed record DapEvaluateResult(
+    DapEvaluateOutcome Outcome,
+    string? InspectionContextId = null,
+    string? Result = null,
+    string? Type = null,
+    int VariablesReference = 0)
+{
+    internal static DapEvaluateResult Refused { get; } = new(DapEvaluateOutcome.Refused);
+    internal static DapEvaluateResult Failed { get; } = new(DapEvaluateOutcome.Failed);
+    internal static DapEvaluateResult OutcomeUnknown { get; } = new(DapEvaluateOutcome.OutcomeUnknown);
+}
+
+internal enum DapSetVariableOutcome { Success, Unsupported, Refused, Failed, OutcomeUnknown }
+
+internal sealed record DapSetVariableResult(DapSetVariableOutcome Outcome, string? SerializedContent = null)
+{
+    internal static DapSetVariableResult Unsupported { get; } = new(DapSetVariableOutcome.Unsupported);
+    internal static DapSetVariableResult Refused { get; } = new(DapSetVariableOutcome.Refused);
+    internal static DapSetVariableResult Failed { get; } = new(DapSetVariableOutcome.Failed);
+    internal static DapSetVariableResult OutcomeUnknown { get; } = new(DapSetVariableOutcome.OutcomeUnknown);
+}
+
+internal enum DapRuntimeInventoryStatus { Success, Incomplete, TooLarge }
+
+internal readonly record struct DapRuntimeInventorySnapshot(DapRuntimeInventoryStatus Status, string? SerializedContent = null);

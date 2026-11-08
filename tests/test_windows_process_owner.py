@@ -165,6 +165,12 @@ class _FakeApi:
     def set_kill_on_close(self, _job: int) -> None:
         self.events.append("set-job-limits")
 
+    def clear_kill_on_close(self, _job: int) -> None:
+        self.events.append("clear-kill-on-close")
+
+    def restore_kill_on_close(self, _job: int) -> None:
+        self.events.append("restore-kill-on-close")
+
     def assign_process(self, _job: int, _process: int) -> None:
         self.events.append("assign")
         if not self.assign_ok:
@@ -336,6 +342,114 @@ async def test_admission_orders_private_job_before_resume(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_attach_safe_owner_never_forces_and_rechecks_natural_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    await owner.prepare_attach_safe()
+    api._active_counts = [1, 1, 1, 0]
+
+    first = await owner.drain_after_grace(grace_timeout=0, force_timeout=0)
+    closed = await owner.aclose()
+    assert first.status is DrainStatus.TIMED_OUT
+    assert closed.status is DrainStatus.TIMED_OUT
+    assert owner._job_handle is not None
+    assert "terminate-job" not in events
+    assert "terminate-process" not in events
+
+    assert (await owner.observe_passive()).status is DrainStatus.TIMED_OUT
+    drained = await owner.observe_passive()
+    assert drained.status is DrainStatus.DRAINED and drained.forced is False
+    await owner.aclose()
+    assert owner._job_handle is None
+    assert events.count("clear-kill-on-close") == 1
+    assert "terminate-job" not in events
+
+
+@pytest.mark.asyncio
+async def test_live_attached_owner_wait_cancels_without_blocking_worker_or_force(monkeypatch):
+    observed = asyncio.Event()
+
+    class LiveApi(_FakeApi):
+        def exit_code(self, _process):
+            observed.set()
+            return None
+
+    events: list[str] = []
+    api = LiveApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    await owner.prepare_attach_safe()
+    wait = asyncio.create_task(owner.wait_root())
+    await observed.wait()
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert owner._process_handle is not None and owner._job_handle is not None
+    assert "wait-process" not in events
+    assert "terminate-job" not in events and "terminate-process" not in events
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_pre_dispatch_attach_abort_restores_normal_launch_cleanup(monkeypatch, cancelled):
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+
+    class LiveApi(_FakeApi):
+        forced = False
+
+        def active_processes(self, _job):
+            self.events.append("query-accounting")
+            return 0 if self.forced else 1
+
+        def exit_code(self, _process):
+            return 0 if self.forced else None
+
+        def terminate_job(self, _job):
+            self.events.append("terminate-job")
+            self.forced = True
+
+    events: list[str] = []
+    api = LiveApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    client = DAPClient("/fake/adapter")
+    client._process = owner
+    run = client._run_for_direct_reader()
+    run.generation = owner.owner.generation
+    run.owner = owner
+    manager = SessionManager(netcoredbg_path="/fake/adapter")
+    manager._client = client
+    manager._active_dap_run = run.generation
+    manager._register_adapter_cleanup(client, run.generation)
+    manager._initialized_event.set()
+    manager._sync_all_breakpoints = AsyncMock()
+    manager._enable_hot_reload_if_supported = AsyncMock()
+    manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+    monkeypatch.setattr("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", lambda *_: False)
+    monkeypatch.setattr("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0)
+    reply = DAPResponse(seq=1, request_seq=1, command="launch", success=True)
+    client.set_exception_breakpoints = AsyncMock(return_value=reply)
+    client.configuration_done = AsyncMock(return_value=reply)
+    client.disconnect = AsyncMock(return_value=reply)
+    client.launch = AsyncMock(return_value=reply)
+    client.attach = AsyncMock(
+        side_effect=asyncio.CancelledError if cancelled else RuntimeError("before write")
+    )
+
+    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+        await manager.attach(44010)
+    assert manager._debuggee_mode is None
+    assert not run.attach_safe and not owner._attach_safe
+    assert events.index("clear-kill-on-close") < events.index("restore-kill-on-close")
+    assert (await manager.launch("/fake/target.dll"))["success"] is True
+    assert (await manager.stop())["success"] is True
+    client.disconnect.assert_awaited_once_with(terminate=True)
+    assert events.count("terminate-job") == 1
+
+
+@pytest.mark.asyncio
 async def test_forced_job_drain_records_an_already_exited_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,6 +470,38 @@ async def test_forced_job_drain_records_an_already_exited_root(
         assert events.count("terminate-job") == 1
     finally:
         await owner.aclose()
+
+
+def test_attach_safe_job_update_preserves_other_limits() -> None:
+    class Basic(ctypes.Structure):
+        _fields_ = [("LimitFlags", ctypes.c_uint32), ("ActiveProcessLimit", ctypes.c_uint32)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic), ("JobMemoryLimit", ctypes.c_size_t)]
+
+    def query(_handle, _kind, data, _size, _returned):
+        data._obj.BasicLimitInformation.LimitFlags = 0x2000 | 0x8
+        data._obj.BasicLimitInformation.ActiveProcessLimit = 7
+        data._obj.JobMemoryLimit = 12345
+        return True
+
+    captured = []
+
+    def update(_handle, _kind, data, _size):
+        info = data._obj
+        captured.append((info.BasicLimitInformation.LimitFlags,
+                         info.BasicLimitInformation.ActiveProcessLimit, info.JobMemoryLimit))
+        return True
+
+    api = _Kernel32.__new__(_Kernel32)
+    api._ctypes = ctypes
+    api._extended_limit_information = Extended
+    api._query_information = MagicMock(side_effect=query)
+    api._set_information = MagicMock(side_effect=update)
+    api.clear_kill_on_close(11)
+    assert captured == [(0x8, 7, 12345)]
+    api.restore_kill_on_close(11)
+    assert captured[-1] == (0x2008, 7, 12345)
 
 
 def test_exit_code_distinguishes_a_signaled_259_from_still_active() -> None:

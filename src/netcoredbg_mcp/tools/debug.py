@@ -304,8 +304,9 @@ def register_debug_tools(
         This is an UPSTREAM limitation that CANNOT be fixed by this MCP server.
         Result: stack traces will be incomplete/empty, debugging will be unreliable.
 
-        ONLY use this if you MUST debug an already-running process that you
-        cannot restart (e.g., production service, container you cannot control).
+        ATTACH SAFETY: Stop requests detach once but cannot confirm CLR detach.
+        Target survival after host or adapter failure is unproven. Do not attach
+        to a process that you cannot afford to lose.
 
         For normal debugging, ALWAYS use start_debug which has full functionality.
         If start_debug fails with build errors, fix the build - don't switch to attach.
@@ -583,13 +584,21 @@ def register_debug_tools(
         IMPORTANT: Always check state before asking user to interact with the app GUI!
         If the app is paused at a breakpoint, the user cannot interact with UI.
         Call continue_execution first if state shows stopped/paused.
+        An unconfirmed tracepoint operation reports state unknown; do not
+        repeat it. Stop the session or wait for confirmed adapter termination.
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
+            unknown = session.state.execution_outcome_unknown
             return build_response(
                 data=session.state.to_dict(),
-                state=session.state.state,
+                state="unknown" if unknown else session.state.state,
+                next_actions=["get_debug_state", "stop_debug"] if unknown else None,
+                message=(
+                    "Execution outcome is unconfirmed; do not retry operations automatically."
+                    if unknown else None
+                ),
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -628,6 +637,12 @@ def register_debug_tools(
                     "window_ms must be an integer from 1 to 30000",
                     state=session.state.state,
                 )
+            if session.state.execution_outcome_unknown:
+                return build_error_response(
+                    "Tracepoint operation outcome is unconfirmed",
+                    state="unknown",
+                    next_actions=["get_debug_state", "stop_debug"],
+                )
             if session.state.state != DebugState.RUNNING:
                 return build_error_response(
                     "debuggee_activity requires state RUNNING",
@@ -638,6 +653,12 @@ def register_debug_tools(
             await asyncio.sleep(window_ms / 1000)
             after = session.activity_snapshot()
 
+            if after.exec_state == "unknown":
+                return build_error_response(
+                    "Tracepoint operation outcome is unconfirmed",
+                    state="unknown",
+                    next_actions=["get_debug_state", "stop_debug"],
+                )
             if before.epoch is not after.epoch or after.state not in {
                 DebugState.RUNNING,
                 DebugState.STOPPED,
@@ -746,7 +767,7 @@ def register_debug_tools(
                 )
 
             session.prepare_for_execution()
-            await session.client.terminate()
+            await session._request_execution(session.client.terminate)
             snapshot = await session.wait_for_stopped(timeout=10.0)
             await notify_state_changed(ctx)
             await notify_threads(ctx)

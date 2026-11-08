@@ -7,7 +7,7 @@ name = "netcoredbg-mcp"
 version = "0.23.17"
 description = "MCP server for debugging C#/.NET code using netcoredbg"
 readme = "README.md"
-license = "MIT"
+license = "MIT AND Unicode-3.0"
 requires-python = ">=3.10"
 authors = [
     { name = "netcoredbg-mcp contributors" }
@@ -16,7 +16,6 @@ keywords = ["mcp", "debugging", "dotnet", "csharp", "netcoredbg", "dap"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -85,8 +84,10 @@ exclude = [
 "bridge/Program.cs" = "netcoredbg_mcp/bridge/Program.cs"
 "bridge/app.manifest" = "netcoredbg_mcp/bridge/app.manifest"
 "scripts/build-netcoredbg-enc.ps1" = "netcoredbg_mcp/scripts/build-netcoredbg-enc.ps1"
+"tools/enc_compiler/BaselineArtifacts.cs" = "netcoredbg_mcp/tools/enc_compiler/BaselineArtifacts.cs"
 "tools/enc_compiler/EncCompiler.csproj" = "netcoredbg_mcp/tools/enc_compiler/EncCompiler.csproj"
 "tools/enc_compiler/DeltaEmitter.cs" = "netcoredbg_mcp/tools/enc_compiler/DeltaEmitter.cs"
+"tools/enc_compiler/FrameworkReferenceResolver.cs" = "netcoredbg_mcp/tools/enc_compiler/FrameworkReferenceResolver.cs"
 "tools/enc_compiler/Program.cs" = "netcoredbg_mcp/tools/enc_compiler/Program.cs"
 
 [tool.ruff]

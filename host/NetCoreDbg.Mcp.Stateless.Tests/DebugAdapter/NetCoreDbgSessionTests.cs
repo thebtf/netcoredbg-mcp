@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Security.AccessControl;
 using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Text.Json;
@@ -89,8 +92,402 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public void DeltaEmitter_ApplyEdits_PreservesSingleFinalNewline()
+    {
+        var hostPath = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            Path.Combine(Path.GetDirectoryName(hostPath)!, "enc_compiler.dll"));
+        var editType = Assert.IsAssignableFrom<Type>(assembly.GetType("NetcoredbgMcp.EncCompiler.SourceEdit"));
+        var emitterType = Assert.IsAssignableFrom<Type>(assembly.GetType("NetcoredbgMcp.EncCompiler.DeltaEmitter"));
+        var edit = Assert.IsAssignableFrom<object>(Activator.CreateInstance(editType, 1, 1, "class Edited { }"));
+        var edits = Array.CreateInstance(editType, 1);
+        edits.SetValue(edit, 0);
+        var method = Assert.IsAssignableFrom<MethodInfo>(emitterType.GetMethod("ApplyEdits", BindingFlags.Public | BindingFlags.Static));
+        var result = Assert.IsType<string>(method.Invoke(null, ["class Original { }" + Environment.NewLine, edits]));
+        Assert.Equal("class Edited { }" + Environment.NewLine, result);
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_SnapshotWriteRestorePreservesOriginalBytes()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-restore-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var target = Path.Combine(scratch, "Source.cs");
+        byte[] original = [0xef, 0xbb, 0xbf, .. Encoding.UTF8.GetBytes("class Café { }\r\n")];
+        await File.WriteAllBytesAsync(target, original);
+        try
+        {
+            var source = await OpenLegacyEncSourceAsync(scratch, "Source.cs");
+            string backup;
+            await using (source)
+            {
+                Assert.Equal(target, LegacyEncProperty(source, "TargetPath"));
+                Assert.Equal("class Café { }\r\n", LegacyEncProperty(source, "Snapshot"));
+                await InvokeLegacyEncAsync(source, "WriteAsync", "class Edited { }\n", CancellationToken.None);
+                backup = Assert.IsType<string>(LegacyEncProperty(source, "BackupPath"));
+                Assert.True(File.Exists(backup));
+                await InvokeLegacyEncAsync(source, "RestoreBeforeDispatchAsync");
+                await InvokeLegacyEncAsync(source, "CompleteAsync");
+                Assert.Null(LegacyEncProperty(source, "BackupPath"));
+            }
+            Assert.Equal(original, await File.ReadAllBytesAsync(target));
+            Assert.False(File.Exists(backup));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_ExclusiveHandleAndUnknownOutcomeRetainBackup()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-retain-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var target = Path.Combine(scratch, "Source.cs");
+        var original = Encoding.UTF8.GetBytes("class Original { }\r\n");
+        await File.WriteAllBytesAsync(target, original);
+        try
+        {
+            var source = await OpenLegacyEncSourceAsync(scratch, target);
+            string backup;
+            await using (source)
+            {
+                Assert.Throws<IOException>(() => File.Open(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
+                Assert.Throws<IOException>(() => File.Move(target, Path.Combine(scratch, "Moved.cs")));
+                await InvokeLegacyEncAsync(source, "WriteAsync", "class Edited { }\n", CancellationToken.None);
+                backup = Assert.IsType<string>(LegacyEncProperty(source, "BackupPath"));
+                Assert.True(File.Exists(backup));
+            }
+            Assert.Equal("class Edited { }\n", await File.ReadAllTextAsync(target, Encoding.UTF8));
+            Assert.Equal(original, await File.ReadAllBytesAsync(backup));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    [Fact]
+    public async Task LegacyEncSource_RejectsHardLinkOutsideProject()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"enc-source-hardlink-{Guid.NewGuid():N}");
+        var project = Path.Combine(scratch, "project");
+        Directory.CreateDirectory(project);
+        var target = Path.Combine(project, "Source.cs");
+        var alias = Path.Combine(scratch, "outside.cs");
+        await File.WriteAllTextAsync(target, "class Original { }\n");
+        try
+        {
+            if (!CreateEncHardLink(alias, target, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create the scratch hard link.");
+            IAsyncDisposable? unexpected = null;
+            var failure = await Record.ExceptionAsync(async () => { unexpected = await OpenLegacyEncSourceAsync(project, target); });
+            if (unexpected is not null) await unexpected.DisposeAsync();
+            Assert.IsType<IOException>(failure);
+            Assert.Equal("class Original { }\n", await File.ReadAllTextAsync(alias));
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+    }
+
+    private static async Task<IAsyncDisposable> OpenLegacyEncSourceAsync(string root, string file)
+    {
+        var path = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
+        var type = Assert.IsAssignableFrom<Type>(assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.LegacyEncSource"));
+        var method = Assert.IsAssignableFrom<MethodInfo>(type.GetMethod("OpenAsync", BindingFlags.Static | BindingFlags.NonPublic));
+        var task = Assert.IsAssignableFrom<Task>(method.Invoke(null, [root, file, CancellationToken.None]));
+        await task;
+        return Assert.IsAssignableFrom<IAsyncDisposable>(task.GetType().GetProperty("Result")!.GetValue(task));
+    }
+
+    private static object? LegacyEncProperty(object source, string name) =>
+        source.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(source);
+
+    private static async Task InvokeLegacyEncAsync(object source, string name, params object[] arguments)
+    {
+        var method = Assert.IsAssignableFrom<MethodInfo>(source.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic));
+        await Assert.IsAssignableFrom<Task>(method.Invoke(source, arguments));
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateEncHardLink(string link, string existing, IntPtr securityAttributes);
+
+    [Fact]
+    public async Task BuildRunner_PreservesWorkingDirectoryArgumentsOutputAndExitCode()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"build runner {Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var cleanupConfirmed = false;
+        try
+        {
+            var fixture = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+            Assert.Empty(fixture.Arguments);
+            string[] arguments = ["--controlled-build-observe", "", "two words", "quote\"here", "trailing\\", "雪"];
+            var result = await RunBuildCommandAsync(fixture.Command, arguments, scratch, CancellationToken.None);
+            cleanupConfirmed = true;
+            using var output = JsonDocument.Parse((string)result.GetType().GetProperty("Stdout")!.GetValue(result)!);
+            Assert.Equal(Path.GetFullPath(scratch), output.RootElement.GetProperty("workingDirectory").GetString());
+            Assert.Equal(arguments[1..], output.RootElement.GetProperty("arguments").EnumerateArray().Select(value => value.GetString()).ToArray());
+            Assert.Equal("controlled stderr: λ", result.GetType().GetProperty("Stderr")!.GetValue(result));
+            Assert.Equal(37, result.GetType().GetProperty("ExitCode")!.GetValue(result));
+        }
+        finally
+        {
+            if (cleanupConfirmed) Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BuildRunner_CancellationReturnsAfterOwnedRootAndDescendantExit(bool redirectChildOutput)
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) return;
+        var fixture = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+        Assert.Empty(fixture.Arguments);
+        var scratch = Path.Combine(RepositoryLayout.ScratchRoot, $"build-tree-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        var ready = Path.Combine(scratch, "ready.json");
+        using var cancellation = new CancellationTokenSource();
+        var cleanupConfirmed = false;
+        var arguments = redirectChildOutput
+            ? new[] { "--controlled-build-tree", ready, "--redirect-child-output" }
+            : new[] { "--controlled-build-tree", ready };
+        var run = RunBuildCommandAsync(fixture.Command, arguments, scratch, cancellation.Token);
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (!File.Exists(ready))
+            {
+                if (run.IsCompleted)
+                {
+                    await run;
+                    throw new InvalidOperationException("The build command returned before publishing its process identities.");
+                }
+                await Task.Delay(20, observation.Token);
+            }
+            using var identity = JsonDocument.Parse(await File.ReadAllTextAsync(ready, observation.Token));
+            using var root = OpenBuildWitness(identity.RootElement, "rootId", "rootStart");
+            using var descendant = OpenBuildWitness(identity.RootElement, "descendantId", "descendantStart");
+            Assert.False(root.Exited);
+            Assert.False(descendant.Exited);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await run);
+            var rootExitedOnReturn = root.Exited;
+            var descendantExitedOnReturn = descendant.Exited;
+            if (!rootExitedOnReturn || !descendantExitedOnReturn) await Task.Delay(250);
+            var rootExitedLater = root.Exited;
+            var descendantExitedLater = descendant.Exited;
+            cleanupConfirmed = rootExitedLater && descendantExitedLater;
+            Assert.True(rootExitedOnReturn, $"The retained root must be exited on return (after 250ms: {rootExitedLater}).");
+            Assert.True(descendantExitedOnReturn, $"The retained descendant must be exited on return (after 250ms: {descendantExitedLater}).");
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await run.WaitAsync(TimeSpan.FromSeconds(25)); }
+            catch (Exception) when (run.IsCompleted) { }
+            if (cleanupConfirmed && Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    private static async Task<object> RunBuildCommandAsync(string executable, IReadOnlyList<string> arguments, string directory, CancellationToken cancellationToken)
+    {
+        var path = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
+        var name = OperatingSystem.IsWindows() ? "DapBuildWindowsRunner" : "DapBuildUnixRunner";
+        var type = Assert.IsAssignableFrom<Type>(assembly.GetType($"NetCoreDbg.Mcp.Stateless.DebugAdapter.{name}"));
+        var method = Assert.IsAssignableFrom<MethodInfo>(type.GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic));
+        var task = Assert.IsAssignableFrom<Task>(method.Invoke(null, [executable, arguments, directory, TimeSpan.FromSeconds(30), cancellationToken]));
+        await task;
+        return Assert.IsAssignableFrom<object>(task.GetType().GetProperty("Result")!.GetValue(task));
+    }
+
+    private static BuildProcessWitness OpenBuildWitness(JsonElement identity, string idName, string startName)
+    {
+        var process = Process.GetProcessById(identity.GetProperty(idName).GetInt32());
+        BuildProcessWitness? witness = null;
+        try
+        {
+            witness = new BuildProcessWitness(process);
+            Assert.Equal(identity.GetProperty(startName).GetInt64(), process.StartTime.ToUniversalTime().Ticks);
+            return witness;
+        }
+        catch
+        {
+            if (witness is null) process.Dispose();
+            else witness.Dispose();
+            throw;
+        }
+    }
+
+    private sealed class BuildProcessWitness : IDisposable
+    {
+        private readonly Process _process;
+        private readonly SafeFileHandle? _pidfd;
+        public BuildProcessWitness(Process process)
+        {
+            _process = process;
+            if (OperatingSystem.IsWindows())
+            {
+                _ = process.SafeHandle;
+            }
+            else
+            {
+                var descriptor = LinuxSyscall(434, process.Id, 0);
+                if (descriptor < 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "pidfd_open failed");
+                _pidfd = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            }
+        }
+        public bool Exited
+        {
+            get
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    var wait = WaitForSingleObject(_process.SafeHandle, 0);
+                    if (wait == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "Process handle wait failed");
+                    return wait == 0;
+                }
+                var descriptor = new PollDescriptor { FileDescriptor = _pidfd!.DangerousGetHandle().ToInt32(), Events = 1 };
+                var result = Poll(ref descriptor, 1, 0);
+                if (result < 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "poll failed");
+                return result == 1 && (descriptor.ReturnedEvents & 1) != 0;
+            }
+        }
+        public void Dispose() { _pidfd?.Dispose(); _process.Dispose(); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollDescriptor { public int FileDescriptor; public short Events; public short ReturnedEvents; }
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
+    private static extern long LinuxSyscall(long number, int pid, uint flags);
+    [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
+    private static extern int Poll(ref PollDescriptor descriptor, uint count, int timeout);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
+
+    [Fact]
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
         NetCoreDbgSessionContractDriver.AssertUnixGuardianOwnershipContract();
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixtureDispose_UnconfirmedStart_PreservesTranscriptAndReportsUnresolvedCleanup(bool recordStartup)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var fixture = FixtureProcess.Create(new FixtureConfiguration());
+        var transcriptPath = Assert.IsType<string>(Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT"));
+        var scratchDirectory = Assert.IsType<string>(Path.GetDirectoryName(transcriptPath));
+        try
+        {
+            if (recordStartup) File.WriteAllText(transcriptPath, "{\"kind\":\"startup\",\"processId\":0}\n");
+            fixture.MarkAdapterStartAttempted();
+
+            var failure = await Record.ExceptionAsync(async () => await fixture.DisposeAsync());
+
+            Assert.True(File.Exists(transcriptPath), "Unconfirmed cleanup must retain its transcript.");
+            Assert.IsType<InvalidOperationException>(failure);
+            var repeated = await Record.ExceptionAsync(async () => await fixture.DisposeAsync());
+            Assert.Same(failure, repeated);
+            var startupFailure = new InvalidDataException("controlled startup failure");
+            var combined = await Assert.ThrowsAsync<AggregateException>(() => fixture.DisposePreservingFailureAsync(startupFailure));
+            Assert.Same(startupFailure, combined.InnerExceptions[0]);
+            Assert.Same(failure, combined.InnerExceptions[1]);
+        }
+        finally
+        {
+            try
+            {
+                await fixture.DisposeAsync();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            finally
+            {
+                if (Directory.Exists(scratchDirectory))
+                {
+                    Directory.Delete(scratchDirectory, recursive: true);
+                }
+            }
+        }
+    }
+    [Fact]
+    public async Task WindowsLaunch_RetainsOwnedProcessHandleWhenReopenIsDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await using var fixture = FixtureProcess.Create(new FixtureConfiguration());
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var session = Assert.IsAssignableFrom<Type>(assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession"));
+        var ownerType = Assert.IsAssignableFrom<Type>(session.GetNestedType("WindowsProcessTreeOwnership", BindingFlags.NonPublic));
+        var start = Assert.IsAssignableFrom<MethodInfo>(ownerType.GetMethod("Start", BindingFlags.Static | BindingFlags.NonPublic,
+            binder: null, types: [typeof(string), typeof(IReadOnlyList<string>)], modifiers: null));
+        var launch = Assert.IsAssignableFrom<IDisposable>(start.Invoke(null,
+            [fixture.ExecutablePath, new[] { "--controlled-dap-descendant" }]));
+        Process? witness = null;
+        var witnessOwned = false;
+        try
+        {
+            var process = Assert.IsType<Process>(launch.GetType().GetProperty("Process")?.GetValue(launch));
+            var owner = launch.GetType().GetProperty("Ownership")?.GetValue(launch);
+            Assert.NotNull(owner);
+            var job = Assert.IsAssignableFrom<SafeHandle>(ownerType.GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(owner));
+            witness = Process.GetProcessById(process.Id);
+            var witnessHandle = witness.SafeHandle;
+            Assert.True(IsProcessInJob(witnessHandle, job.DangerousGetHandle(), out var inJob));
+            Assert.True(inJob, "The witness must belong to this exact owned job before its security is changed.");
+            witnessOwned = true;
+
+            var descriptor = new RawSecurityDescriptor("D:P(D;;GA;;;WD)");
+            var bytes = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(bytes, 0);
+            Assert.True(SetKernelObjectSecurity(witnessHandle, 4, bytes), new Win32Exception(Marshal.GetLastWin32Error()).Message);
+
+            using var unbound = Process.GetProcessById(process.Id);
+            var denial = Record.Exception(() => _ = unbound.SafeHandle);
+            Assert.Equal(5, Assert.IsType<Win32Exception>(denial).NativeErrorCode);
+            Assert.False(process.SafeHandle.IsInvalid);
+        }
+        finally
+        {
+            try
+            {
+                launch.Dispose();
+                if (witnessOwned)
+                {
+                    await witness!.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+            }
+            finally
+            {
+                witness?.Dispose();
+            }
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(SafeProcessHandle process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(SafeProcessHandle process, uint securityInformation, byte[] securityDescriptor);
+
 
     [Fact]
     public async Task StartAsync_StartsDebuggerWithExactVscodeInterpreterArgument()
@@ -203,7 +600,8 @@ public sealed class NetCoreDbgSessionTests
             }
         }
 
-        Assert.IsType<InvalidDataException>(malformedFailure);
+        var malformed = Assert.IsType<InvalidDataException>(malformedFailure);
+        Assert.False(malformed.Data.Contains("FixtureCleanupFailure"), "Failed startup must not hide unconfirmed fixture cleanup.");
         Assert.Contains(malformedTranscript, entry => entry.Kind == "capabilities-event");
         Assert.DoesNotContain(malformedTranscript, entry => entry.Kind == "request" && entry.Command == "launch");
 
@@ -328,8 +726,10 @@ public sealed class NetCoreDbgSessionTests
         Assert.Equal(ExpectedLifecycleEvents, lifecycleEvents);
         Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
     }
-    [Fact]
-    public async Task GetCallStack_ContinuedDuringAdmission_WritesBeforeLifecycleTransition()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetCallStack_ContinuedDuringAdmission_WritesBeforeLifecycleTransition(bool implicitThread)
     {
         await using var session = await StartAsync(new FixtureConfiguration(
             SupportsDelayedStackTraceLoading: true,
@@ -338,7 +738,8 @@ public sealed class NetCoreDbgSessionTests
         await session.Fixture.WaitForEventAsync("stopped", cancellation.Token);
         await session.HoldDapWriteAsync(cancellation.Token);
         var writeHeld = true;
-        var callStack = session.GetCallStackIsRefusedAsync(1, 0, 20, cancellation.Token);
+        var callStack = implicitThread ? session.GetOptionalCallStackIsRefusedAsync(cancellation.Token)
+            : session.GetCallStackIsRefusedAsync(1, 0, 20, cancellation.Token);
         try
         {
             await session.WaitForPendingStackTraceAsync(cancellation.Token);
@@ -366,6 +767,125 @@ public sealed class NetCoreDbgSessionTests
             }
         }
     }
+
+    [Fact]
+    public async Task Continue_ImplicitThread_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "continue-hold"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.ContinueOptionalThreadAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("continue", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("continue-ack-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task Step_ImplicitThread_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "hold"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.StepOptionalThreadAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("next", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("next-response-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task StepIntoTarget_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "hold", SupportsStepTargets: true));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.StepIntoTargetAsync(context, 42, cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("stepIn", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "stepIn");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("next-response-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "stepIn");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+            Assert.Equal(42, arguments.RootElement.GetProperty("targetId").GetInt32());
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(observation.Token));
+            Assert.True(session.IsExecutionClosing);
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+
+
 
 
     [Fact]
@@ -413,6 +933,47 @@ public sealed class NetCoreDbgSessionTests
         Assert.Single(transcript, static entry => entry.Command == "next");
         Assert.Single(transcript, static entry => entry.Command == "terminate");
         Assert.Single(transcript, static entry => entry.Command == "disconnect");
+    }
+
+    [Fact]
+    public async Task LegacyTerminate_CancellationBeforeHeader_DoesNotReserveDispatch()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsTerminate: true, LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var field = typeof(NetCoreDbgSessionContractDriver).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var target = Assert.IsAssignableFrom<object>(field.GetValue(session));
+        var method = target.GetType().GetMethod("TerminateLegacyAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        Task<string> Terminate(CancellationToken token) => Assert.IsAssignableFrom<Task<string>>(method.Invoke(target, [token]));
+        using var cancellation = new CancellationTokenSource();
+        using var retryCancellation = new CancellationTokenSource();
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = Terminate(cancellation.Token);
+        Task<string>? retry = null;
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(async () => await operation.WaitAsync(observation.Token));
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "terminate");
+            Assert.False(session.IsExecutionClosing);
+            session.ReleaseDapWriteBarrier();
+            retry = Terminate(retryCancellation.Token);
+            await session.Fixture.WaitForDapRequestCountAsync("terminate", 1, observation.Token);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "terminate");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            retryCancellation.Cancel();
+            if (retry is not null) await Record.ExceptionAsync(async () => await retry.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
     }
 
     [Theory]
@@ -542,6 +1103,118 @@ public sealed class NetCoreDbgSessionTests
             using var later = JsonDocument.Parse(writes[1].Arguments!);
             Assert.Equal(source, later.RootElement.GetProperty("source").GetProperty("path").GetString());
             Assert.Equal([2, 6], later.RootElement.GetProperty("breakpoints").EnumerateArray().Select(static breakpoint => breakpoint.GetProperty("line").GetInt32()));
+        }
+        finally
+        {
+            session.Fixture.ReleaseNextResponse();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfigureExceptions_CancellationBeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, ExceptionBreakpointFilters: "supported"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ConfigureExceptionsThroughRegistryAsync(["all"], cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                if (!partialHeader)
+                {
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.True(session.IsUsable);
+                }
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", content.GetProperty("kind").GetString());
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+            }
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setExceptionBreakpoints");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_ValidatedAcknowledgementBeforeCancellation_PreservesSession()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, ExceptionBreakpointFilters: "supported", SetExceptionBreakpointsResponseMode: "hold-first"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ConfigureExceptionsThroughRegistryAsync(["all"], cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.True(session.IsUsable);
+                Assert.Equal(0, session.PendingRequestCount);
+                return Task.CompletedTask;
+            });
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("exception-filters-response-gated", observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setExceptionBreakpoints");
+            Assert.NotNull(request.Sequence);
+            Assert.False(operation.IsCompleted);
+            await session.DispatchExceptionFiltersAcknowledgementThenCancelAsync(request.Sequence.Value, cancellation.Cancel, observation.Token);
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+            Assert.Null(probe.LeaseReleasedBeforeRemoval);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            Assert.Equal("debug_state_success", Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setExceptionBreakpoints");
         }
         finally
         {
@@ -850,6 +1523,562 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Evaluate_Cancellation_BeforeHeaderPreservesContextButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.EvaluateThroughRegistryAsync(context, cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeEvaluate: async invoke =>
+            {
+                try
+                {
+                    return await invoke("evaluate-cancel", cancellation.Token);
+                }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(0, session.PendingRequestCount);
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "evaluate");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("evaluate-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    var result = Assert.IsType<JsonElement>(next.StructuredContent);
+                    Assert.Equal("evaluate_success", result.GetProperty("kind").GetString());
+                    Assert.Equal(context, result.GetProperty("inspectionContextId").GetString());
+                    Assert.Equal("42", result.GetProperty("result").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            var evaluations = (await session.Fixture.ReadTranscriptAsync()).Where(static entry => entry.Command == "evaluate");
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+                Assert.Empty(evaluations);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+                Assert.Single(evaluations);
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SetVariable_Cancellation_BeforeHeaderPreservesContextButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.SetVariableThroughRegistryAsync(context, cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeSetVariable: async invoke =>
+            {
+                try
+                {
+                    return await invoke("set-cancel", cancellation.Token);
+                }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(0, session.PendingRequestCount);
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("set-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    var result = Assert.IsType<JsonElement>(next.StructuredContent);
+                    Assert.Equal("set_variable_success", result.GetProperty("kind").GetString());
+                    Assert.NotEqual(context, result.GetProperty("inspectionContextId").GetString());
+                    Assert.Equal("updated", result.GetProperty("value").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            var mutations = (await session.Fixture.ReadTranscriptAsync()).Where(static entry => entry.Command == "setVariable");
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+                Assert.Empty(mutations);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+                Assert.Single(mutations);
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_StaleReply_FencesNewInspectionBeforeRegistryDrain()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token, variableName: "fixture:hold");
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("set-variable-response-gated", observation.Token);
+            Assert.False(operation.IsCompleted);
+            await session.DispatchStaleSetVariableResponseAsync(
+                () => Assert.False(session.CanCaptureInspectionTarget(),
+                    "A stale mutation reply must fence new inspection before its completion is published."),
+                observation.Token);
+            var probe = await operation.WaitAsync(observation.Token);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+        }
+        finally
+        {
+            session.Fixture.ReleaseStackTraceResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReaderFailureBeforeWriterHandoff_SendsNoMutationBytes()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            var pending = session.GetPendingResponseTask("setVariable");
+            Assert.False(pending.IsCompleted);
+            var readerFailure = new IOException("controlled DAP reader failure");
+            session.FailPendingAsReaderFailure(readerFailure);
+            var failure = await Assert.ThrowsAnyAsync<IOException>(async () => await pending.WaitAsync(observation.Token));
+            Assert.Same(readerFailure, failure);
+            Assert.False(observation.IsCancellationRequested);
+            Assert.False(operation.IsCompleted);
+            session.ReleaseDapWriteBarrier();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.Equal(writesBefore, session.DapWriteCalls);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReaderFailureMissedByPendingSweep_SendsNoMutationBytes()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            // This state is reachable when the reader's pending sweep finishes before registration.
+            session.SimulateReaderFailureMissingPendingRequest(new IOException("controlled DAP reader failure"));
+            session.ReleaseDapWriteBarrier();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.Equal(writesBefore, session.DapWriteCalls);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Theory]
+    [InlineData("fixture:invalid-seq")]
+    [InlineData("fixture:missing-seq")]
+    public async Task SetVariable_InvalidResponseSequence_ReportsUnknownAndDrains(string name)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+
+        var probe = await session.SetVariableThroughRegistryAsync(context, observation.Token, variableName: name);
+
+        Assert.True(probe.Result.IsError == true);
+        var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+        Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+        Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+    }
+
+    [Fact]
+    public void DapWriteBarrier_DisposeClosesOwnedInputStream()
+    {
+        var type = typeof(NetCoreDbgSessionContractDriver).GetNestedType("DapWriteBarrierStream", BindingFlags.NonPublic);
+        Assert.NotNull(type);
+        var constructor = type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null, types: [typeof(Stream)], modifiers: null);
+        Assert.NotNull(constructor);
+        using var input = new MemoryStream();
+        var barrier = Assert.IsAssignableFrom<Stream>(constructor.Invoke([input]));
+        barrier.Dispose();
+        barrier.Dispose();
+        Assert.False(input.CanWrite);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadedSources_Cancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, SupportsLoadedSourcesRequest: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader) session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        else session.ArmDapWriteBeforeHeaderBarrier();
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.LoadedSourcesThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeInspection: async invoke =>
+            {
+                try { return await invoke("loaded-sources-cancel", cancellation.Token); }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "loadedSources");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("loaded-sources-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    Assert.Equal("loaded_sources_success", Assert.IsType<JsonElement>(next.StructuredContent).GetProperty("kind").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader) await session.WaitForDapHeaderEntryAsync(observation.Token);
+            else await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            if (partialHeader)
+            {
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "loadedSources");
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task LoadedSources_PartialHeaderCancellation_RejectsAnotherAlreadyQueuedDapWrite()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, SupportsLoadedSourcesRequest: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        using var cancellation = new CancellationTokenSource();
+        var sourceRequest = session.LoadedSourcesThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () => { session.ReleaseDapWriteBarrier(); return Task.CompletedTask; });
+        Task? queuedRequest = null;
+        try
+        {
+            await session.WaitForDapHeaderEntryAsync(observation.Token);
+            queuedRequest = session.WaitForReaderBarrierAsync(observation.Token);
+            await session.WaitForPendingCommandAsync("threads", observation.Token);
+            cancellation.Cancel();
+            var probe = await sourceRequest.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.NotNull(await Record.ExceptionAsync(() => queuedRequest));
+            Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+            Assert.Equal(writesBefore + 1, session.DapWriteCalls);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => sourceRequest);
+            if (queuedRequest is not null) _ = await Record.ExceptionAsync(() => queuedRequest);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExceptionInfo_Cancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", SupportsExceptionInfoRequest: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ExceptionInfoThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeInspection: async invoke =>
+            {
+                try
+                {
+                    return await invoke("exception-info-cancel", cancellation.Token);
+                }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(0, session.PendingRequestCount);
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "exceptionInfo");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("exception-info-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    var result = Assert.IsType<JsonElement>(next.StructuredContent);
+                    Assert.Equal("exception_info_success", result.GetProperty("kind").GetString());
+                    Assert.Equal("System.InvalidOperationException", result.GetProperty("exception").GetProperty("exceptionId").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            var requests = (await session.Fixture.ReadTranscriptAsync()).Where(static entry => entry.Command == "exceptionInfo");
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+                Assert.Empty(requests);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+                Assert.Single(requests);
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task ExceptionInfo_CancellationAfterCommittedReadRetainsSessionWithoutRetry()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", SupportsExceptionInfoRequest: true, ExceptionInfoResponseMode: "timeout"),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ExceptionInfoThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                return Task.CompletedTask;
+            });
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("exception-info-response-timeout", observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+            Assert.Null(probe.LeaseReleasedBeforeRemoval);
+            Assert.Equal("debug_state_success", Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "exceptionInfo");
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Theory]
     [InlineData("zero", 0, false, false)]
     [InlineData("header-prefix", 1, false, false)]
     [InlineData("opaque-oce", 1, true, false)]
@@ -1050,6 +2279,20 @@ public sealed class NetCoreDbgSessionTests
         {
             ReleaseBarriers();
         }
+    }
+
+    [Fact]
+    public async Task TracepointContinue_StaleContextIsRefusedBeforeDapWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(LifecycleMode: "all-stop"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var result = await session.ContinueTracepointAsync(context + "-stale", observation.Token);
+        Assert.False(result.Admitted);
+        Assert.Equal("Refused", result.Outcome);
+        Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+        Assert.False(await session.GetCallStackIsRefusedAsync(1, 0, 1, observation.Token));
     }
 
     [Fact]
@@ -1429,10 +2672,7 @@ public sealed class NetCoreDbgSessionTests
         }
         finally
         {
-            if (descendant is { } processId)
-            {
-                await fixture.TerminateProcessTreeAsync(processId);
-            }
+            await session.DisposeSessionAsync();
         }
     }
 

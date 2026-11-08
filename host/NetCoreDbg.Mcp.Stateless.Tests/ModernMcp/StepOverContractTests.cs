@@ -16,7 +16,7 @@ public sealed class StepOverContractTests
     {
         { "missing_arguments", null },
         { "omitted_debug_session_id", new JsonObject { ["threadId"] = 1 } },
-        { "omitted_thread_id", new JsonObject { ["debugSessionId"] = "opaque" } },
+        { "conflicting_aliases", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 } },
         { "empty_token", new JsonObject { ["debugSessionId"] = string.Empty, ["threadId"] = 1 } },
         { "whitespace_token", new JsonObject { ["debugSessionId"] = " \t", ["threadId"] = 1 } },
         { "non_string_token", new JsonObject { ["debugSessionId"] = 1, ["threadId"] = 1 } },
@@ -31,7 +31,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task ToolsList_StepOverPublishesClosedInt32InputAfterGetCallStack()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await StartStepDriverAsync();
 
         var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
             ModernMcpProcessDriver.CurrentMeta(),
@@ -45,10 +45,11 @@ public sealed class StepOverContractTests
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
@@ -57,7 +58,7 @@ public sealed class StepOverContractTests
     [MemberData(nameof(InvalidArguments))]
     public async Task StepOver_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo(string scenario, JsonObject? arguments)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await StartStepDriverAsync();
         var before = await driver.ReadNativeActionsAsync();
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -78,7 +79,7 @@ public sealed class StepOverContractTests
     [InlineData("not-a-capability")]
     public async Task StepOver_UnavailableOpaqueToken_ReturnsNotFoundWithoutDapIo(string token)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await StartStepDriverAsync();
         var before = await driver.ReadNativeActionsAsync();
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -94,7 +95,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_AllStoppedAuthorityWithoutDelayedStackCapability_ForwardsOnlyExactInt32NextAndSucceeds()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver());
+        await using var driver = await StartStepDriverAsync(StepOver());
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-all-stop-start");
         var before = await driver.ReadNativeActionsAsync();
 
@@ -121,7 +122,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_PartialStoppedAuthority_AdmitsOnlyTheNamedTarget()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(lifecycleMode: "partial-stop"));
+        await using var driver = await StartStepDriverAsync(StepOver(lifecycleMode: "partial-stop"));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-partial-start");
         var before = await driver.ReadNativeActionsAsync();
 
@@ -140,7 +141,7 @@ public sealed class StepOverContractTests
     [InlineData("partial-stop-missing-thread", 1)]
     public async Task StepOver_AbsentStoppedAuthority_ReturnsRedactedRefusalWithoutNextWrite(string lifecycleMode, int threadId)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(lifecycleMode: lifecycleMode));
+        await using var driver = await StartStepDriverAsync(StepOver(lifecycleMode: lifecycleMode));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"step-over-no-authority-{lifecycleMode}");
         var before = await driver.ReadNativeActionsAsync();
 
@@ -159,7 +160,7 @@ public sealed class StepOverContractTests
     [InlineData(int.MaxValue)]
     public async Task StepOver_AdmittedNext_ClearsCurrentThreadIdBeforeHeldResponseAndPublishesActualNewStepThread(int nextThreadId)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "hold"));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: "hold"));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"current-thread-step-{nextThreadId}-start");
         using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await driver.WaitForFixtureRecordAsync("stopped-event", observation.Token);
@@ -209,7 +210,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_ConcurrentCallDuringHeldActiveRecord_RefusesWithoutSecondNextWrite()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "hold"));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: "hold"));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-single-flight-start");
         var first = driver.CallToolRawAsync(
             Tool,
@@ -236,7 +237,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_NegativeAcknowledgement_ReturnsRedactedRefusalAndPreservesSession()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "negative"));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: "negative"));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-negative-start");
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -258,7 +259,7 @@ public sealed class StepOverContractTests
     [InlineData("post-ack-ignored-stops")]
     public async Task StepOver_UnrelatedOrUncorrelatedStops_DoNotSettleBeforeLaterExactStepStop(string nextResponseMode)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: nextResponseMode));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"step-over-{nextResponseMode}-start");
 
         var operation = driver.CallToolRawAsync(
@@ -298,7 +299,7 @@ public sealed class StepOverContractTests
     [InlineData("terminal-exit-negative", "exited", -1)]
     public async Task StepOver_TerminalEvent_SettlesWithNormalizedTerminalOnly(string nextResponseMode, string terminal, int? expectedExitCode)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: nextResponseMode));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"step-over-{nextResponseMode}-start");
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -352,7 +353,7 @@ public sealed class StepOverContractTests
     [InlineData("exited-overflow-exit-code")]
     public async Task StepOver_MalformedOrWronglyCorrelatedActiveExchange_ReturnsRedactedProtocolErrorAndEvicts(string nextResponseMode)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: nextResponseMode));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"step-over-{nextResponseMode}-start");
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -369,7 +370,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_CollidingPendingRequestSequence_ReturnsRedactedProtocolErrorAndDrains()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(
+        await using var driver = await StartStepDriverAsync(StepOver(
             supportsDelayedStackTraceLoading: true,
             stackTraceResponseMode: "hold",
             nextResponseMode: "wrong-request-sequence-collides-with-stack-trace"));
@@ -400,7 +401,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_AdmittedNextInvalidatesB2CallStackAuthorityBeforeHeldResponse()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(
+        await using var driver = await StartStepDriverAsync(StepOver(
             nextResponseMode: "hold",
             supportsDelayedStackTraceLoading: true));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-b2-invalidation-start");
@@ -429,7 +430,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_ContinuedDuringHeldResponse_DoesNotRestoreB2CallStackAuthority()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(
+        await using var driver = await StartStepDriverAsync(StepOver(
             nextResponseMode: "hold-then-continued",
             supportsDelayedStackTraceLoading: true));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-continued-start");
@@ -458,7 +459,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_PostWriteCallerCancellation_DrainsSessionBeforeLaterAccess()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "hold"));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: "hold"));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-cancel-start");
         using var cancellation = new CancellationTokenSource();
         var operation = driver.CallToolRawAsync(
@@ -496,12 +497,12 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task StepOver_PostWriteTimeout_ReturnsBoundedResultThenDrainsSession()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "timeout"));
+        await using var driver = await StartStepDriverAsync(StepOver(nextResponseMode: "timeout"));
         var debugSessionId = await StartStoppedSessionAsync(driver, "step-over-timeout-start");
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             Tool,
-            Arguments(debugSessionId, 1),
+            new JsonObject { ["debugSessionId"] = debugSessionId },
             ModernMcpProcessDriver.CurrentMeta(),
             new RequestId("step-over-timeout"),
             timeout: TimeSpan.FromSeconds(35)), isError: false);
@@ -515,28 +516,29 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task ToolsList_ContinueExecutionPublishesClosedInt32InputAfterEightDebugTools()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await StartStepDriverAsync();
         var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
             ModernMcpProcessDriver.CurrentMeta(), new RequestId("continue-catalog")));
         var tool = Assert.IsType<JsonObject>(Assert.IsType<JsonArray>(catalog["tools"])[8]);
         Assert.Equal("continue_execution", tool["name"]?.GetValue<string>());
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(2, properties.Count);
+        Assert.Equal(3, properties.Count);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
         Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
 
     [Theory]
-    [MemberData(nameof(InvalidArguments))]
+    [MemberData(nameof(InvalidContinueArguments))]
     public async Task ContinueExecution_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo(string scenario, JsonObject? arguments)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await StartStepDriverAsync();
         var before = await driver.ReadNativeActionsAsync();
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             "continue_execution", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"continue-invalid-{scenario}")), isError: true);
@@ -547,6 +549,78 @@ public sealed class StepOverContractTests
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
+    public static TheoryData<string, JsonObject?> InvalidContinueArguments => new()
+    {
+        { "missing_arguments", null },
+        { "missing_session", new JsonObject { ["threadId"] = 1 } },
+        { "blank_session", new JsonObject { ["debugSessionId"] = " " } },
+        { "fractional", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = 1.5 } },
+        { "overflow", new JsonObject { ["debugSessionId"] = "opaque", ["thread_id"] = 2_147_483_648L } },
+        { "aliases", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 } },
+        { "extra", new JsonObject { ["debugSessionId"] = "opaque", ["singleThread"] = true } },
+    };
+
+    [Theory]
+    [InlineData("omitted")]
+    [InlineData("null")]
+    [InlineData("alias-null")]
+    [InlineData("alias")]
+    [InlineData("explicit")]
+    public async Task ContinueExecution_OptionalThread_UsesObservedOrExplicitThread(string input)
+    {
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-breakpoint-terminal"));
+        var session = await StartStoppedSessionAsync(driver, $"optional-continue-{input}-start");
+        var args = new JsonObject { ["debugSessionId"] = session };
+        if (input == "null") args["threadId"] = null;
+        if (input == "alias-null") args["thread_id"] = null;
+        if (input == "alias") args["thread_id"] = 1;
+        if (input == "explicit") args["threadId"] = 1;
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", args,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"optional-continue-{input}")));
+        Assert.Equal("continue_stopped", result["kind"]?.GetValue<string>());
+        var request = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "continue");
+        Assert.Equal(1, JsonNode.Parse(request.Detail!)!["arguments"]!["threadId"]!.GetValue<int>());
+        var next = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"optional-restop-{input}")));
+        Assert.Equal("continue_terminal", next["kind"]?.GetValue<string>());
+        var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "continue").ToArray();
+        Assert.Equal(2, JsonNode.Parse(requests[1].Detail!)!["arguments"]!["threadId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task ContinueExecution_OptionalThread_WhenNoStoppedThread_RefusesWithoutWrite()
+    {
+        await using var driver = await StartStepDriverAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("optional-no-thread-start")), isError: false);
+        var session = result["debugSessionId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var refused = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("optional-no-thread")), isError: true);
+        Assert.Equal("dap_continue_refused", refused["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("1.0", true)]
+    [InlineData("1e0", true)]
+    [InlineData("1.0000000000000000001", false)]
+    public async Task ContinueExecution_ThreadAlias_UsesExactSchemaInteger(string number, bool valid)
+    {
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-breakpoint-terminal"));
+        var session = await StartStoppedSessionAsync(driver, $"continue-integer-{number}-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution",
+            new JsonObject { ["debugSessionId"] = session, ["thread_id"] = JsonNode.Parse(number) },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"continue-integer-{number}")), isError: !valid);
+        Assert.Equal(valid ? "continue_stopped" : "invalid_tool_arguments", result["kind"]?.GetValue<string>());
+        var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "continue").ToArray();
+        Assert.Equal(valid ? 1 : 0, requests.Length);
+    }
+
+
     [Theory]
     [InlineData("continue-breakpoint-terminal", "breakpoint", true)]
     [InlineData("continue-breakpoint-terminal", "adapter-specific-stop", true)]
@@ -555,7 +629,7 @@ public sealed class StepOverContractTests
     [InlineData("continue-optional-stop", "breakpoint", false)]
     public async Task ContinueExecution_BreakpointThenExit_PreservesObservedOptionalFieldsAndSchemaParity(string mode, string reason, bool hasStopFields)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(mode, reason));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(mode, reason));
         var session = await StartStoppedSessionAsync(driver, $"{mode}-{reason}-start");
         var before = await driver.ReadNativeActionsAsync();
         var stopped = AssertContinueEnvelope(await driver.CallToolRawAsync(
@@ -590,7 +664,7 @@ public sealed class StepOverContractTests
     [InlineData("continue-pre-ack-replaced", "adapter-specific-stop", 3, true)]
     public async Task ContinueExecution_PreAckStop_WaitsForAckAndUsesLatestCurrentStop(string mode, string reason, int threadId, bool allThreadsStopped)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(mode));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(mode));
         var session = await StartStoppedSessionAsync(driver, $"{mode}-start");
         var operation = driver.CallToolRawAsync("continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId(mode));
         using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -618,7 +692,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task ContinueExecution_PreAckStopThenContinued_DoesNotResurrectCandidate()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions("continue-pre-ack-continued"));
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-pre-ack-continued"));
         var session = await StartStoppedSessionAsync(driver, "continue-stale-candidate-start");
         var operation = driver.CallToolRawAsync("continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId("continue-stale-candidate"));
         using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -649,7 +723,7 @@ public sealed class StepOverContractTests
     [InlineData("step_over", "continue_execution", "hold", "next-response-gated", "dap_continue_refused")]
     public async Task ContinueExecution_CompetingExecutionAndOldInspection_AreRefusedWithoutContinuedEvent(string firstTool, string secondTool, string mode, string gate, string refusal)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(mode));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(mode));
         var session = await StartStoppedSessionAsync(driver, $"continue-single-flight-{firstTool}-{secondTool}-start");
         var stack = await ContinueInspectionStackAsync(driver, session, "continue-old-stack");
         var context = stack["inspectionContextId"]!.GetValue<string>();
@@ -696,9 +770,9 @@ public sealed class StepOverContractTests
     [InlineData(false)]
     public async Task ContinueExecution_OrdinaryTimeout_RetainsOnlyAcknowledgedSessionAndAllowsLaterInspection(bool acknowledged)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(acknowledged ? "continue-ack-held-stop" : "continue-hold"));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(acknowledged ? "continue-ack-held-stop" : "continue-hold"));
         var session = await StartStoppedSessionAsync(driver, $"continue-timeout-{acknowledged}-start");
-        var operation = driver.CallToolRawAsync("continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+        var operation = driver.CallToolRawAsync("continue_execution", acknowledged ? new JsonObject { ["debugSessionId"] = session } : Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
             new RequestId($"continue-timeout-{acknowledged}"), timeout: TimeSpan.FromSeconds(35));
         using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
         {
@@ -738,7 +812,7 @@ public sealed class StepOverContractTests
     [InlineData(false)]
     public async Task ContinueExecution_PublicCallerCancellation_RetainsAcknowledgedSessionButDrainsUnacknowledgedWrite(bool acknowledged)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(acknowledged ? "continue-ack-held-stop" : "continue-hold"));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(acknowledged ? "continue-ack-held-stop" : "continue-hold"));
         var session = await StartStoppedSessionAsync(driver, $"continue-cancellation-{acknowledged}-start");
         using var cancellation = new CancellationTokenSource();
         var operation = driver.CallToolRawAsync("continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
@@ -780,7 +854,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task ContinueExecution_ExplicitStopAfterAcknowledgement_CompletesCleanupAndRetiresTheInterruptedCall()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+        await using var driver = await StartStepDriverAsync(new ModernMcpStartOptions(
             DisableFormElicitation: true,
             FixtureConfiguration: new FixtureConfiguration(
                 SpawnDescendant: true,
@@ -843,7 +917,7 @@ public sealed class StepOverContractTests
     [InlineData("continue-missing-reason", "dap_continue_protocol_error", "DAP_CONTINUE_PROTOCOL_ERROR", true)]
     public async Task ContinueExecution_NegativeOrUncertainExchange_ReturnsRedactedErrorAndCorrectSessionDisposition(string mode, string kind, string error, bool drains)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions(mode));
+        await using var driver = await StartStepDriverAsync(ContinueOptions(mode));
         var session = await StartStoppedSessionAsync(driver, $"{mode}-start");
         var content = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", Arguments(session, 1),
             ModernMcpProcessDriver.CurrentMeta(), new RequestId(mode)), isError: true);
@@ -868,7 +942,7 @@ public sealed class StepOverContractTests
     [Fact]
     public async Task ContinueExecution_TerminalBeforeAck_SettlesWithoutInventedExitCode()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ContinueOptions("continue-terminal-before-ack"));
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-terminal-before-ack"));
         var session = await StartStoppedSessionAsync(driver, "continue-terminal-start");
         var content = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", Arguments(session, 1),
             ModernMcpProcessDriver.CurrentMeta(), new RequestId("continue-terminal-before-ack")));
@@ -877,6 +951,10 @@ public sealed class StepOverContractTests
         Assert.False(content.ContainsKey("exitCode"));
         await AssertEventuallyNotFoundAsync(driver, session, "continue-terminal-before-ack-not-found");
     }
+
+    // Bound host startup/discovery separately; tool calls retain the driver's two-second deadline.
+    private static Task<ModernMcpProcessDriver> StartStepDriverAsync(ModernMcpStartOptions? options = null) =>
+        ModernMcpProcessDriver.StartAsync(options, startupTimeout: TimeSpan.FromSeconds(10));
 
     private static ModernMcpStartOptions ContinueOptions(string mode, string reason = "breakpoint") => new(
         DisableFormElicitation: true,

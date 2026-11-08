@@ -18,6 +18,8 @@ internal sealed class NativeSceneProbeChannel : IAsyncDisposable
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
     private const string TransportFailureProperty = "_nativeSceneProbeTransportFailure";
+    internal const string PipeEnvironmentName = "NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE";
+    internal const string NonceEnvironmentName = "NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE";
 
     private readonly NamedPipeServerStream _pipe;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -50,8 +52,8 @@ internal sealed class NativeSceneProbeChannel : IAsyncDisposable
 
     internal IReadOnlyDictionary<string, string> LaunchEnvironment => new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE"] = PipeName,
-        ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE"] = Nonce,
+        [PipeEnvironmentName] = PipeName,
+        [NonceEnvironmentName] = Nonce,
     };
 
     internal async Task<JsonObject?> CaptureAsync(CancellationToken cancellationToken)

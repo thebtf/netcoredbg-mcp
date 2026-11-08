@@ -172,10 +172,11 @@ internal sealed class NativeUiInvokeSession : IAsyncDisposable
         if (completion is not null)
         {
             try { await completion.WaitAsync(CleanupTimeout).ConfigureAwait(false); }
-            catch (TimeoutException) { }
+            catch (TimeoutException) { throw new InvalidOperationException("Owned UI helper cleanup is unconfirmed."); }
         }
         lock (_gate)
-            TryFinishRetainedCleanup();
+            if (_activeCompletion is not null || !TryFinishRetainedCleanup())
+                throw new InvalidOperationException("Owned UI helper cleanup is unconfirmed.");
     }
 
     private bool IsRetired()
@@ -192,7 +193,7 @@ internal sealed class NativeUiInvokeSession : IAsyncDisposable
         try
         {
             pending.Ownership.Dispose();
-            if (!pending.Process.HasExited || !_pendingDrains.IsCompleted)
+            if (!pending.Process.HasExited || !_pendingDrains.IsCompletedSuccessfully)
                 return false;
             pending.Dispose();
             _pendingCleanup = null;

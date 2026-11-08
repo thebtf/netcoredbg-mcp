@@ -122,7 +122,7 @@ internal static class RelayComposition
         var notificationState = progressNotificationState ?? new ProgressLoggingRelay.NotificationState();
         var nativeCodeSearch = new NativeCodeSearch(
             projectRootResolver ?? ProjectRootResolver.FromHostArguments(Array.Empty<string>(), Environment.CurrentDirectory),
-            session);
+            session.SessionEndingToken);
 
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
 

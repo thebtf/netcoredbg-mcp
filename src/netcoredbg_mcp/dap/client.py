@@ -229,6 +229,9 @@ class _DapRun:
     generation: object
     process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess
     pending: dict[int, asyncio.Future[DAPResponse]]
+    response_observers: dict[int, tuple[str, Callable[[DAPResponse], None]]] = field(
+        default_factory=dict
+    )
     phase: _RunPhase = _RunPhase.ACTIVE
     first_trigger: DapTerminalTrigger | None = None
     protocol_terminated: bool = False
@@ -252,6 +255,13 @@ class _DapRun:
     process_task: asyncio.Task[None] | None = None
     finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
     terminal: DapTransportTerminal | None = None
+    attach_safe: bool = False
+    attach_preparation: asyncio.Task[None] | None = None
+    attach_dispatched: bool = False
+    attach_restoring: bool = False
+    attach_policy_uncertain: bool = False
+    attach_restoration_done: asyncio.Event | None = None
+    pre_attach_restored_after_terminal: bool = False
 
 
 def _sanitize_terminal_text(value: object) -> str:
@@ -445,6 +455,10 @@ class DAPClient:
         return self._process is not None and self._process.returncode is None
 
     @property
+    def active_generation(self) -> object | None:
+        return self._run.generation if self._run is not None else None
+
+    @property
     def adapter_pid(self) -> int | None:
         """Return the PID of the current adapter process, when one exists."""
 
@@ -512,6 +526,101 @@ class DAPClient:
         """
 
         self._transport_terminal_handler = handler
+
+    def attach_may_have_dispatched(self, generation: object) -> bool:
+        run = self._run
+        return run is None or run.generation != generation or run.attach_dispatched
+
+    async def prepare_attach_safe(self, generation: object) -> None:
+        run = self._run
+        if run is None or run.generation != generation or run.phase is not _RunPhase.ACTIVE:
+            raise RuntimeError("adapter is not active for attach safety preparation")
+        if run.attach_restoring or run.attach_policy_uncertain:
+            raise RuntimeError("adapter cleanup policy restoration is unresolved")
+        if run.attach_preparation is None:
+            async def prepare() -> None:
+                owner = run.owner or run.posix_owner
+                if owner is None:
+                    raise RuntimeError("adapter has no retained owner for safe attach")
+                if run.posix_owner is not None:
+                    run.attach_safe = True
+                    run.attach_policy_uncertain = True
+                await owner.prepare_attach_safe()
+                run.attach_safe = True
+                run.attach_policy_uncertain = False
+
+            run.attach_preparation = asyncio.create_task(prepare())
+        await asyncio.shield(run.attach_preparation)
+        if self._run is not run or run.phase is not _RunPhase.ACTIVE:
+            raise RuntimeError("adapter terminated during attach safety preparation")
+
+    async def restore_pre_attach(self, generation: object) -> None:
+        run = self._run
+        if run is None or run.generation != generation or run.attach_dispatched:
+            raise RuntimeError("cannot restore policy after a possible attach write")
+        if run.attach_preparation is None:
+            return
+        if run.phase is not _RunPhase.ACTIVE:
+            finalizer = run.finalizer_task
+            if finalizer is None:
+                raise RuntimeError("terminal adapter finalizer is unavailable")
+            await asyncio.shield(finalizer)
+            if self._run is not run or run.attach_dispatched:
+                raise RuntimeError("cannot restore policy after a possible attach write")
+            receipt = run.owner_drain_receipt
+            if (
+                (receipt is not None and receipt.status is DrainStatus.DRAINED
+                 and receipt.active_processes == 0)
+                or (run.posix_cleanup_result is not None
+                    and run.posix_cleanup_result.complete)
+            ):
+                run.attach_safe = False
+                run.attach_preparation = None
+                return
+            owner = run.owner or run.posix_owner
+            if owner is None:
+                raise RuntimeError("adapter owner is missing during policy restoration")
+            await owner.restore_pre_attach()
+            run.attach_safe = False
+            run.attach_preparation = None
+            run.pre_attach_restored_after_terminal = True
+            return
+        run.attach_restoring = True
+        run.attach_policy_uncertain = True
+        run.attach_restoration_done = asyncio.Event()
+        try:
+            try:
+                await asyncio.shield(run.attach_preparation)
+            except Exception:
+                pass
+            if self._run is not run or run.attach_dispatched:
+                raise RuntimeError("cannot restore policy after a possible attach write")
+            owner = run.owner or run.posix_owner
+            if owner is None:
+                raise RuntimeError("adapter owner is missing during policy restoration")
+            await owner.restore_pre_attach()
+            run.attach_safe = False
+            run.attach_preparation = None
+            run.attach_policy_uncertain = False
+        finally:
+            run.attach_restoring = False
+            run.attach_restoration_done.set()
+
+    async def observe_attach_cleanup(self) -> OwnerDrainReceipt | PosixCleanupResult:
+        run = self._run
+        if run is None or not run.attach_safe:
+            raise RuntimeError("no attach-safe adapter owner")
+        if run.owner is not None:
+            receipt = await run.owner.observe_passive()
+            self._apply_owner_drain_receipt(run, receipt)
+            if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+                await run.owner.aclose()
+            return receipt
+        if run.posix_owner is not None:
+            result = await run.posix_owner.observe_passive()
+            run.posix_cleanup_result = result
+            return result
+        raise RuntimeError("attach-safe adapter owner is missing")
 
     async def start(
         self,
@@ -647,6 +756,16 @@ class DAPClient:
             return None
 
         receipt = run.owner_drain_receipt
+        if (run.pre_attach_restored_after_terminal and not run.attach_dispatched
+                and (receipt is None or receipt.status is not DrainStatus.DRAINED
+                     or receipt.active_processes != 0)):
+            receipt = await owner.drain_after_grace(
+                grace_timeout=NATURAL_EXIT_TIMEOUT,
+                force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
+            )
+            run.owner_drain_receipt = receipt
+            if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+                await owner.aclose()
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
@@ -744,9 +863,22 @@ class DAPClient:
         """Settle work, join bounded observations, clean up, and publish once."""
 
         self._settle_pending(run.pending)
+        if run.attach_preparation is not None:
+            try:
+                await asyncio.shield(run.attach_preparation)
+            except Exception:
+                pass
+        if run.attach_restoration_done is not None:
+            await run.attach_restoration_done.wait()
         process = run.process
 
-        if run.owner is not None:
+        if run.attach_safe:
+            if run.owner is not None:
+                receipt = await run.owner.observe_passive()
+                self._apply_owner_drain_receipt(run, receipt)
+            elif run.posix_owner is not None:
+                run.posix_cleanup_result = await run.posix_owner.observe_passive()
+        elif run.owner is not None:
             # This is deliberately inside the elected Wave-1 finalizer. No
             # observer or manager branch can publish terminal state before the
             # retained Job has reported its accounting drain outcome.
@@ -800,7 +932,12 @@ class DAPClient:
             and not run.stdout_task.done()
         ):
             run.stdout_task.cancel()
-        if run.owner is not None:
+        if run.attach_safe:
+            if (run.owner is not None and run.owner_drain_receipt is not None
+                    and run.owner_drain_receipt.status is DrainStatus.DRAINED
+                    and run.owner_drain_receipt.active_processes == 0):
+                await run.owner.aclose()
+        elif run.owner is not None:
             close_receipt = await run.owner.aclose()
             if close_receipt is not None:
                 self._apply_owner_drain_receipt(run, close_receipt)
@@ -891,53 +1028,115 @@ class DAPClient:
                 pass  # Handler not registered
 
     async def send_request(
-        self, command: str, arguments: dict[str, Any] | None = None, timeout: float = 30.0
+        self,
+        command: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> DAPResponse:
+        """Send one request while the current adapter run accepts work."""
+        return await self._send_request(command, arguments, timeout)
+
+    async def _send_request(
+        self,
+        command: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+        *,
+        admission: Callable[[], bool] | None = None,
+        on_response: Callable[[DAPResponse], None] | None = None,
     ) -> DAPResponse:
         """Send one request only while the current adapter run accepts work."""
         run = self._run
         if not self.is_running or run is None or run.phase is not _RunPhase.ACTIVE:
             raise RuntimeError("DAP client not running")
 
-        # Admission and registration share the request lock. If finalization
-        # wins first, no future can be registered after the one settlement pass.
-        async with self._request_lock:
-            if self._run is not run or run.phase is not _RunPhase.ACTIVE:
-                raise RuntimeError("DAP client not running")
-            self._seq += 1
-            seq = self._seq
-            future: asyncio.Future[DAPResponse] = asyncio.get_running_loop().create_future()
-            run.pending[seq] = future
-            self._pending = run.pending
-        request = DAPRequest(seq=seq, command=command, arguments=arguments or {})
+        future: asyncio.Future[DAPResponse] | None = None
+        seq = 0
         try:
-            await self._send(request)
+            async with self._request_lock:
+                if self._run is not run or run.phase is not _RunPhase.ACTIVE:
+                    raise RuntimeError("DAP client not running")
+                if admission is not None and (
+                    self._process is not run.process or run.process.stdin is None
+                ):
+                    raise RuntimeError("DAP client has no writable adapter")
+                if admission is not None and not admission():
+                    raise RuntimeError("Tracepoint operation is no longer current")
+                self._seq += 1
+                seq = self._seq
+                future = asyncio.get_running_loop().create_future()
+                run.pending[seq] = future
+                if on_response is not None:
+                    run.response_observers[seq] = (command, on_response)
+                    future.add_done_callback(lambda _future: run.response_observers.pop(seq, None))
+                self._pending = run.pending
+                request = DAPRequest(
+                    seq=seq, command=command, arguments=arguments or {}
+                )
+                # Admission and the actual write are contiguous under this lock.
+                if admission is not None:
+                    self._write(request)
+
+            if admission is None:
+                await self._send(request)
+            else:
+                assert run.process.stdin is not None
+                await run.process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError):
+            if future is None:
+                raise
+            run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
             if not future.done():
                 future.set_exception(
                     RuntimeError("netcoredbg process died — pending request cancelled")
                 )
-            # Consume the generation's terminal request outcome instead of
-            # leaking a platform-specific pipe exception to the caller.
             return await future
+        except BaseException:
+            if future is not None:
+                run.pending.pop(seq, None)
+                run.response_observers.pop(seq, None)
+                if not future.done():
+                    future.cancel()
+            raise
+
+        assert future is not None
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(seq, None)
-            raise TimeoutError(f"Request {command} timed out after {timeout}s") from None
+            run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
+            raise TimeoutError(
+                f"Request {command} timed out after {timeout}s"
+            ) from None
+        except asyncio.CancelledError:
+            run.pending.pop(seq, None)
+            run.response_observers.pop(seq, None)
+            raise
 
-    async def _send(self, request: DAPRequest) -> None:
-        """Send request to netcoredbg."""
+    def _write(self, request: DAPRequest) -> None:
         if not self._process or not self._process.stdin:
             raise RuntimeError("Process not running")
-
         data = request.to_bytes()
         logger.debug(
             ">>> %s: %s",
             request.command,
             format_request_arguments_for_log(request.command, request.arguments),
         )
+        if request.command == Commands.ATTACH:
+            run = self._run
+            if (run is None or run.process is not self._process
+                    or run.phase is not _RunPhase.ACTIVE or not run.attach_safe
+                    or run.attach_restoring or run.attach_policy_uncertain):
+                raise RuntimeError("attach request has no active safety binding")
+            run.attach_dispatched = True
         self._process.stdin.write(data)
+
+    async def _send(self, request: DAPRequest) -> None:
+        """Send request to netcoredbg."""
+        self._write(request)
+        assert self._process is not None and self._process.stdin is not None
         await self._process.stdin.drain()
 
     async def _read_loop(self, run: _DapRun | None = None) -> None:
@@ -999,10 +1198,28 @@ class DAPClient:
 
             if isinstance(message, DAPResponse):
                 logger.debug("<<< Response %s: success=%s", message.command, message.success)
+                response_run = run if run is not None else self._run
                 pending = run.pending if run is not None else self._pending
                 future = pending.pop(message.request_seq, None)
+                observer = (
+                    response_run.response_observers.pop(message.request_seq, None)
+                    if response_run is not None else None
+                )
                 if future and not future.done():
-                    future.set_result(message)
+                    try:
+                        if observer is not None and observer[0] != message.command:
+                            raise RuntimeError(
+                                f"DAP response command mismatch: expected {observer[0]}, "
+                                f"received {message.command}"
+                            )
+                        if (observer is not None and response_run is not None
+                                and response_run is self._run
+                                and response_run.phase is _RunPhase.ACTIVE):
+                            observer[1](message)
+                    except Exception as error:
+                        future.set_exception(error)
+                    else:
+                        future.set_result(message)
 
             elif isinstance(message, DAPEvent):
                 event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
@@ -1167,9 +1384,15 @@ class DAPClient:
             {"filters": filters or []},
         )
 
-    async def continue_execution(self, thread_id: int) -> DAPResponse:
-        """Continue execution."""
-        return await self.send_request(Commands.CONTINUE, {"threadId": thread_id})
+    async def continue_execution(
+        self, thread_id: int, *, admission: Callable[[], bool] | None = None
+    ) -> DAPResponse:
+        """Continue execution, optionally fencing the DAP write against stale state."""
+        if admission is None:
+            return await self.send_request(Commands.CONTINUE, {"threadId": thread_id})
+        return await self._send_request(
+            Commands.CONTINUE, {"threadId": thread_id}, admission=admission
+        )
 
     async def step_over(self, thread_id: int) -> DAPResponse:
         """Step over (next line)."""
@@ -1266,9 +1489,13 @@ class DAPClient:
             },
         )
 
-    async def loaded_sources(self) -> DAPResponse:
+    async def loaded_sources(
+        self, *, on_response: Callable[[DAPResponse], None] | None = None
+    ) -> DAPResponse:
         """Get all sources currently loaded by the debugged process."""
-        return await self.send_request(Commands.LOADED_SOURCES)
+        if on_response is None:
+            return await self.send_request(Commands.LOADED_SOURCES)
+        return await self._send_request(Commands.LOADED_SOURCES, on_response=on_response)
 
     async def disassemble(
         self,
@@ -1298,13 +1525,16 @@ class DAPClient:
         )
 
     async def evaluate(
-        self, expression: str, frame_id: int | None = None, context: str = "watch"
+        self, expression: str, frame_id: int | None = None, context: str = "watch",
+        *, admission: Callable[[], bool] | None = None,
     ) -> DAPResponse:
         """Evaluate expression."""
         args: dict[str, Any] = {"expression": expression, "context": context}
         if frame_id is not None:
             args["frameId"] = frame_id
-        return await self.send_request(Commands.EVALUATE, args)
+        if admission is None:
+            return await self.send_request(Commands.EVALUATE, args)
+        return await self._send_request(Commands.EVALUATE, args, admission=admission)
 
     async def exception_info(self, thread_id: int) -> DAPResponse:
         """Get exception info for thread."""

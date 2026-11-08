@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -231,10 +231,12 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.text.read": session.text_read,
             "ui.text.get_state": session.text_get_state,
             "ui.click": session.click,
+            "ui.click.app_dispatch": session.click,
             "ui.right_click": session.right_click,
             "ui.double_click": session.double_click,
             "ui.get_property": session.get_property,
             "ui.invoke": session.invoke,
+            "ui.invoke.app_dispatch": session.invoke,
             "ui.drag": session.drag,
             "ui.grid.get_state": session.grid_get_state,
             "ui.grid.ensure_visible": session.grid_ensure_visible,
@@ -460,6 +462,165 @@ async def test_v2_no_global_input_allows_app_dispatch_click_route() -> None:
     assert action["operator_isolated"] is True
     assert action["physical_fallback_attempted"] is False
     assert session.calls == [("click", {"automation_id": "ApplyButton"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ui.click", "ui.invoke"])
+@pytest.mark.parametrize("policy_scope", ["plan", "plan_with_action_false", "action"])
+async def test_no_global_input_never_uses_legacy_physical_fallback(
+    kind: str, policy_scope: str
+) -> None:
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class LegacyBridge:
+        physical_attempts = 0
+
+        async def call(self, method: str, _params: dict[str, Any]) -> dict[str, Any]:
+            if method == "invoke_element":
+                self.physical_attempts += 1
+                return {"invoked": True, "method": "Click"}
+            raise RuntimeError(f"Unknown method: {method}")
+
+    bridge = LegacyBridge()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    cast(Any, backend)._client = bridge
+
+    async def connected() -> Any:
+        return backend
+
+    session = ActionSmokeSession()
+    action = {"kind": kind, "selector": {"automation_id": "ApplyButton"}}
+    plan: dict[str, Any] = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "cases": [{"id": "safe_click", "transitions": [{"action": action, "probes": []}]}],
+    }
+    if policy_scope in {"plan", "plan_with_action_false"}:
+        plan["input_policy"] = {"no_global_input": True}
+        if policy_scope == "plan_with_action_false":
+            action["input_policy"] = {"no_global_input": False}
+    else:
+        action["input_policy"] = {"no_global_input": True}
+
+    result = await RuntimeSmokeRunner(
+        session, service_adapters=ui_operation_adapters(connected)
+    ).run(plan)
+
+    assert result["status"] == "BLOCKED"
+    assert bridge.physical_attempts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ui.click", "ui.invoke"])
+async def test_no_global_input_does_not_retry_unknown_provider_outcome(kind: str) -> None:
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class FaultingBridge:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call(self, method: str, _params: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(method)
+            raise RuntimeError("element not found after dispatch")
+
+    bridge = FaultingBridge()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    cast(Any, backend)._client = bridge
+
+    async def connected() -> Any:
+        return backend
+
+    result = await RuntimeSmokeRunner(
+        ActionSmokeSession(), service_adapters=ui_operation_adapters(connected)
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "input_policy": {"no_global_input": True},
+        "cases": [{"id": "unknown", "transitions": [{
+            "action": {"kind": kind, "selector": {"automation_id": "ApplyButton"}},
+            "probes": [],
+        }]}],
+    })
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert "provider outcome may be unknown" in action["reason"]
+    assert bridge.calls == ["invoke_element_app_dispatch"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ui.click", "ui.invoke"])
+async def test_no_global_input_uses_explicit_app_dispatch_route(kind: str) -> None:
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class SafeBridge:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call(self, method: str, _params: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(method)
+            if method == "invoke_element_app_dispatch":
+                return {"invoked": True, "method": "InvokePattern"}
+            raise AssertionError("Unsafe bridge route was selected")
+
+    bridge = SafeBridge()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    cast(Any, backend)._client = bridge
+
+    async def connected() -> Any:
+        return backend
+
+    session = ActionSmokeSession()
+    result = await RuntimeSmokeRunner(
+        session, service_adapters=ui_operation_adapters(connected)
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "input_policy": {"no_global_input": True},
+        "cases": [{"id": "safe_click", "transitions": [{
+            "action": {"kind": kind, "selector": {"automation_id": "ApplyButton"}},
+            "probes": [],
+        }]}],
+    })
+
+    assert result["status"] == "PASS"
+    assert bridge.calls == ["invoke_element_app_dispatch"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ui.click", "ui.invoke"])
+async def test_without_no_global_input_keeps_legacy_invoke_route(kind: str) -> None:
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class LegacyBridge:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call(self, method: str, _params: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(method)
+            return {"invoked": True, "method": "Click"}
+
+    bridge = LegacyBridge()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    cast(Any, backend)._client = bridge
+
+    async def connected() -> Any:
+        return backend
+
+    session = ActionSmokeSession()
+    result = await RuntimeSmokeRunner(
+        session, service_adapters=ui_operation_adapters(connected)
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "cases": [{"id": "legacy_click", "transitions": [{
+            "action": {"kind": kind, "selector": {"automation_id": "ApplyButton"}},
+            "probes": [],
+        }]}],
+    })
+
+    assert result["status"] == "PASS"
+    assert bridge.calls == ["invoke_element"]
 
 
 @pytest.mark.asyncio

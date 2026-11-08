@@ -15,6 +15,7 @@ from typing import Any
 
 from ..process_registry import CleanupOutcome, ProcessEntry
 from ..windows_process_owner import DrainStatus, WindowsOwnedProcess
+from .foreground import ForegroundActivation
 from .hover import hover_selector, validate_hover_evidence, validate_hover_timeout
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ GRID_ENSURE_VISIBLE_SCAN_PASSES = 4
 GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS = 0.2
 GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS = 5.0
 GRID_DRAG_ROW_TO_ROW_TIMEOUT_MARGIN_SECONDS = 3.0
+
+
+class _RequestNotCurrentError(RuntimeError):
+    """A guarded request became stale before any RPC bytes were written."""
 
 
 def _is_window_not_ready(exc: RuntimeError) -> bool:
@@ -347,13 +352,22 @@ class FlaUIBridgeClient:
             logger.error("Failed to restart FlaUI bridge: %s", e)
             return False
 
-    async def call(self, method: str, params: dict | None = None, timeout: float = 10.0) -> dict:
+    async def call(
+        self,
+        method: str,
+        params: dict | None = None,
+        timeout: float = 10.0,
+        *,
+        request_is_current: Callable[[], bool] | None = None,
+    ) -> dict:
         """Send a JSON-RPC request and wait for response.
 
         Args:
             method: JSON-RPC method name.
             params: Method parameters.
             timeout: Response timeout in seconds.
+            request_is_current: Optional synchronous guard checked after readiness
+                and lock acquisition, then again immediately before the write.
 
         Returns:
             Result dict from the response.
@@ -366,6 +380,8 @@ class FlaUIBridgeClient:
             raise RuntimeError("FlaUI bridge not available (restart limit exceeded)")
 
         async with self._lock:
+            if request_is_current is not None and not request_is_current():
+                raise _RequestNotCurrentError("FlaUI request target changed before RPC handoff")
             self._request_id += 1
             request = {
                 "jsonrpc": "2.0",
@@ -376,10 +392,13 @@ class FlaUIBridgeClient:
 
             expected_id = request["id"]
             try:
-                response_data = await asyncio.wait_for(
-                    self._send_and_receive(request),
-                    timeout=timeout,
-                )
+                if request_is_current is None:
+                    exchange = self._send_and_receive(request)
+                else:
+                    exchange = self._send_and_receive(
+                        request, request_is_current=request_is_current
+                    )
+                response_data = await asyncio.wait_for(exchange, timeout=timeout)
             except asyncio.CancelledError:
                 logger.warning(
                     "FlaUI bridge call '%s' was cancelled; restarting bridge",
@@ -442,13 +461,22 @@ class FlaUIBridgeClient:
         self._process.stdin.write(line.encode("utf-8"))
         await self._process.stdin.drain()
 
-    async def _send_and_receive(self, request: dict) -> dict:
+    async def _send_and_receive(
+        self,
+        request: dict,
+        *,
+        request_is_current: Callable[[], bool] | None = None,
+    ) -> dict:
         """Send request and read response line."""
         assert self._process is not None
         assert self._process.stdin is not None
         assert self._process.stdout is not None
 
         line = json.dumps(request) + "\n"
+        # wait_for schedules this coroutine separately. Keep the last guard and
+        # the actual write in the same no-await segment, not in call's task.
+        if request_is_current is not None and not request_is_current():
+            raise _RequestNotCurrentError("FlaUI request target changed before RPC write")
         self._process.stdin.write(line.encode("utf-8"))
         await self._process.stdin.drain()
 
@@ -465,12 +493,22 @@ class FlaUIBackend:
     def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
         self._element_cache: dict[str, dict] = {}
         self._process_id: int | None = None
+        self._stealth_mode: bool | None = None
+        self._connection_epoch = object()
+        # Transport invalidation changes validity, not published binding ownership.
+        self._binding_epoch = self._connection_epoch
         self._last_multi_select_result: dict[str, Any] | None = None
-        self._client = FlaUIBridgeClient(
+
+        def invalidate_client_connection() -> None:
+            if self._client is client:
+                self._invalidate_connection()
+
+        client = FlaUIBridgeClient(
             bridge_path,
             process_registry,
-            invalidate_connection=self._invalidate_connection,
+            invalidate_connection=invalidate_client_connection,
         )
+        self._client = client
 
     @property
     def client(self) -> FlaUIBridgeClient:
@@ -491,6 +529,8 @@ class FlaUIBackend:
 
     def _invalidate_connection(self) -> None:
         self._process_id = None
+        self._stealth_mode = None
+        self._connection_epoch = object()
         self._element_cache.clear()
 
     async def connect(self, pid: int, stealth: bool = False) -> None:
@@ -525,6 +565,9 @@ class FlaUIBackend:
 
             if result.get("connected"):
                 self._process_id = pid
+                self._stealth_mode = stealth
+                self._connection_epoch = object()
+                self._binding_epoch = self._connection_epoch
                 logger.info("FlaUI backend connected to PID %d", pid)
                 return
 
@@ -544,51 +587,125 @@ class FlaUIBackend:
 
     async def disconnect(self) -> None:
         """Stop the FlaUI bridge."""
+        self._binding_epoch = object()
         await self._client.stop()
         self._process_id = None
+        self._stealth_mode = None
+        self._connection_epoch = object()
         self._element_cache.clear()
 
-    async def bring_to_front(self) -> dict[str, Any]:
-        """Bring the connected debuggee window to the foreground."""
-        if self._process_id is None:
-            raise RuntimeError("FlaUI backend is not connected to a process")
+    async def bring_to_front(
+        self,
+        *,
+        activation: ForegroundActivation | None = None,
+        is_current: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Request foreground once and observe it after any stealth reconnect."""
+        connected_pid = self._process_id
+        if activation is None:
+            if connected_pid is None:
+                raise RuntimeError("FlaUI backend is not connected to a process")
+            activation = ForegroundActivation(connected_pid)
+        pid = activation.expected_pid
+        # The public request pins the current session's target independently of
+        # a retained backend connection. Only this request's successful guarded
+        # reconnect may replace that captured backend PID below.
+        client = self._client
+        connection_epoch = getattr(self, "_connection_epoch", None)
+        binding_epoch = getattr(self, "_binding_epoch", None)
+        handoff_prepared = False
 
-        import ctypes
+        def connection_is_current() -> bool:
+            return (
+                self._client is client
+                and getattr(self, "_connection_epoch", None) is connection_epoch
+                and getattr(self, "_binding_epoch", None) is binding_epoch
+                and self._process_id == connected_pid
+            )
 
-        from .screenshot import get_hwnd_for_pid
+        def invalidate_captured_connection() -> None:
+            if connection_is_current():
+                self._invalidate_connection()
 
-        hwnd = get_hwnd_for_pid(self._process_id)
-        if not hwnd:
-            raise RuntimeError(f"No visible window for process {self._process_id}")
+        def target_is_current() -> bool:
+            return (
+                connection_is_current()
+                and (connected_pid in (None, pid) or is_current is not None)
+                and (is_current is None or is_current())
+            )
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        foreground_hwnd = user32.GetForegroundWindow()
-        current_thread = kernel32.GetCurrentThreadId()
-        foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
-        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-        attached_threads: list[tuple[int, int]] = []
-        for thread_id in (foreground_thread, target_thread):
-            if thread_id and thread_id != current_thread:
-                if user32.AttachThreadInput(current_thread, thread_id, True):
-                    attached_threads.append((current_thread, thread_id))
+        def reconnect_target_is_current() -> bool:
+            nonlocal connected_pid, connection_epoch, handoff_prepared
+            if not handoff_prepared:
+                handoff_prepared = True
+                # Readiness may retire this client's dead transport and clear
+                # its binding. Rebase only once, before the guarded handoff,
+                # and never across a newer binding, disconnect, or session.
+                if (
+                    self._client is client
+                    and getattr(self, "_binding_epoch", None) is binding_epoch
+                    and self._process_id is None
+                    and (is_current is None or is_current())
+                ):
+                    connected_pid = None
+                    connection_epoch = getattr(self, "_connection_epoch", None)
+            return (
+                target_is_current()
+                and activation.owns_target()
+                and target_is_current()
+            )
 
-        try:
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-            activated = user32.GetForegroundWindow() == hwnd
-        finally:
-            for source_thread, attached_thread in reversed(attached_threads):
-                user32.AttachThreadInput(source_thread, attached_thread, False)
+        activation.request(is_current=target_is_current)
+        before_reconnect = activation.observe(is_current=target_is_current)
+        mode = getattr(self, "_stealth_mode", None) if connected_pid == pid else None
+        reconnect_attempted = before_reconnect["activated"] is True
+        reconnect_error = None
+        if reconnect_attempted:
+            try:
+                # The public activation route must not enter connect's window-
+                # readiness retry/sleep loop or resolve a replacement target.
+                response = await client.call(
+                    "connect",
+                    {"pid": pid},
+                    timeout=CONNECT_CALL_TIMEOUT_SECONDS,
+                    request_is_current=reconnect_target_is_current,
+                )
+                if response.get("connected") is not True:
+                    raise RuntimeError(f"FlaUI bridge failed to connect to PID {pid}")
+                mode = False
+                if target_is_current():
+                    self._process_id = pid
+                    connected_pid = pid
+                    self._connection_epoch = object()
+                    connection_epoch = self._connection_epoch
+                    self._binding_epoch = self._connection_epoch
+                    binding_epoch = self._binding_epoch
+                    self._stealth_mode = False
+                    self._element_cache.clear()
+                else:
+                    # The RPC may have changed mode even though its session was
+                    # replaced. Force the next owner to establish its own mode.
+                    invalidate_captured_connection()
+            except _RequestNotCurrentError as exc:
+                # No write occurred, so a rejected handoff did not change mode.
+                reconnect_error = str(exc)
+            except asyncio.CancelledError:
+                invalidate_captured_connection()
+                raise
+            except Exception as exc:
+                mode = None
+                invalidate_captured_connection()
+                reconnect_error = str(exc) or type(exc).__name__
 
-        if activated:
-            await self.connect(self._process_id, stealth=False)
+        if not connection_is_current() or connected_pid is None:
+            mode = None
 
-        return {
-            "activated": activated,
-            "hwnd": hwnd,
-        }
+        result = activation.observe(is_current=target_is_current)
+        if mode is not None or reconnect_attempted:
+            result["stealth_mode"] = mode
+        if reconnect_error is not None:
+            result["reconnect_error"] = reconnect_error
+        return result
 
     @staticmethod
     def _build_search_params(
@@ -694,6 +811,18 @@ class FlaUIBackend:
         """Invoke element via FlaUI bridge (InvokePattern, fallback to Click)."""
         params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("invoke_element", params)
+
+    async def invoke_element_app_dispatch(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke through a bridge route that never falls back to physical input."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
+        return await self._client.call("invoke_element_app_dispatch", params)
 
     async def toggle_element(
         self,

@@ -634,6 +634,47 @@ async def test_terminate_fallback_notifies_state_threads_and_output_once() -> No
 
 
 @pytest.mark.asyncio
+async def test_terminate_does_not_dispatch_during_enc() -> None:
+    from netcoredbg_mcp.session import SessionManager
+
+    registry = ToolRegistry()
+    session = SessionManager(netcoredbg_path="/unused")
+    session._on_stopped(
+        DAPEvent(seq=1, event="stopped", body={"reason": "pause", "threadId": 1})
+    )
+    stopped_event = session._execution_event
+    stopped_revision = session._execution_revision
+    session.client._capabilities = {"supportsTerminateRequest": True}
+    session.client.terminate = AsyncMock(return_value=SimpleNamespace(success=True))
+    session.wait_for_stopped = AsyncMock(
+        return_value=SimpleNamespace(timed_out=False, state=DebugState.TERMINATED)
+    )
+    register_debug_tools(
+        registry,  # type: ignore[arg-type]
+        session,
+        ownership=SimpleNamespace(release=lambda: None),
+        notify_state_changed=AsyncMock(),
+        notify_threads_changed=AsyncMock(),
+        notify_output_changed=AsyncMock(),
+        check_session_access=lambda _ctx: None,
+        execute_and_wait=AsyncMock(),
+        resolve_project_root=AsyncMock(),
+    )
+
+    async with session.state._enc_apply_lock:
+        result = await registry.tools["terminate_debug"](ctx=object())  # type: ignore[operator]
+
+    assert "error" in result
+    session.client.terminate.assert_not_awaited()
+    assert session._execution_event is stopped_event and stopped_event.is_set()
+    assert session._execution_revision == stopped_revision
+
+    result = await registry.tools["terminate_debug"](ctx=object())  # type: ignore[operator]
+    assert result["data"]["state"] == DebugState.TERMINATED.value
+    session.client.terminate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_attach_tool_notifies_state_threads_and_output_once() -> None:
     registry = ToolRegistry()
     session = SimpleNamespace(

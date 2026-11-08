@@ -113,36 +113,184 @@ async def test_startup_ignores_forged_pid_file_and_finally_joins_owners(tmp_path
     session.stop.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("with_owner", [False, True])
-async def test_attached_stop_detaches_in_both_owner_branches(with_owner):
+def _controlled_session(mode, with_owner):
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         manager = SessionManager()
-    generation = "attached"
-    owner = OwnedProcessRef("attached-adapter", generation, 44010) if with_owner else None
+    generation = f"controlled-{mode}"
+    owner_ref = OwnedProcessRef("adapter", generation, 44010) if with_owner else None
+    cleanup_owner = SimpleNamespace(returncode=None)
     client = MagicMock()
-    client.adapter_owner = owner
+    client.adapter_owner = owner_ref
+    client.adapter_cleanup_owner = cleanup_owner
     client.adapter_pid = 44010
     client.is_running = True
-    client.disconnect = AsyncMock()
     client.stop = AsyncMock(
         return_value=OwnerDrainReceipt(
-            owner=owner,
+            owner=owner_ref,
             status=DrainStatus.DRAINED,
             forced=False,
             root_returncode=0,
             active_processes=0,
-        )
-        if owner
-        else None
+        ) if owner_ref is not None else None
     )
     manager._client = client
     manager._active_dap_run = generation
-    manager._debuggee_mode = (generation, "attach")
-    await manager.stop()
+    manager._debuggee_mode = (generation, mode)
+    manager._register_adapter_cleanup(client, generation)
+    return manager, client, generation, cleanup_owner
+
+
+def _assert_uncertain_stop(result):
+    assert isinstance(result, BaseException) or (
+        isinstance(result, dict)
+        and (result.get("success") is False or "error" in result)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+@pytest.mark.parametrize("disconnect_outcome", ["exception", "negative", "ack"])
+async def test_attached_stop_retains_unconfirmed_detach_without_replay(
+    with_owner, disconnect_outcome
+):
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+
+    manager, client, generation, owner = _controlled_session("attach", with_owner)
+    token = manager._registry_owner_tokens[generation]
+    if disconnect_outcome == "exception":
+        client.disconnect = AsyncMock(side_effect=RuntimeError("disconnect transport failed"))
+    else:
+        client.disconnect = AsyncMock(return_value=DAPResponse(
+            seq=1, request_seq=1, command="disconnect",
+            success=disconnect_outcome == "ack", message="detach outcome unconfirmed",
+        ))
+
+    result = (await asyncio.gather(manager.stop(), return_exceptions=True))[0]
+    _assert_uncertain_stop(result)
     client.disconnect.assert_awaited_once_with(terminate=False)
+    client.stop.assert_not_awaited()
+    assert manager._client is client
+    assert manager._active_dap_run == generation
+    assert manager._debuggee_mode == (generation, "attach")
+    assert manager._registry_owner_tokens[generation] is token
+    assert client.adapter_cleanup_owner is owner
+    assert manager.process_registry.owner_count == 1
+
+    first = await manager.process_registry.cleanup_all()
+    second = await manager.process_registry.cleanup_all()
+    assert not first.complete and first.remaining_owners == 1 and first.errors
+    assert not second.complete and second.remaining_owners == 1
+    assert second.errors == first.errors
+    client.disconnect.assert_awaited_once_with(terminate=False)
+    client.stop.assert_not_awaited()
+    assert manager._registry_owner_tokens[generation] is token
+    assert manager._active_dap_run == generation
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_cancelled_attached_stop_joins_uncertain_disconnect_without_replay(with_owner):
+    manager, client, generation, owner = _controlled_session("attach", with_owner)
+    token = manager._registry_owner_tokens[generation]
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def disconnect(*, terminate):
+        assert terminate is False
+        entered.set()
+        await release.wait()
+        raise RuntimeError("disconnect transport failed")
+
+    client.disconnect = AsyncMock(side_effect=disconnect)
+    stop_task = asyncio.create_task(manager.stop())
+    await entered.wait()
+    stop_task.cancel()
+    cleanup_task = asyncio.create_task(manager.process_registry.cleanup_all())
+    try:
+        await asyncio.sleep(0)
+        client.disconnect.assert_awaited_once_with(terminate=False)
+        client.stop.assert_not_awaited()
+        assert manager._active_dap_run == generation
+        assert manager._registry_owner_tokens[generation] is token
+        assert client.adapter_cleanup_owner is owner
+    finally:
+        release.set()
+    stop_result, cleanup_result = await asyncio.gather(
+        stop_task, cleanup_task, return_exceptions=True
+    )
+    _assert_uncertain_stop(stop_result)
+    assert not isinstance(cleanup_result, BaseException)
+    assert not cleanup_result.complete and cleanup_result.remaining_owners == 1
+    repeat = await manager.process_registry.cleanup_all()
+    assert not repeat.complete and repeat.remaining_owners == 1
+    assert cleanup_result.errors and repeat.errors == cleanup_result.errors
+    client.disconnect.assert_awaited_once_with(terminate=False)
+    client.stop.assert_not_awaited()
+    assert manager._registry_owner_tokens[generation] is token
+    assert manager._active_dap_run == generation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_repeated_attached_stop_does_not_replay_failed_disconnect(with_owner):
+    manager, client, generation, owner = _controlled_session("attach", with_owner)
+    token = manager._registry_owner_tokens[generation]
+    client.disconnect = AsyncMock(side_effect=RuntimeError("disconnect transport failed"))
+
+    first = (await asyncio.gather(manager.stop(), return_exceptions=True))[0]
+    second = (await asyncio.gather(manager.stop(), return_exceptions=True))[0]
+    _assert_uncertain_stop(first)
+    _assert_uncertain_stop(second)
+    client.disconnect.assert_awaited_once_with(terminate=False)
+    client.stop.assert_not_awaited()
+    assert manager._client is client
+    assert manager._active_dap_run == generation
+    assert manager._debuggee_mode == (generation, "attach")
+    assert manager._registry_owner_tokens[generation] is token
+    assert client.adapter_cleanup_owner is owner
+    assert manager.process_registry.owner_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_naturally_exited_attached_adapter_does_not_confirm_clr_detach(with_owner):
+    manager, client, generation, owner = _controlled_session("attach", with_owner)
+    token = manager._registry_owner_tokens[generation]
+    client.is_running = False
+    owner.returncode = 0
+    client.disconnect = AsyncMock()
+
+    result = (await asyncio.gather(manager.stop(), return_exceptions=True))[0]
+    _assert_uncertain_stop(result)
+    client.disconnect.assert_not_awaited()
+    client.stop.assert_not_awaited()
+    assert manager._active_dap_run == generation
+    assert manager._debuggee_mode == (generation, "attach")
+    assert manager._registry_owner_tokens[generation] is token
+    assert client.adapter_cleanup_owner is owner
+    assert manager.process_registry.owner_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_launched_stop_still_terminates_and_finalizes(with_owner):
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+
+    manager, client, generation, _ = _controlled_session("launch", with_owner)
+    client.disconnect = AsyncMock(return_value=DAPResponse(
+        seq=1, request_seq=1, command="disconnect", success=True
+    ))
+    result = await manager.stop()
+    assert result == {"success": True}
+    client.disconnect.assert_awaited_once_with(terminate=True)
+    if with_owner:
+        client.stop.assert_awaited_once_with(expected_owner=client.adapter_owner)
+    else:
+        client.stop.assert_awaited_once_with()
+    assert manager._active_dap_run is None
+    assert manager.process_registry.owner_count == 0
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_attach_mode_is_bound_before_request_and_survives_request_failure():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -150,6 +298,8 @@ async def test_attach_mode_is_bound_before_request_and_survives_request_failure(
     client = MagicMock()
     client.is_running = True
     client.set_exception_breakpoints = AsyncMock()
+    client.prepare_attach_safe = AsyncMock()
+    client.attach_may_have_dispatched.return_value = True
     manager._client = client
     manager._active_dap_run = "early-attach"
     manager._initialized_event.set()
@@ -163,6 +313,199 @@ async def test_attach_mode_is_bound_before_request_and_survives_request_failure(
     with pytest.raises(RuntimeError, match="attach transport failure"):
         await manager.attach(44011)
     assert manager._debuggee_mode == ("early-attach", "attach")
+    client.prepare_attach_safe.assert_awaited_once_with("early-attach")
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
+@pytest.mark.asyncio
+async def test_attach_safety_preparation_failure_blocks_dispatch():
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+    client = MagicMock(is_running=True)
+    client.set_exception_breakpoints = AsyncMock()
+    client.prepare_attach_safe = AsyncMock(side_effect=[RuntimeError("safety unavailable"), None])
+    client.attach_may_have_dispatched.return_value = False
+    client.restore_pre_attach = AsyncMock()
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+    success = DAPResponse(seq=1, request_seq=1, command="attach", success=True)
+    client.attach = AsyncMock(return_value=success)
+    client.configuration_done = AsyncMock(return_value=success)
+    manager._client = client
+    manager._active_dap_run = "failed-preparation"
+    manager._initialized_event.set()
+    manager._sync_all_breakpoints = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="safety unavailable"):
+        await manager.attach(44011)
+    client.attach.assert_not_awaited()
+    client.restore_pre_attach.assert_awaited_once_with("failed-preparation")
+    assert manager._debuggee_mode is None
+    assert await manager.attach(44012) == {"success": True, "processId": 44012}
+    client.attach.assert_awaited_once_with(44012, just_my_code=False)
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
+@pytest.mark.asyncio
+async def test_failed_pre_dispatch_policy_restore_blocks_reuse():
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+    client = MagicMock(is_running=True)
+    client.set_exception_breakpoints = AsyncMock()
+    client.prepare_attach_safe = AsyncMock()
+    client.attach = AsyncMock(side_effect=RuntimeError("before write"))
+    client.attach_may_have_dispatched.return_value = False
+    client.restore_pre_attach = AsyncMock(side_effect=RuntimeError("restore failed"))
+    manager._client = client
+    manager._active_dap_run = "restore-failed"
+    manager._initialized_event.set()
+    manager._sync_all_breakpoints = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="policy restoration failed; reuse blocked"):
+        await manager.attach(44011)
+    assert manager._debuggee_mode == ("restore-failed", "attach")
+    with pytest.raises(RuntimeError, match="Stop the previous"):
+        manager._bind_debuggee_mode("restore-failed", "launch")
+
+
+@pytest.mark.asyncio
+async def test_never_dispatched_restore_timeout_keeps_owner_until_late_recovery():
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+
+    manager, client, generation, owner = _controlled_session("attach", True)
+    token = manager._registry_owner_tokens[generation]
+    client.attach_may_have_dispatched.return_value = False
+    client.restore_pre_attach = AsyncMock(side_effect=[RuntimeError("ack timed out"), None])
+    client.disconnect = AsyncMock(return_value=DAPResponse(
+        seq=1, request_seq=1, command="disconnect", success=True
+    ))
+    with pytest.raises(RuntimeError, match="ack timed out"):
+        await manager.stop()
+    assert manager._registry_owner_tokens[generation] is token
+    assert client.adapter_cleanup_owner is owner
+    client.disconnect.assert_not_awaited()
+    client.stop.assert_not_awaited()
+
+    assert await manager.stop() == {"success": True}
+    assert client.restore_pre_attach.await_count == 2
+    client.disconnect.assert_awaited_once_with(terminate=True)
+    client.stop.assert_awaited_once_with(expected_owner=client.adapter_owner)
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
+@pytest.mark.asyncio
+async def test_public_debug_state_retains_requested_attach_pid_after_readmission():
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+    from netcoredbg_mcp.tools.debug import register_debug_tools
+
+    manager, client, generation, _ = _controlled_session("attach", True)
+    owner_ref = client.adapter_owner
+    manager._debuggee_mode = None
+    manager._initialized_event.set()
+    manager._sync_all_breakpoints = AsyncMock()
+    client.set_exception_breakpoints = AsyncMock()
+    client.prepare_attach_safe = AsyncMock()
+    response = DAPResponse(seq=1, request_seq=1, command="attach", success=True)
+    client.attach = AsyncMock(return_value=response)
+    client.configuration_done = AsyncMock(return_value=response)
+    assert (await manager.attach(44062))["success"] is True
+
+    client.is_running = False
+    client.observe_attach_cleanup = AsyncMock(return_value=OwnerDrainReceipt(
+        owner=owner_ref, status=DrainStatus.DRAINED, forced=False,
+        root_returncode=0, active_processes=0, root_was_forced=False,
+    ))
+    client.initialize = AsyncMock()
+
+    async def start(*, generation):
+        client.is_running = True
+        client.adapter_owner = OwnedProcessRef("new", generation, 44063)
+        client.adapter_cleanup_owner = SimpleNamespace(returncode=None)
+        return generation
+
+    client.start = AsyncMock(side_effect=start)
+    manager._state.state = DebugState.TERMINATED
+    await manager.start()
+    mcp = CapturingMCP()
+    register_debug_tools(
+        mcp, manager, ownership=SimpleNamespace(release=MagicMock()),
+        notify_state_changed=AsyncMock(), check_session_access=MagicMock(return_value=None),
+        execute_and_wait=AsyncMock(), resolve_project_root=AsyncMock(),
+    )
+    result = await mcp.tools["get_debug_state"]()
+    assert result["data"]["unconfirmedAttaches"] == [{
+        "requestedPid": 44062,
+        "pidIsProcessIdentity": False,
+        "detachStatus": "unconfirmed",
+        "targetSurvival": "unknown",
+    }]
+    assert manager._active_dap_run != generation
+
+
+@pytest.mark.asyncio
+async def test_naturally_drained_attached_owner_allows_new_session():
+    manager, client, generation, _ = _controlled_session("attach", True)
+    manager.state.unconfirmed_attach_pids = [44060]
+    owner_ref = client.adapter_owner
+    client.is_running = False
+    client.observe_attach_cleanup = AsyncMock(return_value=OwnerDrainReceipt(
+        owner=owner_ref, status=DrainStatus.DRAINED, forced=False,
+        root_returncode=0, active_processes=0, root_was_forced=False,
+    ))
+    client.initialize = AsyncMock()
+
+    async def start(*, generation):
+        client.is_running = True
+        client.adapter_owner = OwnedProcessRef("new", generation, 44013)
+        client.adapter_cleanup_owner = SimpleNamespace(returncode=None)
+        return generation
+
+    client.start = AsyncMock(side_effect=start)
+    await manager.start()
+    assert manager._active_dap_run != generation
+    assert manager._debuggee_mode is None
+    assert manager.state.to_dict()["unconfirmedAttaches"][0]["requestedPid"] == 44060
+    assert manager.process_registry.owner_count == 1
+    client.disconnect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_exited_posix_attach_allows_readmission_but_retains_guardian(monkeypatch):
+    from netcoredbg_mcp.posix_process_owner import PosixCleanupResult
+
+    class RetainedGuardian:
+        returncode = 0
+
+        def __init__(self):
+            self.observe_passive = AsyncMock(return_value=PosixCleanupResult(0, None, False, False))
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.PosixOwnedProcess", RetainedGuardian)
+    manager, client, generation, _ = _controlled_session("attach", False)
+    manager.state.unconfirmed_attach_pids = [44061]
+    manager._release_generation_owner(generation)
+    guardian = RetainedGuardian()
+    client.adapter_cleanup_owner = guardian
+    manager._register_adapter_cleanup(client, generation)
+    token = manager._registry_owner_tokens[generation]
+    client.is_running = False
+    client.observe_attach_cleanup = AsyncMock(
+        return_value=PosixCleanupResult(0, None, False, False)
+    )
+    client.initialize = AsyncMock()
+
+    async def start(*, generation):
+        client.is_running = True
+        client.adapter_cleanup_owner = SimpleNamespace(returncode=None)
+        return generation
+
+    client.start = AsyncMock(side_effect=start)
+    await manager.start()
+    assert manager._active_dap_run != generation
+    assert manager.state.to_dict()["unconfirmedAttaches"][0]["requestedPid"] == 44061
+    assert manager._registry_owner_tokens[generation] is token
+    assert manager.process_registry.owner_count == 2
+    outcome = await token.cleanup()
+    assert not outcome.complete and "group cleanup is unconfirmed" in outcome.error
+    guardian.observe_passive.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -269,6 +612,7 @@ async def test_public_cleanup_counts_native_confirmed_root_not_callback(
     assert result.complete is True and result.terminated == expected_count
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_rejected_second_attach_does_not_reset_existing_target_state():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -358,6 +702,7 @@ async def test_posix_cleanup_does_not_count_stale_signal_exit_as_forced_root(mon
     assert result.terminated == 0
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_successful_attach_without_process_event_connects_public_ui(monkeypatch):
     from netcoredbg_mcp.dap.protocol import DAPResponse
@@ -366,6 +711,7 @@ async def test_successful_attach_without_process_event_connects_public_ui(monkey
     target_pid = 44060
     manager = SessionManager(netcoredbg_path="/private/adapter")
     manager.client._process = SimpleNamespace(pid=44059, returncode=None)
+    monkeypatch.setattr(manager.client, "prepare_attach_safe", AsyncMock())
     manager._active_dap_run = "attach-without-process-event"
     manager._state.state = DebugState.INITIALIZING
     manager._initialized_event.set()
@@ -426,12 +772,14 @@ async def test_successful_attach_without_process_event_connects_public_ui(monkey
     assert manager.process_registry.owner_count == 0
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_failed_attach_ack_does_not_publish_target_pid(monkeypatch):
     from netcoredbg_mcp.dap.protocol import DAPResponse
 
     manager = SessionManager(netcoredbg_path="/private/adapter")
     manager.client._process = SimpleNamespace(pid=44069, returncode=None)
+    monkeypatch.setattr(manager.client, "prepare_attach_safe", AsyncMock())
     manager._active_dap_run = "failed-attach-ack"
     manager._state.state = DebugState.INITIALIZING
     manager._initialized_event.set()

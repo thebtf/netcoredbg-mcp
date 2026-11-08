@@ -178,6 +178,29 @@ class TestTracepointLog:
         assert delta["dropped_count"] is None
         assert delta["next_cursor"]["after_timestamp"] == 4.0
 
+    @pytest.mark.parametrize("boundary_kind", ["mark", "page"])
+    def test_trace_delta_marks_same_timestamp_boundary_stale_after_fifo_eviction(
+        self, boundary_kind
+    ):
+        mgr = TracepointManager()
+        mgr._trace_buffer = deque(maxlen=2)
+        mgr._trace_buffer.append(TraceEntry(10.0, "a.cs", 1, "a", "first", 1, "tp-1"))
+        cursor = mgr.mark_trace_cursor()
+        mgr._trace_buffer.append(TraceEntry(10.0, "a.cs", 1, "a", "unread", 1, "tp-1"))
+        if boundary_kind == "page":
+            page = mgr.get_trace_delta(None, limit=1)
+            assert [entry.value for entry in page["entries"]] == ["first"]
+            cursor = page["next_cursor"]
+
+        before_eviction = mgr.get_trace_delta(cursor)
+        assert [entry.value for entry in before_eviction["entries"]] == ["unread"]
+        assert before_eviction["stale"] is False
+
+        mgr._trace_buffer.append(TraceEntry(11.0, "a.cs", 1, "a", "later", 1, "tp-1"))
+        delta = mgr.get_trace_delta(cursor)
+        assert delta["stale"] is True
+        assert delta["dropped_count"] is None
+
     def test_trace_delta_marks_cursor_stale_when_log_was_cleared(self):
         mgr = TracepointManager()
         mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "boundary", 1, "tp-1"))
@@ -372,6 +395,11 @@ def _make_session(evaluate_result: str = "42", *, success: bool = True) -> Magic
     session._client.evaluate = AsyncMock(return_value=response)
     session._client.continue_execution = AsyncMock()
     session.prepare_for_execution = MagicMock()
+
+    async def request_execution(send):
+        return await send()
+
+    session._request_execution = request_execution
     session.get_stack_trace = AsyncMock(return_value=[MagicMock(id=10)])
     return session
 

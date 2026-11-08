@@ -1275,6 +1275,15 @@ async def test_attach_binds_original_instance_before_async_setup_for_provider_di
 
     session = harness.session
     client = session._client
+    run = client._run
+    assert run is not None
+    owner = MagicMock(spec=WindowsOwnedProcess)
+    owner.returncode = None
+    owner.observe_liveness.return_value = True
+    owner.prepare_attach_safe = AsyncMock()
+    run.process = owner
+    run.owner = owner
+    client._process = owner
     monkeypatch.setattr(session._initialized_event, "wait", wait_for_initialized)
     monkeypatch.setattr(session, "_sync_all_breakpoints", AsyncMock())
     monkeypatch.setattr(client, "set_exception_breakpoints", AsyncMock())
@@ -1294,6 +1303,8 @@ async def test_attach_binds_original_instance_before_async_setup_for_provider_di
         allow_setup.set()
         attached = await asyncio.wait_for(attach_task, timeout=1)
         assert attached == {"success": True, "processId": original.pid}
+        owner.prepare_attach_safe.assert_awaited_once_with()
+        assert run.attach_safe is True
         assert session.state.state is DebugState.RUNNING
         assert session.state.process_id == original.pid
         if observation == "unavailable":

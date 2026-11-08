@@ -132,6 +132,200 @@ public sealed class OutputContractTests(ITestOutputHelper output)
 
 
     [Fact]
+    public async Task SearchOutput_MatchesJoinedFilteredLinesWithContextWithoutConsumingOutput()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(
+            Output("intro\r", "stdout"), Output("ignored\n", "stderr"), Output("\nERROR 42\nnext\nFail 7\nlast", "stdout"))));
+        var token = await StartSessionAsync(driver, "search-output-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var arguments = new JsonObject { ["debugSessionId"] = token, ["pattern"] = "error|fail", ["contextLines"] = 1, ["category"] = "stdout" };
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-output-context")), isError: false);
+        Assert.Equal("output_search_success", result["kind"]?.GetValue<string>());
+        Assert.Equal(2, result["matchCount"]?.GetValue<int>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""[{"lineNumber":2,"match":"ERROR 42","context":["intro","ERROR 42","next"]},{"lineNumber":4,"match":"Fail 7","context":["next","Fail 7","last"]}]"""), result["matches"]));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("intro\r\nERROR 42\nnext\nFail 7\nlast", await ReadOutputAsync(driver, token, "search-output-retained", category: "stdout"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_CountsEveryMatchButReturnsOnlyFirstFifty()
+    {
+        var lines = Enumerable.Range(1, 55).Select(static index => $"hit-{index}").ToArray();
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(string.Join("\n", lines)))));
+        var token = await StartSessionAsync(driver, "search-limit-start");
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "hit", ["contextLines"] = 0 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-limit")), isError: false);
+        Assert.Equal(55, result["matchCount"]?.GetValue<int>());
+        var matches = Assert.IsType<JsonArray>(result["matches"]);
+        Assert.Equal(50, matches.Count);
+        Assert.Equal("hit-1", matches[0]?["match"]?.GetValue<string>());
+        Assert.Equal("hit-50", matches[49]?["match"]?.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("[\"hit-50\"]"), matches[49]?["context"]));
+    }
+
+    [Fact]
+    public async Task SearchOutput_InvalidPattern_ReturnsFixedErrorWithoutClearingOutput()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained output"))));
+        var token = await StartSessionAsync(driver, "search-invalid-start");
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "(" }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("search-invalid")), isError: true);
+        Assert.Equal("output_search_invalid_pattern", result["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_INVALID_PATTERN", result["error"]?.GetValue<string>());
+        Assert.Equal("retained output", await ReadOutputAsync(driver, token, "search-invalid-retained"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_PatternThatCannotFitInAResultIsRejectedBeforeRegexParsing()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained"))));
+        var token = await StartSessionAsync(driver, "search-pattern-size-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "(" + new string('x', 256 * 1024) },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-pattern-size")), isError: true);
+        Assert.Equal("output_search_too_large", content["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_TOO_LARGE", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal("retained", await ReadOutputAsync(driver, token, "search-pattern-size-retained"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_SplitsAllLogicalLineSeparatorsAndDoesNotAddATrailingLine()
+    {
+        const string text = "a\r\n\nb\vc\fd\u001ce\u001df\u001eg\u0085h\u2028i\u2029j\n";
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(text))));
+        var token = await StartSessionAsync(driver, "search-lines-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^$|^[bdh]$", ["contextLines"] = 0 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-lines")), isError: false);
+        Assert.Equal(4, content["matchCount"]?.GetValue<int>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""[{"lineNumber":2,"match":"","context":[""]},{"lineNumber":3,"match":"b","context":["b"]},{"lineNumber":5,"match":"d","context":["d"]},{"lineNumber":9,"match":"h","context":["h"]}]"""), content["matches"]));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task SearchOutput_SignedContextUsesPythonSliceBoundaries()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("a\nb\nc\nd\n"))));
+        var token = await StartSessionAsync(driver, "search-context-start");
+        var cases = new (JsonNode Lines, string Contexts)[]
+        {
+            (JsonValue.Create(long.MinValue)!, "[[],[],[],[]]"),
+            (JsonValue.Create(-2)!, "[[\"c\"],[],[],[]]"),
+            (JsonValue.Create(-1)!, "[[],[],[],[]]"),
+            (JsonValue.Create(0)!, "[[\"a\"],[\"b\"],[\"c\"],[\"d\"]]"),
+            (JsonNode.Parse("1e0")!, "[[\"a\",\"b\"],[\"a\",\"b\",\"c\"],[\"b\",\"c\",\"d\"],[\"c\",\"d\"]]"),
+            (JsonValue.Create(long.MaxValue)!, "[[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"]]"),
+        };
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+                new JsonObject { ["debugSessionId"] = token, ["pattern"] = ".", ["contextLines"] = cases[index].Lines },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-context-{index}")), isError: false);
+            var contexts = new JsonArray(Assert.IsType<JsonArray>(content["matches"]).Select(static match => match!["context"]!.DeepClone()).ToArray());
+            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(cases[index].Contexts), contexts));
+        }
+    }
+
+    [Fact]
+    public async Task SearchOutput_InvalidArgumentsDoNotConsumeOutputOrSendDapRequests()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained"))));
+        var token = await StartSessionAsync(driver, "search-arguments-start");
+        var invalid = new[]
+        {
+            new JsonObject { ["debugSessionId"] = token },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = null },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = 1 },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["contextLines"] = null },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["contextLines"] = JsonNode.Parse("1.5") },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["category"] = true },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["clear"] = false },
+        };
+        var before = await driver.ReadNativeActionsAsync();
+        for (var index = 0; index < invalid.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output", invalid[index],
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-arguments-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("search_output", content["tool"]?.GetValue<string>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("retained", await ReadOutputAsync(driver, token, "search-arguments-retained"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task SearchOutput_EnforcesExactSerializedSizeWithoutPartialResults(int excessBytes)
+    {
+        const int limit = 256 * 1024;
+        var template = new JsonObject
+        {
+            ["kind"] = "output_search_success",
+            ["pattern"] = "!",
+            ["matchCount"] = 1,
+            ["matches"] = new JsonArray(new JsonObject
+            {
+                ["lineNumber"] = 2,
+                ["match"] = "!",
+                ["context"] = new JsonArray("", "!", ""),
+            }),
+        };
+        var remaining = limit - System.Text.Encoding.UTF8.GetByteCount(template.ToJsonString());
+        var first = Output("\n");
+        first["prefixLength"] = 70_000;
+        var middle = Output("!\n");
+        middle["prefixLength"] = 50_000;
+        var last = Output("\n");
+        last["prefixLength"] = remaining - 170_000 + excessBytes;
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(first, middle, last)));
+        var token = await StartSessionAsync(driver, $"search-size-{excessBytes}-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "!", ["contextLines"] = 1 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-size-{excessBytes}")), isError: excessBytes != 0);
+        if (excessBytes == 0)
+        {
+            Assert.Equal("output_search_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(limit, System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()));
+        }
+        else
+        {
+            Assert.Equal("output_search_too_large", content["kind"]?.GetValue<string>());
+            Assert.Equal("OUTPUT_SEARCH_TOO_LARGE", content["error"]?.GetValue<string>());
+            Assert.False(content.ContainsKey("matches"));
+        }
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(70_000 + 50_001 + (remaining - 170_000 + excessBytes) + 3,
+            (await ReadOutputAsync(driver, token, $"search-size-{excessBytes}-retained")).Length);
+    }
+
+    [Fact]
+    public async Task SearchOutput_RegexTimeoutLeavesOutputAndSessionUsable()
+    {
+        var entry = Output("\n");
+        entry["prefixLength"] = 50_000;
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(entry)));
+        var token = await StartSessionAsync(driver, "search-timeout-start");
+        var timedOut = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^(x+)+y$" },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-timeout")), isError: true);
+        Assert.Equal("output_search_timeout", timedOut["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_TIMEOUT", timedOut["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(timedOut);
+        var next = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^x" },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-after-timeout")), isError: false);
+        Assert.Equal(1, next["matchCount"]?.GetValue<int>());
+        Assert.Equal(50_001, (await ReadOutputAsync(driver, token, "search-timeout-retained")).Length);
+    }
+
+    [Fact]
     public async Task GetOutput_EmptyBuffer_ReturnsCompleteEmptySuccessWithoutDapIo()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
@@ -188,7 +382,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     [InlineData("unknown", "")]
     public async Task GetOutput_FilteredClear_ReturnsMatchesWithoutClearingAnyCategory(string category, string expected)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(launch: MixedOutput()));
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: MixedOutput()));
         var token = await StartSessionAsync(driver, "output-filtered-clear-start");
 
         Assert.Equal(expected, await ReadOutputAsync(driver, token, "output-filtered-clear", clear: true, category: category));
@@ -396,7 +590,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     public async Task GetOutput_AggregateLimit_IncludesTruncationSuffixAndNeverRetainsPartialEntries(
         int maximumTotal, string expectedInitial, string expectedAfterAppend)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("xy"), Output("abcdef")),
             batches: new JsonArray(Batch(Output("Z"))),
             maximumEntry: 3,
@@ -776,6 +970,853 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
+    [Fact]
+    public async Task LoadedSourceEvents_UpdateDeduplicateAndRemoveWithinOneSession()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(batches: new JsonArray(Batch(
+            SourceEvent("new", new JsonObject { ["path"] = "src/child/../a.cs", ["name"] = "old" }),
+            SourceEvent("changed", new JsonObject { ["path"] = "src/a.cs", ["name"] = "new", ["adapterData"] = new JsonObject { ["value"] = 7 } }),
+            SourceEvent("new", new JsonObject { ["sourceReference"] = 0, ["name"] = "virtual" }),
+            SourceEvent("new", new JsonObject { ["name"] = "remove" }),
+            SourceEvent("removed", new JsonObject { ["name"] = "remove" }),
+            SourceEvent("removed", new JsonObject { ["name"] = "unknown" })))));
+        var first = await StartSessionAsync(driver, "source-events-first");
+        var second = await StartSessionAsync(driver, "source-events-second");
+        await AdvanceOutputAsync(driver, first, "source-events-barrier");
+        var state = await ReadSourceStateAsync(driver, first, "source-events-state");
+        Assert.True(state["loadedSourcesComplete"]!.GetValue<bool>());
+        var map = Assert.IsType<JsonObject>(state["loadedSources"]);
+        Assert.Equal(2, map.Count);
+        var pathKey = OperatingSystem.IsWindows() ? "path:src\\a.cs" : "path:src/a.cs";
+        Assert.Equal("new", map[pathKey]?["name"]?.GetValue<string>());
+        Assert.Equal(7, map[pathKey]?["adapterData"]?["value"]?.GetValue<int>());
+        Assert.Equal("virtual", map["sourceReference:0"]?["name"]?.GetValue<string>());
+        var other = await ReadSourceStateAsync(driver, second, "source-events-isolation");
+        Assert.Empty(Assert.IsType<JsonObject>(other["loadedSources"]));
+    }
+
+    [Fact]
+    public async Task LoadedSourceRootedColon_PreservesPythonIdentityForEventsAndSnapshots()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });
+        var sources = new JsonArray(
+            new JsonObject { ["path"] = "/:", ["name"] = "before" },
+            new JsonObject { ["path"] = "/:/", ["name"] = "after" });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled),
+            batches: new JsonArray(Batch(
+                SourceEvent("new", new JsonObject { ["path"] = "/:", ["name"] = "before" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "/:/", ["name"] = "after" }))),
+            loadedSources: new JsonObject { ["sources"] = sources }));
+        var token = await StartSessionAsync(driver, "source-rooted-colon-start");
+        await AdvanceOutputAsync(driver, token, "source-rooted-colon-events");
+        var key = OperatingSystem.IsWindows() ? "path:\\:" : "path:/:";
+        var events = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-rooted-colon-state"))["loadedSources"]);
+        Assert.Single(events);
+        Assert.Equal("after", events[key]?["name"]?.GetValue<string>());
+
+        var snapshot = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("source-rooted-colon-snapshot")), false);
+        Assert.Equal(1, snapshot["count"]?.GetValue<int>());
+        var refreshed = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-rooted-colon-refreshed"))["loadedSources"]);
+        Assert.Single(refreshed);
+        Assert.Equal("after", refreshed[key]?["name"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LoadedSourceUnicode_PreservesPythonLowercaseIdentityForEventsAndSnapshots()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });
+        var sourceBody = new JsonObject
+        {
+            ["sources"] = new JsonArray(
+                new JsonObject { ["path"] = "src/\u0130.cs", ["name"] = "dot-old" },
+                new JsonObject { ["path"] = "src/i\u0307.cs", ["name"] = "dot-new" },
+                new JsonObject { ["path"] = "src/\u039f\u03a3", ["name"] = "sigma-old" },
+                new JsonObject { ["path"] = "src/\u03bf\u03c2", ["name"] = "sigma-new" },
+                new JsonObject { ["name"] = "A\u0301\u03a3" },
+                new JsonObject { ["name"] = "a\u0301\u03c2" },
+                new JsonObject { ["path"] = "src/\u039f\u03a3\u0391", ["name"] = "medial" },
+                new JsonObject { ["path"] = "src/\U00010570", ["name"] = "vithkuqi" }),
+        };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled),
+            batches: new JsonArray(Batch(
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u0130.cs", ["name"] = "dot-old" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "src/i\u0307.cs", ["name"] = "dot-new" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u039f\u03a3", ["name"] = "sigma-old" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "src/\u03bf\u03c2", ["name"] = "sigma-new" }),
+                SourceEvent("new", new JsonObject { ["name"] = "A\u0301\u03a3" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u039f\u03a3\u0391", ["name"] = "medial" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\U00010570", ["name"] = "vithkuqi" }))),
+            loadedSources: sourceBody));
+        var token = await StartSessionAsync(driver, "source-unicode-start");
+        await AdvanceOutputAsync(driver, token, "source-unicode-events");
+        var events = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-unicode-event-state"))["loadedSources"]);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 7, events.Count);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("dot-new", events["path:src\\i\u0307.cs"]?["name"]?.GetValue<string>());
+            Assert.Equal("sigma-new", events["path:src\\\u03bf\u03c2"]?["name"]?.GetValue<string>());
+            Assert.NotNull(events["name:a\u0301\u03c2"]);
+            Assert.NotNull(events["path:src\\\u03bf\u03c3\u03b1"]);
+            Assert.NotNull(events["path:src\\\U00010597"]);
+        }
+
+        var snapshot = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("source-unicode-snapshot")), false);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 8, snapshot["count"]?.GetValue<int>());
+        var state = await ReadSourceStateAsync(driver, token, "source-unicode-snapshot-state");
+        var sources = Assert.IsType<JsonObject>(state["loadedSources"]);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 8, sources.Count);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("dot-new", sources["path:src\\i\u0307.cs"]?["name"]?.GetValue<string>());
+            Assert.Equal("sigma-new", sources["path:src\\\u03bf\u03c2"]?["name"]?.GetValue<string>());
+            Assert.Equal("a\u0301\u03c2", sources["name:a\u0301\u03c2"]?["name"]?.GetValue<string>());
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadedSourceSnapshot_RespectsReaderOrderAndRecoversIncompleteView(bool malformed)
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: malformed ? new JsonArray(enabled, InventoryEvent("loadedSource", new JsonObject { ["reason"] = "broken" })) : new JsonArray(enabled),
+            loadedSources: new JsonObject { ["sources"] = new JsonArray(new JsonObject { ["name"] = "snapshot", ["adapterData"] = new JsonObject { ["stable"] = true } }) },
+            loadedSourcesBefore: new JsonArray(SourceEvent("new", new JsonObject { ["name"] = "before" })),
+            loadedSourcesAfter: new JsonArray(SourceEvent("new", new JsonObject { ["name"] = "after" }))));
+        var token = await StartSessionAsync(driver, "source-recovery-start");
+        var incomplete = await ReadSourceStateAsync(driver, token, "source-incomplete");
+        Assert.Equal(!malformed, incomplete["loadedSourcesComplete"]!.GetValue<bool>());
+        if (malformed) Assert.Null(incomplete["loadedSources"]);
+        else Assert.Empty(Assert.IsType<JsonObject>(incomplete["loadedSources"]));
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("source-snapshot")), false);
+        Assert.Equal("loaded_sources_success", result["kind"]?.GetValue<string>());
+        await AdvanceOutputAsync(driver, token, "source-after-barrier");
+        var state = await ReadSourceStateAsync(driver, token, "source-recovered");
+        Assert.True(state["loadedSourcesComplete"]!.GetValue<bool>());
+        var map = Assert.IsType<JsonObject>(state["loadedSources"]);
+        Assert.Equal(2, map.Count);
+        Assert.Null(map["name:before"]);
+        Assert.True(map["name:snapshot"]!["adapterData"]!["stable"]!.GetValue<bool>());
+        Assert.NotNull(map["name:after"]);
+    }
+
+    [Fact]
+    public async Task LoadedSourceOversize_LatchesIncompleteWithoutBreakingOtherState()
+    {
+        var large = SourceEvent("new", new JsonObject { ["name"] = "generated" });
+        large["generatedTextLength"] = 256 * 1024;
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("retained")), batches: new JsonArray(Batch(large))));
+        var token = await StartSessionAsync(driver, "source-oversize-start");
+        await AdvanceOutputAsync(driver, token, "source-oversize-barrier", timeout: TimeSpan.FromSeconds(10));
+        var state = await ReadSourceStateAsync(driver, token, "source-oversize-state");
+        Assert.False(state["loadedSourcesComplete"]!.GetValue<bool>());
+        Assert.Null(state["loadedSources"]);
+        Assert.Equal("retained", await ReadOutputAsync(driver, token, "source-oversize-output"));
+    }
+
+    [Fact]
+    public async Task LoadedSourceCountLimit_RejectsPartialView()
+    {
+        var generated = SourceEvent("new", new JsonObject());
+        generated["generatedCount"] = 257;
+        await using var driver = await StartTailDriverAsync(OutputOptions(batches: new JsonArray(Batch(generated))));
+        var token = await StartSessionAsync(driver, "source-count-start");
+        await AdvanceOutputAsync(driver, token, "source-count-barrier", timeout: TimeSpan.FromSeconds(10));
+        var state = await ReadSourceStateAsync(driver, token, "source-count-state");
+        Assert.False(state["loadedSourcesComplete"]!.GetValue<bool>());
+        Assert.Null(state["loadedSources"]);
+    }
+
+    [Fact]
+    public async Task DebugState_CombinedPayloadOverLimit_ReturnsBoundedErrorAndKeepsSession()
+    {
+        var source = SourceEvent("new", new JsonObject { ["name"] = "generated" });
+        source["generatedTextLength"] = 125_000;
+        var stopped = InventoryEvent("stopped", new JsonObject { ["reason"] = "generated", ["threadId"] = 1, ["allThreadsStopped"] = true });
+        stopped["generatedTextLength"] = 16_000;
+        await using var driver = await StartTailDriverAsync(OutputOptions(batches: new JsonArray(Batch(source, stopped))));
+        var token = await StartSessionAsync(driver, "source-state-bound-start");
+        await AdvanceOutputAsync(driver, token, "source-state-bound-barrier", timeout: TimeSpan.FromSeconds(10));
+
+        var response = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("source-state-bound")), true);
+        Assert.Equal("debug_state_too_large", response["kind"]?.GetValue<string>());
+        Assert.Equal("DEBUG_STATE_TOO_LARGE", response["error"]?.GetValue<string>());
+        Assert.False(response.ContainsKey("state"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(response);
+        _ = await ReadOutputAsync(driver, token, "source-state-bound-session-still-usable");
+    }
+
+    private static JsonObject SourceEvent(string reason, JsonObject source) =>
+        InventoryEvent("loadedSource", new JsonObject { ["reason"] = reason, ["source"] = source });
+
+    private static async Task<JsonObject> ReadSourceStateAsync(ModernMcpProcessDriver driver, string token, string id)
+    {
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(), new RequestId(id)), false);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        return Assert.IsType<JsonObject>(content["state"]);
+    }
+
+    [Fact]
+    public async Task GetLoadedSources_AdvertisedAdapter_ReturnsNormalizedDistinctSources()
+    {
+        var sourceBody = new JsonObject
+        {
+            ["sources"] = new JsonArray(
+                new JsonObject { ["name"] = "old", ["path"] = "src/child/../Marker.cs", ["sourceReference"] = 7 },
+                new JsonObject { ["name"] = "virtual", ["sourceReference"] = 42 },
+                new JsonObject { ["name"] = "Marker.cs", ["path"] = "src/Marker.cs", ["origin"] = "generated", ["adapterData"] = new JsonObject { ["key"] = "value" } }),
+        };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSources: sourceBody));
+        var session = await StartSessionAsync(driver, "loaded-sources-supported-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-supported")), isError: false);
+
+        Assert.Equal("loaded_sources_success", content["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(2, content["count"]?.GetValue<int>());
+        var sources = Assert.IsType<JsonArray>(content["sources"]);
+        Assert.Equal("Marker.cs", sources[0]?["name"]?.GetValue<string>());
+        Assert.Equal("src/Marker.cs", sources[0]?["path"]?.GetValue<string>());
+        Assert.Equal("generated", sources[0]?["origin"]?.GetValue<string>());
+        Assert.Equal("value", sources[0]?["adapterData"]?["key"]?.GetValue<string>());
+        Assert.Null(sources[0]?["sourceReference"]);
+        Assert.Equal("virtual", sources[1]?["name"]?.GetValue<string>());
+        Assert.Equal(42, sources[1]?["sourceReference"]?.GetValue<int>());
+        Assert.Null(sources[1]?["path"]);
+        Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "loadedSources");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetLoadedSources_AdapterFailure_DoesNotLeakOrReturnPartialSources(bool refused)
+    {
+        var body = refused
+            ? new JsonObject { ["message"] = "private-adapter-detail" }
+            : new JsonObject { ["sources"] = new JsonArray("private-adapter-detail") };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSources: body, loadedSourcesRefused: refused));
+        var session = await StartSessionAsync(driver, "loaded-sources-failure-start");
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-failure")), isError: true);
+
+        Assert.Equal(refused ? "dap_loaded_sources_refused" : "dap_loaded_sources_protocol_error", content["kind"]?.GetValue<string>());
+        Assert.DoesNotContain("private-adapter-detail", content.ToJsonString());
+        Assert.False(content.ContainsKey("sources"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-failure-state")), isError: !refused);
+        Assert.Equal(refused ? "debug_state_success" : "debug_session_not_found", state["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetLoadedSources_ReaderOrderedCapabilityRevocation_StopsSubsequentDapWrites()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+        });
+        var disabled = InventoryEvent("capabilities", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = false },
+        });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled), batches: new JsonArray(Batch(disabled))));
+        var session = await StartSessionAsync(driver, "loaded-sources-revoked-start");
+        var arguments = new JsonObject { ["debugSessionId"] = session };
+        var first = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("loaded-sources-before-revocation")), isError: false);
+        Assert.Equal("loaded_sources_success", first["kind"]?.GetValue<string>());
+
+        await AdvanceOutputAsync(driver, session, "loaded-sources-revocation-barrier");
+        var before = await driver.ReadNativeActionsAsync();
+        var after = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("loaded-sources-after-revocation")), isError: true);
+        Assert.Equal("dap_loaded_sources_unsupported", after["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task GetLoadedSources_InvalidArgumentsAndUnknownSession_SendNoDapRequest()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var session = await StartSessionAsync(driver, "loaded-sources-invalid-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var invalid = new JsonNode?[]
+        {
+            null,
+            new JsonArray(),
+            new JsonObject(),
+            new JsonObject { ["debugSessionId"] = " " },
+            new JsonObject { ["debugSessionId"] = 12 },
+            new JsonObject { ["debugSessionId"] = session, ["extra"] = true },
+        };
+        for (var index = 0; index < invalid.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.SendRawRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "get_loaded_sources",
+                ["arguments"] = invalid[index]?.DeepClone(),
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId($"loaded-sources-invalid-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("get_loaded_sources", content["tool"]?.GetValue<string>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+        var missing = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = "unknown" }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-missing")), isError: true);
+        Assert.Equal("debug_session_not_found", missing["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task GetLoadedSources_SerializedContentLimit_AcceptsExactLimitAndRefusesExcess(int excess)
+    {
+        const int limit = 256 * 1024;
+        var template = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            kind = "loaded_sources_success",
+            sources = new[] { new { name = "", path = (string?)null, sourceReference = (int?)null,
+                origin = (string?)null, presentationHint = (string?)null, adapterData = (object?)null } },
+            count = 1,
+        });
+        var length = limit - System.Text.Encoding.UTF8.GetByteCount(template) + excess;
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSourcesGeneratedLength: length));
+        var session = await StartSessionAsync(driver, "loaded-sources-limit-start");
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-limit"), timeout: TimeSpan.FromSeconds(15)), isError: excess != 0);
+
+        Assert.Equal(excess == 0 ? "loaded_sources_success" : "dap_loaded_sources_protocol_error", content["kind"]?.GetValue<string>());
+        if (excess == 0) Assert.Equal(limit, System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()));
+        else Assert.False(content.ContainsKey("sources"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Theory]
+    [InlineData("get_modules", "modules")]
+    [InlineData("get_progress", "progress")]
+    public async Task RuntimeInventory_EmptySession_ReturnsCompleteEmptySnapshotWithoutDapIo(string tool, string field)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var token = await StartSessionAsync(driver, $"{tool}-empty-start");
+
+        var content = await ReadInventoryAsync(driver, token, tool, $"{tool}-empty");
+
+        Assert.Equal($"{field}_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(0, content["count"]?.GetValue<int>());
+        Assert.Empty(Assert.IsType<JsonArray>(content[field]));
+    }
+
+    [Fact]
+    public async Task GetModules_ReaderOrderedTransitions_PreserveTypedIdsInsertionOrderAndReplacementDefaults()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(
+                ModuleEvent("new", JsonValue.Create(7)!, "numeric", path: "private-path", version: "1", optimized: true, symbols: "loaded"),
+                ModuleEvent("new", JsonValue.Create("7")!, "string"),
+                ModuleEvent("new", JsonValue.Create("removed")!, "remove-me"),
+                ModuleEvent("new", JsonValue.Create(7)!, "ignored-duplicate"),
+                ModuleEvent("changed", JsonValue.Create("unknown")!, "ignored-change"),
+                ModuleEvent("removed", JsonValue.Create("unknown")!, "ignored-remove")),
+            batches: new JsonArray(
+                Batch(ModuleEvent("changed", JsonValue.Create(7)!, "replacement"),
+                    ModuleEvent("new", JsonValue.Create("7")!, "ignored-string-duplicate"),
+                    ModuleEvent("removed", JsonValue.Create("removed")!, "ignored")),
+                Batch(ModuleEvent("changed", JsonValue.Create("7")!, "string-replaced", path: "string-path", version: "2", optimized: true, symbols: "string-symbols"),
+                    ModuleEvent("removed", JsonValue.Create(7)!, "ignored"),
+                    ModuleEvent("new", JsonValue.Create(7)!, "reinserted")),
+                Batch(InventoryEvent("module", new JsonObject { ["reason"] = "removed", ["module"] = new JsonObject { ["id"] = "7" } })))));
+        var token = await StartSessionAsync(driver, "modules-transitions-start");
+        var initial = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_modules", "modules-initial"))["modules"]);
+        Assert.Equal(3, initial.Count);
+        Assert.Equal("numeric", initial[0]?["name"]?.GetValue<string>());
+        Assert.Equal("private-path", initial[0]?["path"]?.GetValue<string>());
+        Assert.Equal("1", initial[0]?["version"]?.GetValue<string>());
+        Assert.True(initial[0]?["isOptimized"]?.GetValue<bool>());
+        Assert.Equal("loaded", initial[0]?["symbolStatus"]?.GetValue<string>());
+
+        await AdvanceOutputAsync(driver, token, "modules-change-barrier");
+        var changed = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_modules", "modules-changed"))["modules"]);
+        Assert.Equal(2, changed.Count);
+        Assert.Equal(7, changed[0]?["id"]?.GetValue<int>());
+        Assert.Equal("7", changed[1]?["id"]?.GetValue<string>());
+        Assert.Equal("replacement", changed[0]?["name"]?.GetValue<string>());
+        Assert.Equal("string", changed[1]?["name"]?.GetValue<string>());
+        foreach (var item in changed.Select(static node => Assert.IsType<JsonObject>(node)))
+        {
+            Assert.Equal(6, item.Count);
+            Assert.True(item.ContainsKey("path"));
+            Assert.Null(item["path"]);
+            Assert.True(item.ContainsKey("version"));
+            Assert.Null(item["version"]);
+            Assert.False(item["isOptimized"]?.GetValue<bool>() ?? true);
+            Assert.True(item.ContainsKey("symbolStatus"));
+            Assert.Null(item["symbolStatus"]);
+        }
+
+        await AdvanceOutputAsync(driver, token, "modules-reinsert-barrier");
+        var final = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_modules", "modules-final"))["modules"]);
+        Assert.Equal("7", final[0]?["id"]?.GetValue<string>());
+        Assert.Equal(7, final[1]?["id"]?.GetValue<int>());
+        Assert.Equal("reinserted", final[1]?["name"]?.GetValue<string>());
+        Assert.Equal("string-replaced", final[0]?["name"]?.GetValue<string>());
+        Assert.Equal("string-path", final[0]?["path"]?.GetValue<string>());
+        Assert.Equal("2", final[0]?["version"]?.GetValue<string>());
+        Assert.True(final[0]?["isOptimized"]?.GetValue<bool>());
+        Assert.Equal("string-symbols", final[0]?["symbolStatus"]?.GetValue<string>());
+        await AdvanceOutputAsync(driver, token, "modules-string-remove-barrier");
+        var remaining = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_modules", "modules-string-removed"))["modules"]));
+        Assert.Equal(7, remaining?["id"]?.GetValue<int>());
+        Assert.Equal("numeric", initial[0]?["name"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetProgress_ReaderOrderedTransitions_PreserveOmittedFieldsReplaceStartsAndRemoveEnds()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(
+                InventoryEvent("progressStart", new JsonObject { ["progressId"] = "first", ["title"] = "initial" }),
+                InventoryEvent("progressStart", new JsonObject
+                {
+                    ["progressId"] = "second",
+                    ["title"] = "working",
+                    ["message"] = "original",
+                    ["percentage"] = 20,
+                    ["cancellable"] = true,
+                })),
+            batches: new JsonArray(
+                Batch(InventoryEvent("progressStart", new JsonObject { ["progressId"] = "first", ["title"] = "replaced" }),
+                    InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "second", ["message"] = "updated", ["percentage"] = null }),
+                    InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "second" }),
+                    InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "unknown", ["percentage"] = 90 }),
+                    InventoryEvent("progressEnd", new JsonObject { ["progressId"] = "unknown" })),
+                Batch(InventoryEvent("progressEnd", new JsonObject { ["progressId"] = "first" }),
+                    InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "second", ["message"] = null, ["percentage"] = 75 }),
+                    InventoryEvent("progressStart", new JsonObject { ["progressId"] = "third", ["title"] = "last" })),
+                Batch(InventoryEvent("progressStart", new JsonObject { ["progressId"] = "second", ["title"] = "restarted" })))));
+        var token = await StartSessionAsync(driver, "progress-transitions-start");
+        var initialize = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "initialize");
+        Assert.True(JsonNode.Parse(initialize.Detail!)?["arguments"]?["supportsProgressReporting"]?.GetValue<bool>() ?? false);
+        var initial = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-initial"))["progress"]);
+        Assert.Equal(2, initial.Count);
+        var first = Assert.IsType<JsonObject>(initial[0]);
+        Assert.Equal(6, first.Count);
+        Assert.True(first.ContainsKey("message"));
+        Assert.Null(first["message"]);
+        Assert.True(first.ContainsKey("percentage"));
+        Assert.Null(first["percentage"]);
+        Assert.False(first["cancellable"]?.GetValue<bool>() ?? true);
+        var firstStarted = first["startedAt"]!.GetValue<double>();
+        var secondStarted = initial[1]!["startedAt"]!.GetValue<double>();
+        Assert.True(double.IsFinite(firstStarted) && firstStarted >= 0);
+        Assert.True(double.IsFinite(secondStarted) && secondStarted >= firstStarted);
+
+        await AdvanceOutputAsync(driver, token, "progress-update-barrier");
+        var changed = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-changed"))["progress"]);
+        Assert.Equal(new[] { "first", "second" }, changed.Select(static item => item!["progressId"]!.GetValue<string>()));
+        Assert.Equal("replaced", changed[0]?["title"]?.GetValue<string>());
+        Assert.True(changed[0]!["startedAt"]!.GetValue<double>() >= firstStarted);
+        Assert.Equal("updated", changed[1]?["message"]?.GetValue<string>());
+        Assert.Equal(20, changed[1]?["percentage"]?.GetValue<int>());
+        Assert.True(changed[1]?["cancellable"]?.GetValue<bool>());
+        Assert.Equal(secondStarted, changed[1]?["startedAt"]?.GetValue<double>());
+
+        await AdvanceOutputAsync(driver, token, "progress-end-barrier");
+        var final = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-final"))["progress"]);
+        Assert.Equal(new[] { "second", "third" }, final.Select(static item => item!["progressId"]!.GetValue<string>()));
+        Assert.Equal("updated", final[0]?["message"]?.GetValue<string>());
+        Assert.Equal(75, final[0]?["percentage"]?.GetValue<int>());
+        Assert.Equal(secondStarted, final[0]?["startedAt"]?.GetValue<double>());
+        Assert.True(final[1]!["startedAt"]!.GetValue<double>() >= changed[0]!["startedAt"]!.GetValue<double>());
+        await AdvanceOutputAsync(driver, token, "progress-restart-barrier");
+        var restarted = Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-restarted"))["progress"]);
+        Assert.Equal(new[] { "second", "third" }, restarted.Select(static item => item!["progressId"]!.GetValue<string>()));
+        Assert.Equal("restarted", restarted[0]?["title"]?.GetValue<string>());
+        Assert.Null(restarted[0]?["message"]);
+        Assert.Null(restarted[0]?["percentage"]);
+        Assert.False(restarted[0]?["cancellable"]?.GetValue<bool>() ?? true);
+        Assert.True(restarted[0]!["startedAt"]!.GetValue<double>() >= final[1]!["startedAt"]!.GetValue<double>());
+    }
+
+    [Fact]
+    public async Task GetProgress_UpdateDistinguishesNewlineFromLiteralEscape()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("progressStart", new JsonObject
+            {
+                ["progressId"] = "edge",
+                ["title"] = "working",
+                ["message"] = "\n",
+            })),
+            batches: new JsonArray(Batch(InventoryEvent("progressUpdate", new JsonObject
+            {
+                ["progressId"] = "edge",
+                ["message"] = "\\n",
+            })))));
+        var token = await StartSessionAsync(driver, "progress-escape-start");
+        var initial = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-escape-before"))["progress"]));
+        Assert.Equal("\n", initial?["message"]?.GetValue<string>());
+
+        await AdvanceOutputAsync(driver, token, "progress-escape-barrier");
+        var updated = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-escape-after"))["progress"]));
+        Assert.Equal("\\n", updated?["message"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetProgress_PercentageBoundaries_AcceptsZeroFractionAndOneHundred()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("progressStart", new JsonObject { ["progressId"] = "edge", ["title"] = "working", ["percentage"] = 0 })),
+            batches: new JsonArray(
+                Batch(InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "edge", ["percentage"] = 0.25 })),
+                Batch(InventoryEvent("progressUpdate", new JsonObject { ["progressId"] = "edge", ["percentage"] = 100 })))));
+        var token = await StartSessionAsync(driver, "progress-boundaries-start");
+        var initial = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-zero"))["progress"]));
+        Assert.Equal(0, initial?["percentage"]?.GetValue<double>());
+        await AdvanceOutputAsync(driver, token, "progress-fraction-barrier");
+        var fractional = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-fraction"))["progress"]));
+        Assert.Equal(0.25, fractional?["percentage"]?.GetValue<double>());
+        await AdvanceOutputAsync(driver, token, "progress-hundred-barrier");
+        var complete = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-hundred"))["progress"]));
+        Assert.Equal(100, complete?["percentage"]?.GetValue<double>());
+    }
+
+    [Theory]
+    [InlineData("get_modules", "modules")]
+    [InlineData("get_progress", "progress")]
+    public async Task RuntimeInventory_IndependentSessions_IsolateTransitionsAndLeaveOutputUnchanged(string tool, string field)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("before|"), ModuleEvent("new", JsonValue.Create(1)!, "first"),
+                InventoryEvent("progressStart", new JsonObject { ["progressId"] = "first", ["title"] = "working" })),
+            batches: new JsonArray(Batch(Output("after|"), ModuleEvent("removed", JsonValue.Create(1)!, "ignored"),
+                InventoryEvent("progressEnd", new JsonObject { ["progressId"] = "first" })))));
+        var first = await StartSessionAsync(driver, $"{tool}-isolation-first");
+        var second = await StartSessionAsync(driver, $"{tool}-isolation-second");
+        Assert.NotEqual(first, second);
+        Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, first, tool, $"{tool}-first-before"))[field]));
+        await AdvanceOutputAsync(driver, first, $"{tool}-isolation-barrier");
+
+        Assert.Empty(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, first, tool, $"{tool}-first-after"))[field]));
+        Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, second, tool, $"{tool}-second-unchanged"))[field]));
+        Assert.Equal("before|after|", await ReadOutputAsync(driver, first, $"{tool}-first-output"));
+        Assert.Equal("before|", await ReadOutputAsync(driver, second, $"{tool}-second-output"));
+        await AssertOutputTailAsync(driver, first, $"{tool}-neighbor-tail", 1, 1, "before|after|");
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidArguments))]
+    public async Task RuntimeInventory_InvalidArguments_ReturnCompleteErrorWithoutDapIo(string scenario, JsonObject? arguments)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var before = await driver.ReadNativeActionsAsync();
+        foreach (var tool in new[] { "get_modules", "get_progress" })
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"{tool}-invalid-{scenario}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal(tool, content["tool"]?.GetValue<string>());
+        }
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("get_modules")]
+    [InlineData("get_progress")]
+    public async Task RuntimeInventory_UnknownAndRetiredSessions_ReturnUniformNotFoundWithoutDapIo(string tool)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var token = await StartSessionAsync(driver, $"{tool}-retired-start");
+        AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = token },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"{tool}-retire")), isError: false);
+        var before = await driver.ReadNativeActionsAsync();
+        JsonObject? previous = null;
+        foreach (var unavailable in new[] { "!", "short", new string('r', 32), token })
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(tool,
+                new JsonObject { ["debugSessionId"] = unavailable }, ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId($"{tool}-unavailable-{unavailable}")), isError: true);
+            Assert.Equal("debug_session_not_found", content["kind"]?.GetValue<string>());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", content["error"]?.GetValue<string>());
+            Assert.Equal(2, content.Count);
+            if (previous is not null)
+            {
+                Assert.Equal(previous.ToJsonString(), content.ToJsonString());
+            }
+            previous = content;
+        }
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("get_modules", "module", "null")]
+    [InlineData("get_modules", "module", "{}")]
+    [InlineData("get_modules", "module", "{\"reason\":\"new\",\"module\":{\"id\":true,\"name\":\"private-inventory-marker\"}}")]
+    [InlineData("get_modules", "module", "{\"reason\":\"new\",\"module\":{\"id\":1}}")]
+    [InlineData("get_modules", "module", "{\"reason\":\"changed\",\"module\":{\"id\":1,\"name\":\"private-inventory-marker\",\"isOptimized\":\"yes\"}}")]
+    [InlineData("get_progress", "progressStart", "null")]
+    [InlineData("get_progress", "progressStart", "{\"progressId\":\"first\",\"message\":\"private-inventory-marker\"}")]
+    [InlineData("get_progress", "progressStart", "{\"progressId\":\"first\",\"title\":\"private-inventory-marker\",\"cancellable\":1}")]
+    [InlineData("get_progress", "progressUpdate", "{\"progressId\":\"first\",\"message\":false}")]
+    [InlineData("get_progress", "progressUpdate", "{\"progressId\":\"first\",\"percentage\":\"private-inventory-marker\"}")]
+    [InlineData("get_progress", "progressStart", "{\"progressId\":\"first\",\"title\":\"bad\",\"percentage\":-0.1}")]
+    [InlineData("get_progress", "progressStart", "{\"progressId\":\"first\",\"title\":\"bad\",\"percentage\":100.1}")]
+    [InlineData("get_progress", "progressUpdate", "{\"progressId\":\"first\",\"percentage\":-1}")]
+    [InlineData("get_progress", "progressUpdate", "{\"progressId\":\"first\",\"percentage\":101}")]
+    [InlineData("get_progress", "progressEnd", "{}")]
+    public async Task RuntimeInventory_MalformedEvent_ReturnsRedactedIncompleteWithoutKillingSession(
+        string tool, string eventName, string bodyJson)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("retained-output|"), ModuleEvent("new", JsonValue.Create(1)!, "private-inventory-marker"),
+                InventoryEvent("progressStart", new JsonObject { ["progressId"] = "first", ["title"] = "private-inventory-marker" })),
+            batches: new JsonArray(Batch(InventoryEvent(eventName, JsonNode.Parse(bodyJson)), Output("still-usable|")))));
+        var token = await StartSessionAsync(driver, $"{tool}-malformed-start");
+        await AdvanceOutputAsync(driver, token, $"{tool}-malformed-barrier");
+
+        var incomplete = await ReadInventoryAsync(driver, token, tool, $"{tool}-malformed-read", isError: true);
+        AssertInventoryError(incomplete, tool, "runtime_inventory_incomplete");
+        var repeated = await ReadInventoryAsync(driver, token, tool, $"{tool}-malformed-repeat", isError: true);
+        Assert.Equal(incomplete.ToJsonString(), repeated.ToJsonString());
+        var neighbor = tool == "get_modules" ? "get_progress" : "get_modules";
+        Assert.Equal(1, (await ReadInventoryAsync(driver, token, neighbor, $"{tool}-malformed-neighbor"))["count"]?.GetValue<int>());
+        Assert.Equal("retained-output|still-usable|", await ReadOutputAsync(driver, token, $"{tool}-malformed-output"));
+        await AdvanceOutputAsync(driver, token, $"{tool}-malformed-still-usable");
+    }
+
+    [Theory]
+    [InlineData("get_modules", "modules", "name", 240_000, "x")]
+    [InlineData("get_progress", "progress", "title", 240_000, "x")]
+    [InlineData("get_modules", "modules", "name", 40_000, "\u0001")]
+    [InlineData("get_progress", "progress", "title", 40_000, "\u0001")]
+    public async Task RuntimeInventory_SerializedSnapshotBelow256KiB_ReturnsEntireUntruncatedEntry(
+        string tool, string field, string textField, int textLength, string character)
+    {
+        var entry = GeneratedInventoryEvent(tool, 1, textLength);
+        entry["generatedTextCharacter"] = character;
+        await using var driver = await StartTailDriverAsync(OutputOptions(batches: new JsonArray(Batch(entry))));
+        var token = await StartSessionAsync(driver, $"{tool}-below-snapshot-start");
+        await AdvanceOutputAsync(driver, token, $"{tool}-below-snapshot-barrier", timeout: TimeSpan.FromSeconds(10));
+
+        var content = await ReadInventoryAsync(driver, token, tool, $"{tool}-below-snapshot-read");
+        var item = Assert.Single(Assert.IsType<JsonArray>(content[field]));
+        Assert.Equal(new string(character[0], textLength), item?[textField]?.GetValue<string>());
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()) <= 256 * 1024);
+    }
+
+    [Theory]
+    [InlineData("get_modules", 270_000, "x")]
+    [InlineData("get_progress", 270_000, "x")]
+    [InlineData("get_modules", 50_000, "\u0001")]
+    [InlineData("get_progress", 50_000, "\u0001")]
+    public async Task RuntimeInventory_SerializedSnapshotOver256KiB_ReturnsRedactedTooLargeWithoutTruncation(
+        string tool, int textLength, string character)
+    {
+        var large = GeneratedInventoryEvent(tool, 1, textLength);
+        large["generatedTextCharacter"] = character;
+        var remove = tool == "get_modules"
+            ? ModuleEvent("removed", JsonValue.Create(0)!, "ignored")
+            : InventoryEvent("progressEnd", new JsonObject { ["progressId"] = "generated-0" });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("unchanged-output|")),
+            batches: new JsonArray(Batch(large), Batch(remove))));
+        var token = await StartSessionAsync(driver, $"{tool}-oversize-start");
+        await AdvanceOutputAsync(driver, token, $"{tool}-oversize-barrier", timeout: TimeSpan.FromSeconds(10));
+
+        var content = await ReadInventoryAsync(driver, token, tool, $"{tool}-oversize-read", isError: true);
+        AssertInventoryError(content, tool, "runtime_inventory_too_large");
+        Assert.Equal(content.ToJsonString(), (await ReadInventoryAsync(driver, token, tool, $"{tool}-oversize-repeat", isError: true)).ToJsonString());
+        Assert.Equal("unchanged-output|", await ReadOutputAsync(driver, token, $"{tool}-oversize-output"));
+        await AdvanceOutputAsync(driver, token, $"{tool}-oversize-still-usable");
+        var recovered = await ReadInventoryAsync(driver, token, tool, $"{tool}-oversize-removed");
+        Assert.Equal(0, recovered["count"]?.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task GetModules_ExactSerializedLimit_AcceptsLimitAndRejectsOneByteOver(int excessBytes)
+    {
+        const int limit = 256 * 1024;
+        var template = new JsonObject
+        {
+            ["kind"] = "modules_success",
+            ["modules"] = new JsonArray(new JsonObject
+            {
+                ["id"] = 0,
+                ["name"] = "",
+                ["path"] = null,
+                ["version"] = null,
+                ["isOptimized"] = false,
+                ["symbolStatus"] = null,
+            }),
+            ["count"] = 1,
+        };
+        var size = limit - System.Text.Encoding.UTF8.GetByteCount(template.ToJsonString()) + excessBytes;
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            batches: new JsonArray(Batch(GeneratedInventoryEvent("get_modules", 1, size)))));
+        var token = await StartSessionAsync(driver, $"modules-exact-limit-{excessBytes}-start");
+        await AdvanceOutputAsync(driver, token, $"modules-exact-limit-{excessBytes}-barrier", timeout: TimeSpan.FromSeconds(10));
+        var content = await ReadInventoryAsync(driver, token, "get_modules", $"modules-exact-limit-{excessBytes}", isError: excessBytes != 0);
+        if (excessBytes == 0)
+        {
+            Assert.Equal(limit, System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()));
+            Assert.Equal(size, Assert.Single(Assert.IsType<JsonArray>(content["modules"]))?["name"]?.GetValue<string>().Length);
+        }
+        else
+        {
+            AssertInventoryError(content, "get_modules", "runtime_inventory_too_large");
+        }
+    }
+
+    [Theory]
+    [InlineData("get_modules")]
+    [InlineData("get_progress")]
+    public async Task RuntimeInventory_RetentionOver16MiB_IsIncompleteOnlyForAffectedInventory(string tool)
+    {
+        const int oneMiB = 1024 * 1024;
+        var neighbor = tool == "get_modules" ? "get_progress" : "get_modules";
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("retained-output|")),
+            batches: new JsonArray(
+                Batch(GeneratedInventoryEvent(tool, 9, oneMiB), GeneratedInventoryEvent(neighbor, 9, oneMiB)),
+                Batch(GeneratedInventoryEvent(tool, 8, oneMiB, offset: 9), Output("after-overflow|")))));
+        var token = await StartSessionAsync(driver, $"{tool}-retention-start");
+        await AdvanceOutputAsync(driver, token, $"{tool}-per-inventory-barrier", timeout: TimeSpan.FromSeconds(30));
+
+        // Combined retention exceeds 16 MiB, but each inventory is below its own limit.
+        AssertInventoryError(await ReadInventoryAsync(driver, token, tool, $"{tool}-below-retention", isError: true),
+            tool, "runtime_inventory_too_large");
+        AssertInventoryError(await ReadInventoryAsync(driver, token, neighbor, $"{tool}-neighbor-below-retention", isError: true),
+            neighbor, "runtime_inventory_too_large");
+
+        await AdvanceOutputAsync(driver, token, $"{tool}-overflow-barrier", timeout: TimeSpan.FromSeconds(30));
+        var incomplete = await ReadInventoryAsync(driver, token, tool, $"{tool}-overflow-read", isError: true);
+        AssertInventoryError(incomplete, tool, "runtime_inventory_incomplete");
+        Assert.Equal(incomplete.ToJsonString(), (await ReadInventoryAsync(driver, token, tool, $"{tool}-overflow-repeat", isError: true)).ToJsonString());
+        AssertInventoryError(await ReadInventoryAsync(driver, token, neighbor, $"{tool}-neighbor-still-complete", isError: true),
+            neighbor, "runtime_inventory_too_large");
+        Assert.Equal("retained-output|after-overflow|", await ReadOutputAsync(driver, token, $"{tool}-overflow-output"));
+        await AdvanceOutputAsync(driver, token, $"{tool}-overflow-still-usable");
+    }
+
+    [Theory]
+    [InlineData("get_modules")]
+    [InlineData("get_progress")]
+    [InlineData("search_output")]
+    public async Task RuntimeInventory_NonObjectArguments_ReturnInvalidArgumentsBeforeDapIo(string tool)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var before = await driver.ReadNativeActionsAsync();
+        var shapes = new[] { "null", "17", "true", "[]", "\"not-an-object\"" };
+        for (var index = 0; index < shapes.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.SendRawRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = tool,
+                ["arguments"] = JsonNode.Parse(shapes[index]),
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId($"{tool}-invalid-shape-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal(tool, content["tool"]?.GetValue<string>());
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    private static JsonObject GeneratedInventoryEvent(string tool, int count, int textLength, int offset = 0)
+    {
+        var entry = tool == "get_modules"
+            ? ModuleEvent("new", JsonValue.Create(0)!, "private-inventory-marker")
+            : InventoryEvent("progressStart", new JsonObject { ["progressId"] = "generated", ["title"] = "private-inventory-marker" });
+        entry["generatedCount"] = count;
+        entry["generatedIdOffset"] = offset;
+        entry["generatedTextLength"] = textLength;
+        return entry;
+    }
+
+    private static void AssertInventoryError(JsonObject content, string tool, string kind)
+    {
+        Assert.Equal(kind, content["kind"]?.GetValue<string>());
+        Assert.Equal(tool, content["tool"]?.GetValue<string>());
+        Assert.False(content.ContainsKey("modules"));
+        Assert.False(content.ContainsKey("progress"));
+        Assert.False(content.ContainsKey("count"));
+        Assert.DoesNotContain("private-inventory-marker", content.ToJsonString());
+        Assert.DoesNotContain("retained-output", content.ToJsonString());
+        Assert.DoesNotContain("generated-", content.ToJsonString());
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()) <= 256 * 1024);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    private static JsonObject InventoryEvent(string name, JsonNode? body) => new() { ["event"] = name, ["body"] = body };
+
+    private static JsonObject ModuleEvent(string reason, JsonNode id, string name,
+        string? path = null, string? version = null, bool? optimized = null, string? symbols = null)
+    {
+        var module = new JsonObject { ["id"] = id, ["name"] = name };
+        if (path is not null) module["path"] = path;
+        if (version is not null) module["version"] = version;
+        if (optimized.HasValue) module["isOptimized"] = optimized.Value;
+        if (symbols is not null) module["symbolStatus"] = symbols;
+        return InventoryEvent("module", new JsonObject { ["reason"] = reason, ["module"] = module });
+    }
+
+    private static async Task<JsonObject> ReadInventoryAsync(ModernMcpProcessDriver driver, string token, string tool, string requestId,
+        bool isError = false)
+    {
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(tool,
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        if (!isError)
+        {
+            var field = tool == "get_modules" ? "modules" : "progress";
+            Assert.Equal($"{field}_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(3, content.Count);
+            Assert.Equal(Assert.IsType<JsonArray>(content[field]).Count, content["count"]?.GetValue<int>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+
+        return content;
+    }
+
     // Bound host startup/discovery separately; tool calls retain the driver's two-second deadline.
     private static Task<ModernMcpProcessDriver> StartTailDriverAsync(ModernMcpStartOptions options) =>
         ModernMcpProcessDriver.StartAsync(options, startupTimeout: TimeSpan.FromSeconds(10));
@@ -784,7 +1825,12 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         JsonArray? launch = null,
         JsonArray? batches = null,
         int? maximumEntry = 100_000,
-        int? maximumTotal = 10_000_000) => new(
+        int? maximumTotal = 10_000_000,
+        JsonObject? loadedSources = null,
+        bool loadedSourcesRefused = false,
+        int? loadedSourcesGeneratedLength = null,
+        JsonArray? loadedSourcesBefore = null,
+        JsonArray? loadedSourcesAfter = null) => new(
         DisableFormElicitation: true,
         FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
         AdditionalEnvironment: new Dictionary<string, string?>
@@ -793,6 +1839,11 @@ public sealed class OutputContractTests(ITestOutputHelper output)
             {
                 ["launch"] = launch ?? new JsonArray(),
                 ["threads"] = batches ?? new JsonArray(),
+                ["loadedSources"] = loadedSources?.DeepClone(),
+                ["loadedSourcesRefused"] = loadedSourcesRefused,
+                ["loadedSourcesGeneratedLength"] = loadedSourcesGeneratedLength,
+                ["loadedSourcesBefore"] = loadedSourcesBefore?.DeepClone(),
+                ["loadedSourcesAfter"] = loadedSourcesAfter?.DeepClone(),
             }.ToJsonString(),
             ["NETCOREDBG_MAX_OUTPUT_ENTRY"] = maximumEntry?.ToString(CultureInfo.InvariantCulture),
             ["NETCOREDBG_MAX_OUTPUT_BYTES"] = maximumTotal?.ToString(CultureInfo.InvariantCulture),
@@ -826,7 +1877,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     {
         var response = await driver.CallToolRawAsync(
             "start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
-            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId));
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), timeout: TimeSpan.FromSeconds(10));
         var result = ModernMcpProcessDriver.RequireResult(response);
         if (result["isError"]?.GetValue<bool>() == true)
         {
@@ -852,12 +1903,12 @@ public sealed class OutputContractTests(ITestOutputHelper output)
             : "<non-code-value-omitted>";
     }
 
-    private static async Task AdvanceOutputAsync(ModernMcpProcessDriver driver, string token, string requestId)
+    private static async Task AdvanceOutputAsync(ModernMcpProcessDriver driver, string token, string requestId, TimeSpan? timeout = null)
     {
         // The fixture writes the entire batch before this response. Reader order is the barrier.
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             "get_threads", new JsonObject { ["debugSessionId"] = token },
-            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError: false);
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), timeout: timeout), isError: false);
         Assert.Equal("threads_success", content["kind"]?.GetValue<string>());
     }
 

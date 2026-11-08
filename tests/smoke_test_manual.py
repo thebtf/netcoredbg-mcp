@@ -10,6 +10,8 @@ Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
 The opt-in ``Native WPF Concurrent Continue Stop``, ``Native Terminal Output Retention``,
 and ``Native WPF Discovery To Observed Invoke`` scenarios use prebuilt source native-host/fixture
 outputs and real netcoredbg; they never build or select the Python backend.
+The opt-in ``Native Sequential EnC`` builds an owned no-window scratch fixture
+and requires an EnC-enabled netcoredbg with adjacent ncdbhook.dll.
 """
 
 import asyncio
@@ -2574,10 +2576,10 @@ async def test_tracepoint_auto_resume():
         mgr = TracepointManager()
         m._tracepoint_manager = mgr
         tp_line = _find_line("sum += i")
-        mgr.add(SOURCE, tp_line, "i")
+        tp = mgr.add(SOURCE, tp_line, "i")
 
         # Set real DAP breakpoint for the tracepoint
-        await m.add_breakpoint(SOURCE, tp_line)
+        await m.add_breakpoint(SOURCE, tp_line, tracepoint_id=tp.id)
 
         # Also set a REAL breakpoint on "return sum" to eventually stop
         return_line = _find_line("return sum")
@@ -7568,12 +7570,126 @@ async def test_typed_bitblt_fallback_native_bridge():
                     await m.stop()
 
 
+async def test_screenshot_expected_hwnd_guard():
+    """Issue #467: same-process wrong-HWND bridge pixels never reach the public consumer."""
+    print("\n--- Screenshot Expected HWND Guard (Synthetic Bridge) ---")
+    import base64
+    import io
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp.types import ImageContent
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 192, 64)).save(buffer, format="PNG")
+    encoded_png = base64.b64encode(buffer.getvalue()).decode("ascii")
+    bridge_result = {
+        "base64": encoded_png,
+        "width": 8,
+        "height": 8,
+        "method": "PrintWindow",
+        "hwnd": 778,
+        "process_id": 42,
+        "client_rect": {
+            "left": 0,
+            "top": 0,
+            "right": 8,
+            "bottom": 8,
+            "unit": "physical_px",
+            "coordinate_space": "client",
+            "source_api": "GetClientRect",
+        },
+        "window_bounds": {
+            "left": 100,
+            "top": 50,
+            "right": 108,
+            "bottom": 58,
+            "unit": "physical_px",
+            "coordinate_space": "screen",
+            "source_api": "GetWindowRect",
+        },
+        "dpi": 144,
+    }
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value=bridge_result)
+    save_bundle = MagicMock()
+    save_screenshot = MagicMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="synthetic-expected-hwnd-467",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_bundle,
+            save_screenshot=save_screenshot,
+        ),
+    )
+    registry = _CapturingMCP()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
+            side_effect=AssertionError("Synthetic smoke must not inspect desktop windows"),
+        ),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window",
+            side_effect=AssertionError("Synthetic smoke must not capture desktop pixels"),
+        ),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            side_effect=AssertionError("Synthetic smoke must not capture desktop evidence"),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            format="png",
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    check(
+        "Wrong-HWND screenshot returns an explicit public failure",
+        isinstance(response, dict)
+        and response.get("code") == "PHYSICAL_CAPTURE_MISMATCH"
+        and bool(response.get("error")),
+    )
+    no_pixels = True
+    pending = [response]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, ImageContent):
+            no_pixels = False
+        elif isinstance(item, dict):
+            no_pixels = no_pixels and not {
+                "base64", "raw_path", "crop_path", "hd_path"
+            }.intersection(item)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif isinstance(item, str) and encoded_png in item:
+            no_pixels = False
+    check("Wrong-HWND screenshot exposes no image or pixel payload", no_pixels)
+    check(
+        "Wrong-HWND screenshot never invokes persistence",
+        not save_bundle.called and not save_screenshot.called,
+    )
+
+
 async def test_screenshot_black_frame_guard():
     """Scenario: probable-black screenshot evidence fails closed without foreground mutation."""
     print("\n--- Screenshot Black Frame Guard ---")
     import ctypes
     import io
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     from PIL import Image
 
@@ -7586,9 +7702,9 @@ async def test_screenshot_black_frame_guard():
     registry = _CapturingMCP()
     session = SimpleNamespace(
         process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42, activity_epoch=object()),
         stealth_mode=False,
-        session_id=None,
+        session_id="fake-black-frame-recovery",
     )
 
     with (
@@ -7622,6 +7738,32 @@ async def test_screenshot_black_frame_guard():
 
     fallback_backend = PywinautoBackend.__new__(PywinautoBackend)
     fallback_backend._ui = SimpleNamespace(process_id=42)
+    foreground_state = {"hwnd": 0}
+
+    def fake_owner(hwnd, pid_out):
+        if hwnd != 123:
+            return 0
+        if pid_out is not None:
+            ctypes.cast(pid_out, ctypes.POINTER(ctypes.c_ulong)).contents.value = 42
+        return 7
+
+    def fake_activate(hwnd):
+        assert hwnd == 123
+        foreground_state["hwnd"] = hwnd
+        return True
+
+    fake_user32 = SimpleNamespace(
+        IsWindow=MagicMock(side_effect=lambda hwnd: hwnd == 123),
+        GetWindowThreadProcessId=MagicMock(side_effect=fake_owner),
+        GetForegroundWindow=MagicMock(side_effect=lambda: foreground_state["hwnd"]),
+        ShowWindow=MagicMock(return_value=True),
+        SetForegroundWindow=MagicMock(side_effect=fake_activate),
+    )
+    forbidden_input = []
+    for name in ("AttachThreadInput", "SendInput", "keybd_event", "mouse_event", "SetCursorPos"):
+        operation = MagicMock(side_effect=AssertionError("Fake recovery must not inject input"))
+        forbidden_input.append(operation)
+        setattr(fake_user32, name, operation)
     with (
         patch(
             "netcoredbg_mcp.ui.backend.create_backend",
@@ -7629,21 +7771,29 @@ async def test_screenshot_black_frame_guard():
         ),
         patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
         patch(
-            "netcoredbg_mcp.ui.foreground.restore_foreground_window",
-            return_value=True,
+            "netcoredbg_mcp.ui.foreground.os",
+            SimpleNamespace(name="nt"),
         ),
         patch.object(
-            ctypes.windll,
-            "user32",
-            SimpleNamespace(ShowWindow=lambda _hwnd, _command: True),
+            ctypes,
+            "windll",
+            SimpleNamespace(user32=fake_user32, kernel32=SimpleNamespace()),
+            create=True,
         ),
+        patch.object(ctypes, "WinDLL", lambda *_args, **_kwargs: fake_user32, create=True),
     ):
         recovery = await registry.tools["ui_bring_to_front"](SimpleNamespace())
 
     recovery_data = recovery.get("data", {}) if isinstance(recovery, dict) else {}
     check(
         "Black-frame recovery supports pywinauto fallback",
-        "error" not in recovery and recovery_data.get("activated") is True,
+        "error" not in recovery
+        and recovery_data.get("activated") is True
+        and recovery_data.get("foreground") == {"hwnd": 123, "pid": 42}
+        and recovery_data.get("foreground_matches_target") is True
+        and recovery_data.get("stealth_mode") is False
+        and session.stealth_mode is False
+        and all(not operation.called for operation in forbidden_input),
         str(recovery)[:240],
     )
 
@@ -8779,6 +8929,7 @@ def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
         ("UI Focused Evidence", test_ui_focused_evidence),
         ("Code Search", test_code_search),
         ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
+        ("Screenshot Expected HWND Guard", test_screenshot_expected_hwnd_guard),
         ("WPF Smoke Gallery", test_wpf_smoke_gallery),
         ("WinForms Smoke Gallery", test_winforms_smoke_gallery),
         ("Process Owner Cleanup", test_process_owner_cleanup),
@@ -8864,6 +9015,14 @@ async def test_two_application_gui_verification(*, extended_gui: bool = False):
     )
 
 
+async def test_native_sequential_enc() -> None:
+    from pathlib import Path
+
+    from tests.smoke_native_enc import run
+
+    await run(Path(BASE), check)
+
+
 def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Two-Application Core Smoke", test_two_application_gui_verification),
@@ -8875,6 +9034,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
         ("Native WPF Concurrent Continue Stop", test_native_wpf_concurrent_continue_stop),
         ("Native Terminal Output Retention", test_native_terminal_output_retention),
         ("Native WPF Discovery To Observed Invoke", test_native_wpf_discovery_to_invoke),
+        ("Native Sequential EnC", test_native_sequential_enc),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),

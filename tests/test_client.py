@@ -680,6 +680,29 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["threadId"] == 1
 
     @pytest.mark.asyncio
+    async def test_tracepoint_continue_rechecks_admission_before_writing(self):
+        client = DAPClient("/path")
+        stdin = MagicMock()
+        client._process = SimpleNamespace(pid=1, stdin=stdin, returncode=None)
+        run = client._run_for_direct_reader()
+        started = asyncio.Event()
+        allowed = True
+
+        async def send():
+            started.set()
+            return await client.continue_execution(1, admission=lambda: allowed)
+
+        async with client._request_lock:
+            pending = asyncio.create_task(send())
+            await started.wait()
+            allowed = False
+        with pytest.raises(RuntimeError, match="no longer current"):
+            await pending
+
+        stdin.write.assert_not_called()
+        assert run.pending == {}
+
+    @pytest.mark.asyncio
     async def test_stack_trace_request_format(self):
         """Test stackTrace request has correct format."""
         client = DAPClient("/path")
@@ -1731,6 +1754,226 @@ class TestDAPClientTransportDeath:
 
         with pytest.raises(RuntimeError, match="netcoredbg process died"):
             await client.send_request("threads")
+
+
+def test_attach_dispatch_marker_tracks_real_writer_and_ambiguous_write_failure():
+    client = DAPClient("/path")
+    stdin = MagicMock()
+    client._process = SimpleNamespace(pid=1, stdin=stdin, returncode=None)
+    run = client._run_for_direct_reader()
+    request = DAPRequest(seq=1, command=Commands.ATTACH, arguments={"processId": 99})
+    with pytest.raises(RuntimeError, match="safety binding"):
+        client._write(request)
+    assert not client.attach_may_have_dispatched(run.generation)
+    stdin.write.assert_not_called()
+
+    run.attach_safe = True
+    stdin.write.side_effect = OSError("ambiguous pipe write")
+    with pytest.raises(OSError, match="ambiguous pipe write"):
+        client._write(request)
+    assert client.attach_may_have_dispatched(run.generation)
+    stdin.write.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger_name",
+    ["STDOUT_EOF", "READER_FAILURE", "DAP_TERMINATED", "EXPLICIT_STOP", "PROCESS_EXIT"],
+)
+async def test_attach_safe_finalizer_observes_without_force(trigger_name):
+    from netcoredbg_mcp.dap.client import DapTerminalTrigger
+
+    client = DAPClient("/path")
+    process = TreeProcess(pid=43050, stdout=BlockingStream(), stderr=BlockingStream())
+    client._process = process
+    run = client._run_for_direct_reader()
+    ref = OwnedProcessRef("attach-owner", run.generation, process.pid)
+    receipt = OwnerDrainReceipt(
+        owner=ref, status=DrainStatus.TIMED_OUT, forced=False,
+        root_returncode=None, active_processes=1,
+    )
+    owner = SimpleNamespace(
+        owner=ref, prepare_attach_safe=AsyncMock(), observe_passive=AsyncMock(return_value=receipt),
+        drain_after_grace=AsyncMock(), aclose=AsyncMock(),
+    )
+    run.owner = owner
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+    manager._client = client
+    manager._active_dap_run = run.generation
+    manager._debuggee_mode = (run.generation, "attach")
+    manager._register_adapter_cleanup(client, run.generation)
+    manager._observe_process(process.pid, "netcoredbg", generation=run.generation)
+    manager._register_event_handlers()
+    await client.prepare_attach_safe(run.generation)
+    finalizer, created = client._request_finalization(
+        run, getattr(DapTerminalTrigger, trigger_name)
+    )
+    await finalizer
+
+    assert created
+    owner.observe_passive.assert_awaited_once()
+    owner.drain_after_grace.assert_not_awaited()
+    owner.aclose.assert_not_awaited()
+    assert process.kill_calls == 0 and process.terminate_calls == 0
+    assert client.adapter_cleanup_owner is owner
+    assert run.owner_drain_receipt is receipt
+    assert manager.process_registry.owner_count == 1
+    assert [entry.pid for entry in manager.process_registry.get_all()] == [process.pid]
+    assert manager._active_dap_run == run.generation
+    assert manager.state.execution_outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_attach_safe_finalizer_closes_only_naturally_drained_owner():
+    from netcoredbg_mcp.dap.client import DapTerminalTrigger
+
+    client = DAPClient("/path")
+    process = TreeProcess(
+        pid=43052, stdout=BlockingStream(), stderr=BlockingStream(), initially_exited=True
+    )
+    client._process = process
+    run = client._run_for_direct_reader()
+    ref = OwnedProcessRef("attach-owner", run.generation, process.pid)
+    receipt = OwnerDrainReceipt(
+        owner=ref, status=DrainStatus.DRAINED, forced=False,
+        root_returncode=0, active_processes=0, root_was_forced=False,
+    )
+    owner = SimpleNamespace(
+        owner=ref, prepare_attach_safe=AsyncMock(), observe_passive=AsyncMock(return_value=receipt),
+        drain_after_grace=AsyncMock(), aclose=AsyncMock(return_value=receipt),
+    )
+    run.owner = owner
+    await client.prepare_attach_safe(run.generation)
+    finalizer, _ = client._request_finalization(run, DapTerminalTrigger.PROCESS_EXIT)
+    terminal = await finalizer
+    assert terminal.cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
+    assert terminal.returncode == 0
+    owner.aclose.assert_awaited_once()
+    owner.drain_after_grace.assert_not_awaited()
+    assert process.kill_calls == 0 and process.terminate_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_finalizer_joins_pending_attach_safety_preparation():
+    from netcoredbg_mcp.dap.client import DapTerminalTrigger
+
+    client = DAPClient("/path")
+    process = TreeProcess(pid=43051, stdout=BlockingStream(), stderr=BlockingStream())
+    client._process = process
+    run = client._run_for_direct_reader()
+    ref = OwnedProcessRef("attach-owner", run.generation, process.pid)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def prepare():
+        entered.set()
+        await release.wait()
+
+    owner = SimpleNamespace(
+        owner=ref, prepare_attach_safe=AsyncMock(side_effect=prepare),
+        observe_passive=AsyncMock(return_value=OwnerDrainReceipt(
+            owner=ref, status=DrainStatus.TIMED_OUT, forced=False,
+            root_returncode=None, active_processes=1,
+        )),
+        drain_after_grace=AsyncMock(), aclose=AsyncMock(), restore_pre_attach=AsyncMock(),
+    )
+    run.owner = owner
+    preparation = asyncio.create_task(client.prepare_attach_safe(run.generation))
+    await entered.wait()
+    finalizer, _ = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+    await asyncio.sleep(0)
+    assert not finalizer.done()
+    owner.drain_after_grace.assert_not_awaited()
+    release.set()
+    results = await asyncio.gather(preparation, finalizer, return_exceptions=True)
+    assert isinstance(results[0], RuntimeError)
+    assert not isinstance(results[1], BaseException)
+    owner.observe_passive.assert_awaited_once()
+    owner.drain_after_grace.assert_not_awaited()
+    owner.aclose.assert_not_awaited()
+    await client.restore_pre_attach(run.generation)
+    owner.restore_pre_attach.assert_awaited_once()
+    assert run.pre_attach_restored_after_terminal and not run.attach_safe
+    owner.drain_after_grace.return_value = OwnerDrainReceipt(
+        owner=ref, status=DrainStatus.DRAINED, forced=True,
+        root_returncode=0, active_processes=0,
+    )
+    receipt = await client.stop(expected_owner=ref)
+    assert receipt.status is DrainStatus.DRAINED
+    owner.drain_after_grace.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_posix_policy_ack_timeouts_retain_owner_and_late_ack_recovers(monkeypatch):
+    import netcoredbg_mcp.posix_process_owner as posix
+    from netcoredbg_mcp.dap.client import DapTerminalTrigger
+
+    monkeypatch.setattr(posix, "_POLICY_ACK_TIMEOUT", 0.01)
+    owner = posix.PosixOwnedProcess.__new__(posix.PosixOwnedProcess)
+    owner._closed = False
+    owner._control_eof = False
+    owner._cleanup_task = None
+    owner._attach_safe = False
+    owner._policy_uncertain = False
+    owner._attach_ready = None
+    owner._launch_ready = None
+    owner._control_writer = SimpleNamespace(write=MagicMock(), drain=AsyncMock())
+    owner._guardian = SimpleNamespace(returncode=None)
+    owner._returncode = None
+    owner._root_exit = asyncio.Event()
+    client = DAPClient("/path")
+    client._process = TreeProcess(pid=43054, stdout=BlockingStream(), stderr=BlockingStream())
+    run = client._run_for_direct_reader()
+    run.posix_owner = owner
+
+    with pytest.raises(RuntimeError, match="attach-safety acknowledgement timed out"):
+        await client.prepare_attach_safe(run.generation)
+    assert run.attach_safe and run.attach_policy_uncertain and owner._attach_safe
+    finalizer, _ = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+    await finalizer
+    assert client.adapter_cleanup_owner is owner
+    assert not run.posix_cleanup_result.complete
+
+    with pytest.raises(RuntimeError, match="launch-mode acknowledgement timed out"):
+        await client.restore_pre_attach(run.generation)
+    assert owner._attach_safe and owner._policy_uncertain
+    assert owner._control_writer.write.call_count == 2
+    owner._attach_ready.set_result(None)
+    owner._launch_ready.set_result(None)
+    await client.restore_pre_attach(run.generation)
+    assert not owner._attach_safe and not run.attach_safe
+    assert owner._control_writer.write.call_count == 2
+    assert not run.attach_dispatched
+
+
+@pytest.mark.usefixtures("synthetic_attach_target")
+@pytest.mark.asyncio
+async def test_terminal_before_preparation_does_not_strand_attach_mode():
+    from netcoredbg_mcp.dap.client import DapTerminalTrigger
+
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+    client = DAPClient("/path")
+    client._process = SimpleNamespace(pid=43053, returncode=None, stdout=BlockingStream())
+    run = client._run_for_direct_reader()
+    manager._client = client
+    manager._active_dap_run = run.generation
+    manager._initialized_event.set()
+    manager._sync_all_breakpoints = AsyncMock()
+    manager._register_event_handlers()
+
+    async def fail_before_preparation(*_args):
+        run.process.returncode = 0
+        finalizer, _ = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+        await finalizer
+        raise RuntimeError("transport closed before attach")
+
+    client.set_exception_breakpoints = AsyncMock(side_effect=fail_before_preparation)
+    with pytest.raises(RuntimeError, match="transport closed before attach"):
+        await manager.attach(44064)
+    assert manager._debuggee_mode is None
+    assert not run.attach_dispatched
+    assert manager.state.unconfirmed_attach_pids == []
 
 
 class TestOwnerScopedAdapterRedMatrix:

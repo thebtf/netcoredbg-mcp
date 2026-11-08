@@ -27,6 +27,14 @@ def mock_netcoredbg_path():
             yield
 
 
+@pytest.fixture
+def synthetic_attach_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fake attach PIDs out of native process observation."""
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    monkeypatch.setattr(SessionManager, "_capture_provider_target", lambda _self, _pid: None)
+
+
 @dataclass
 class FakeSmokeSession:
     """Minimal shared fake for runtime smoke service tests."""

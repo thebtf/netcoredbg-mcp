@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 
@@ -10,25 +11,78 @@ internal sealed class DapOutputBuffer
     private static readonly long MaximumEntryScalars = ReadLimit("NETCOREDBG_MAX_OUTPUT_ENTRY", 100_000);
     private static readonly long MaximumTotalScalars = ReadLimit("NETCOREDBG_MAX_OUTPUT_BYTES", 10_000_000);
     private readonly object _gate = new();
-    private readonly Queue<(string Text, string Category, int Scalars)> _entries = new();
+    private readonly Queue<(string Text, string Category, int Scalars, int Bytes, long Sequence)> _entries = new();
     private long _retainedScalars;
+    private long _retainedBytes;
+    private long _sequence;
+    private long _discardedThrough;
 
-    internal void Append(string text, string category)
+    internal readonly record struct Position(long Sequence, int EntryCount, long ByteOffset);
+    internal readonly record struct Range(bool Complete, string Text, int EndEntry, long EndByte, long? EndSequence);
+
+    internal Position CapturePosition()
+    {
+        lock (_gate)
+            return new Position(_sequence, _entries.Count, _retainedBytes);
+    }
+
+    internal Range CaptureSince(Position position, Stopwatch timer, CancellationToken cancellationToken)
+    {
+        LegacyOutputEvidence.CheckBudget(timer, cancellationToken);
+        lock (_gate)
+        {
+            LegacyOutputEvidence.CheckBudget(timer, cancellationToken);
+            if (_discardedThrough > position.Sequence)
+                return new Range(false, string.Empty, _entries.Count, 0, _entries.Count == 0 ? null : _sequence);
+            if (_sequence == position.Sequence)
+                return new Range(true, string.Empty, _entries.Count, _retainedBytes, _entries.Count == 0 ? null : _sequence);
+            long length = 0;
+            foreach (var entry in _entries)
+            {
+                LegacyOutputEvidence.CheckBudget(timer, cancellationToken);
+                if (entry.Sequence > position.Sequence && (length += entry.Text.Length) > 2 * 1024 * 1024)
+                    throw new InvalidOperationException("OUTPUT_ASSERT_TOO_LARGE");
+            }
+            var text = string.Create((int)length, (Entries: _entries, position.Sequence, Timer: timer, Token: cancellationToken), static (destination, state) =>
+            {
+                var offset = 0;
+                foreach (var entry in state.Entries)
+                {
+                    LegacyOutputEvidence.CheckBudget(state.Timer, state.Token);
+                    if (entry.Sequence <= state.Sequence) continue;
+                    entry.Text.AsSpan().CopyTo(destination[offset..]);
+                    offset += entry.Text.Length;
+                }
+            });
+            LegacyOutputEvidence.CheckBudget(timer, cancellationToken);
+            return new Range(true, text, _entries.Count, _retainedBytes, _entries.Count == 0 ? null : _sequence);
+        }
+    }
+
+    internal bool Append(string text, string category)
     {
         var (retainedText, scalars) = BoundEntry(text);
         if (retainedText.Length == 0)
         {
-            return;
+            return false;
         }
+        var bytes = Encoding.UTF8.GetByteCount(retainedText);
 
         lock (_gate)
         {
-            _entries.Enqueue((retainedText, category, scalars));
+            var hadEntries = _entries.Count != 0;
+            var sequence = ++_sequence;
+            _entries.Enqueue((retainedText, category, scalars, bytes, sequence));
+            if (!string.Equals(retainedText, text, StringComparison.Ordinal)) _discardedThrough = sequence;
             _retainedScalars += scalars;
+            _retainedBytes += bytes;
             while (_retainedScalars > MaximumTotalScalars && _entries.TryDequeue(out var removed))
             {
                 _retainedScalars -= removed.Scalars;
+                _retainedBytes -= removed.Bytes;
+                _discardedThrough = Math.Max(_discardedThrough, removed.Sequence);
             }
+            return hadEntries || _entries.Count != 0;
         }
     }
 
@@ -60,11 +114,29 @@ internal sealed class DapOutputBuffer
 
             if (clear && string.IsNullOrEmpty(category))
             {
+                if (_entries.Count != 0) _discardedThrough = Math.Max(_discardedThrough, _entries.Last().Sequence);
                 _entries.Clear();
                 _retainedScalars = 0;
+                _retainedBytes = 0;
             }
 
             return snapshot;
+        }
+    }
+
+    internal IReadOnlyList<(string Text, string Category)> RecentEntries(int count)
+    {
+        lock (_gate)
+        {
+            var result = new List<(string Text, string Category)>(Math.Min(count, _entries.Count));
+            var skip = Math.Max(0, _entries.Count - count);
+            foreach (var entry in _entries)
+            {
+                if (skip > 0) { skip--; continue; }
+                if (!string.IsNullOrWhiteSpace(entry.Text))
+                    result.Add((entry.Text, entry.Category));
+            }
+            return result;
         }
     }
 
@@ -148,13 +220,13 @@ internal sealed class DapOutputBuffer
 
     private struct OutputCursor
     {
-        private Queue<(string Text, string Category, int Scalars)>.Enumerator _entries;
+        private Queue<(string Text, string Category, int Scalars, int Bytes, long Sequence)>.Enumerator _entries;
         private readonly string? _category;
         private string _text;
         private int _offset;
         private bool _skipLf;
 
-        internal OutputCursor(Queue<(string Text, string Category, int Scalars)> entries, string? category)
+        internal OutputCursor(Queue<(string Text, string Category, int Scalars, int Bytes, long Sequence)> entries, string? category)
         {
             _entries = entries.GetEnumerator();
             _category = category;

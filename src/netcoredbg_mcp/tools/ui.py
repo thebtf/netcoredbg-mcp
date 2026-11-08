@@ -727,47 +727,85 @@ def register_ui_tools(
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_bring_to_front(ctx: Context) -> dict:
-        """Bring the debuggee window to the foreground and exit stealth mode."""
+        """Request foreground once and report the final point-in-time evidence."""
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
-            bring_to_front = getattr(ui, "bring_to_front", None)
-            if bring_to_front is None:
-                import ctypes
+            from ..ui import NoActiveSessionError, NoProcessIdError
+            from ..ui.foreground import ForegroundActivation
 
-                from ..ui.foreground import restore_foreground_window
-                from ..ui.screenshot import get_hwnd_for_pid
+            state = session.state
+            if state.state in (DebugState.IDLE, DebugState.TERMINATED):
+                raise NoActiveSessionError("No debug session is active. Start debugging first.")
+            pid = state.process_id
+            if not pid:
+                raise NoProcessIdError("Process ID not available for foreground activation.")
+            session_id = getattr(session, "session_id", None)
+            epoch = getattr(state, "activity_epoch", None)
+            # RUNNING can lag an explicit stop or a manager-owned terminal fact.
+            dap_generation = getattr(session, "_active_dap_run", None)
+            dap_client = getattr(session, "client", None)
+            activation = ForegroundActivation(pid)
+            ui = _get_backend()
+            # A retained backend PID is connection state, not session identity.
+            # Native activation stays bound to the session target captured above.
 
-                pid = session.state.process_id
-                hwnd = get_hwnd_for_pid(pid) if pid else None
-                if not hwnd:
-                    return build_error_response(
-                        f"No visible window for process {pid}.",
-                        state=session.state.state,
+            def session_is_current() -> bool:
+                return (
+                    session.state is state
+                    and session_id is not None
+                    and epoch is not None
+                    and getattr(session, "session_id", None) == session_id
+                    and getattr(state, "activity_epoch", None) is epoch
+                    and state.process_id == pid
+                    and state.state not in (DebugState.IDLE, DebugState.TERMINATED)
+                    and getattr(state, "transport_terminal", None) is None
+                    and getattr(session, "_active_dap_run", None) == dap_generation
+                    and (
+                        dap_generation is None
+                        or getattr(session, "_stopping_dap_run", None) != dap_generation
                     )
-
-                loop = asyncio.get_running_loop()
-
-                def activate_window() -> bool:
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    return restore_foreground_window(hwnd)
-
-                activated = await loop.run_in_executor(None, activate_window)
-                result = {"activated": activated, "hwnd": hwnd}
-            else:
-                result = await bring_to_front()
-            if not isinstance(result, dict):
-                return build_error_response(
-                    f"bring_to_front: backend returned non-dict response ({type(result).__name__})",
-                    state=session.state.state,
+                    and getattr(session, "client", None) is dap_client
+                    and (
+                        dap_client is None or getattr(dap_client, "is_running", False) is True
+                    )
+                    and _backend_holder["instance"] is ui
                 )
 
-            if result.get("activated") is True:
-                session.stealth_mode = False
-                result["stealth_mode"] = False
+            async with connection_lock:
+                if session_is_current():
+                    await _join_launch_foreground_restore()
+
+                if _is_flaui_backend(ui) and session_is_current():
+                    result = await ui.bring_to_front(
+                        activation=activation, is_current=session_is_current
+                    )
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None, lambda: activation.request(is_current=session_is_current)
+                    )
+                    result = activation.observe(is_current=session_is_current)
+
+                backend_activated = result["activated"] is True
+                result.update(activation.observe(is_current=session_is_current))
+                result["activated"] = backend_activated and result["activated"]
+
+                current = session_is_current()
+                if current:
+                    if result.get("stealth_mode") is False or (
+                        not _is_flaui_backend(ui) and result["activated"] is True
+                    ):
+                        session.stealth_mode = False
+                    mode = result.get("stealth_mode", getattr(session, "stealth_mode", None))
+                else:
+                    # An old reconnect must not overwrite a replacement session.
+                    mode = getattr(session, "stealth_mode", None)
+                    result["activated"] = False
+
+                result["stealth_mode"] = mode
 
             return build_response(data=result, state=session.state.state)
         except Exception as e:
@@ -1637,8 +1675,8 @@ def register_ui_tools(
             crop_y: Raw-image crop origin Y; requires all crop arguments.
             crop_width: Raw-image crop width; requires all crop arguments.
             crop_height: Raw-image crop height; requires all crop arguments.
-            expected_hwnd: Require this HWND and physical raster size before persisting
-                evidence.
+            expected_hwnd: Capture this HWND; a different returned HWND fails without pixels.
+                A size-only mismatch returns a preview without persisted evidence.
             expected_physical_width: Required raw raster width in physical pixels with
                 expected_hwnd.
             expected_physical_height: Required raw raster height in physical pixels with
@@ -1781,6 +1819,7 @@ def register_ui_tools(
                         strict_target_values = cast(dict[str, int | str], strict_target)
                         bridge_request.update(
                             {
+                                "hwnd": cast(int, strict_target_values["hwnd"]),
                                 "typed_bitblt_fallback": True,
                                 "expected_hwnd": cast(int, strict_target_values["hwnd"]),
                                 "expected_physical_width": cast(int, strict_target_values["width"]),
@@ -1821,6 +1860,17 @@ def register_ui_tools(
                             "falling back to HWND capture"
                         )
                     else:
+                        if (
+                            strict_target_requested
+                            and type(bridge_result.get("hwnd")) is int
+                            and bridge_result["hwnd"] != expected_hwnd
+                        ):
+                            response = build_error_response(
+                                "Bridge screenshot HWND does not match the expected capture target",
+                                state=session.state.state,
+                            )
+                            response["code"] = "PHYSICAL_CAPTURE_MISMATCH"
+                            return response
                         bridge_screenshot = bridge_result
                         try:
                             png_bytes = base64.b64decode(bridge_result["base64"], validate=evidence)
@@ -2392,11 +2442,12 @@ def register_ui_tools(
 
             # Cache elements for ui_click_annotated
             _annotation_generation += 1
+            generation = _annotation_generation
             _last_annotation = {
                 "elements": elements,
                 "window_rect": window_rect,
                 "hwnd": hwnd,
-                "generation": _annotation_generation,
+                "generation": generation,
             }
 
             # Convert to optimal format
@@ -2446,7 +2497,7 @@ def register_ui_tools(
                 "preview_width": preview_w,
                 "elements": elem_index,
                 "element_count": len(elements),
-                "generation": _annotation_generation,
+                "generation": generation,
                 "format": safe_format,
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
@@ -2458,7 +2509,7 @@ def register_ui_tools(
                 hd_path = session.temp_manager.save_screenshot(
                     sid,
                     hd_bytes,
-                    f"annotated_{_annotation_generation:04d}.{safe_format}",
+                    f"annotated_{generation:04d}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
@@ -2489,30 +2540,29 @@ def register_ui_tools(
 
         Args:
             element_id: Element ID number from the annotated screenshot
-            generation: Generation counter from the screenshot response (optional, warns if stale)
+            generation: Optional screenshot generation; a mismatch is rejected before clicking.
         """
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            if _last_annotation is None:
+            annotation = _last_annotation
+            if annotation is None:
                 return build_error_response(
                     "No annotation data. Call ui_take_annotated_screenshot first.",
                     state=session.state.state,
                 )
 
-            # Warn if annotation data may be stale
-            stale_warning = None
-            current_gen = _last_annotation.get("generation", 0)
+            current_gen = annotation.get("generation", 0)
             if generation is not None and generation != current_gen:
-                stale_warning = (
-                    f"Annotation data may be stale: requested generation {generation}, "
-                    f"current is {current_gen}. Consider retaking the screenshot."
+                return build_error_response(
+                    f"Annotation generation {generation} is stale; current is {current_gen}. "
+                    "Take a new annotated screenshot before clicking.",
+                    state=session.state.state,
                 )
-                logger.warning(stale_warning)
 
-            elements = _last_annotation["elements"]
+            elements = annotation["elements"]
             target = None
             for e in elements:
                 if e["id"] == element_id:
@@ -2531,6 +2581,12 @@ def register_ui_tools(
             center_y = bounds["y"] + bounds["height"] // 2
 
             ui = await _ensure_ui_connected()
+            if annotation is not _last_annotation:
+                return build_error_response(
+                    "Annotation changed while preparing the click. "
+                    "Take a new annotated screenshot before clicking.",
+                    state=session.state.state,
+                )
             await ui.click_at(center_x, center_y)
 
             response_data: dict[str, Any] = {
@@ -2538,8 +2594,6 @@ def register_ui_tools(
                 "element": target["name"],
                 "position": {"x": center_x, "y": center_y},
             }
-            if stale_warning:
-                response_data["warning"] = stale_warning
 
             return build_response(
                 data=response_data,

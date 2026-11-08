@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections import deque
@@ -43,6 +44,9 @@ class FakeInstrumentationSession:
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
+        group_id: str | None = None,
     ) -> Breakpoint:
         self._next_breakpoint_id += 1
         bp = Breakpoint(
@@ -54,13 +58,15 @@ class FakeInstrumentationSession:
             id=self._next_breakpoint_id,
             dap_line=line + 1,
         )
-        self.breakpoints.add(bp)
-        return bp
+        return self.breakpoints.add(bp, tracepoint_id=tracepoint_id, group_id=group_id)
 
-    async def remove_breakpoint(self, file: str, line: int) -> bool:
+    async def remove_breakpoint(
+        self, file: str, line: int, *, tracepoint_id: str | None = None,
+        group_id: str | None = None,
+    ) -> bool:
         if self.leak_breakpoint_removal:
             return False
-        return self.breakpoints.remove(file, line)
+        return self.breakpoints.remove(file, line, tracepoint_id=tracepoint_id, group_id=group_id)
 
     def validate_path(self, file: str, must_exist: bool = True) -> str:
         if self.validation_failure:
@@ -79,14 +85,56 @@ class FailingAddInstrumentationSession(FakeInstrumentationSession):
         line: int,
         condition: str | None = None,
         hit_condition: str | None = None,
+        *,
+        tracepoint_id: str | None = None,
+        group_id: str | None = None,
     ) -> Breakpoint:
         if line == self.failing_line:
             raise RuntimeError("breakpoint setup failed")
-        return await super().add_breakpoint(file, line, condition, hit_condition)
+        return await super().add_breakpoint(
+            file, line, condition, hit_condition, tracepoint_id=tracepoint_id, group_id=group_id
+        )
 
 
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
     pass
+
+@pytest.mark.asyncio
+async def test_clear_during_group_creation_does_not_lose_ownership(monkeypatch) -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_add = session.add_breakpoint
+
+    async def held_add(*args: Any, **kwargs: Any) -> Breakpoint:
+        result = await original_add(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(session, "add_breakpoint", held_add)
+    create = asyncio.create_task(service.create_group(
+        "flow", breakpoints=[{"file": "C:/repo/Program.cs", "line": 10}]
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    clear = asyncio.create_task(service.clear_group("flow"))
+    await asyncio.sleep(0)
+    early = clear.done()
+    try:
+        if early:
+            assert clear.result().to_dict()["status"] == "FAIL"
+    finally:
+        release.set()
+        created = (await create).to_dict()
+    assert created["status"] == "PASS"
+    if early:
+        assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+        assert session.breakpoints.get_for_file("C:/repo/Program.cs")
+    else:
+        assert (await clear).to_dict()["status"] == "PASS"
+        assert (await service.inspect_group("flow")).to_dict()["status"] == "FAIL"
+        assert not session.breakpoints.get_for_file("C:/repo/Program.cs")
+
 
 
 @pytest.mark.asyncio
@@ -149,6 +197,123 @@ async def test_duplicate_group_rejected_without_mutating_existing_group() -> Non
 
 
 @pytest.mark.asyncio
+async def test_group_creation_preserves_existing_user_breakpoint_intent() -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    await session.add_breakpoint(source, 10, condition="value > 0")
+
+    created = (await service.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+
+    assert created["status"] == "PASS"
+    assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+
+
+@pytest.mark.asyncio
+async def test_group_cleanup_preserves_existing_user_breakpoint_intent() -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    await session.add_breakpoint(source, 10, condition="value > 0")
+    created = (await service.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+
+    cleared = (await service.clear_group("flow")).to_dict()
+
+    assert created["status"] == "PASS"
+    assert cleared["status"] == "PASS"
+    assert (await service.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+
+
+@pytest.mark.asyncio
+async def test_shared_groups_clear_independently_and_preserve_user_breakpoint() -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    await session.add_breakpoint(source, 10, condition="value > 0")
+    first = (await service.create_group(
+        "first", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+    second = (await service.create_group(
+        "second", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+
+    first_clear = (await service.clear_group("first")).to_dict()
+
+    assert first["status"] == "PASS"
+    assert second["status"] == "PASS"
+    assert first_clear["status"] == "PASS"
+    assert (await service.inspect_group("first")).to_dict()["status"] == "FAIL"
+    assert (await service.inspect_group("second")).to_dict()["status"] == "PASS"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+
+    assert await session.remove_breakpoint(source, 10)
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert not breakpoints[0].user_owned
+    assert (await service.inspect_group("second")).to_dict()["status"] == "PASS"
+    await session.add_breakpoint(source, 10, condition="value > 0")
+
+    second_clear = (await service.clear_group("second")).to_dict()
+
+    assert second_clear["status"] == "PASS"
+    assert (await service.inspect_group("second")).to_dict()["status"] == "FAIL"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+
+
+@pytest.mark.asyncio
+async def test_direct_user_owner_can_be_added_and_removed_while_group_remains() -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    created = (await service.create_group(
+        "flow", breakpoints=[{"file": source, "line": 10}]
+    )).to_dict()
+
+    await session.add_breakpoint(source, 10, condition="value > 0")
+
+    assert created["status"] == "PASS"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].user_owned
+    assert breakpoints[0].condition == "value > 0"
+    assert await session.remove_breakpoint(source, 10)
+    assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+    breakpoints = session.breakpoints.get_for_file(source)
+    assert len(breakpoints) == 1
+    assert breakpoints[0].line == 10
+    assert not breakpoints[0].user_owned
+
+    cleared = (await service.clear_group("flow")).to_dict()
+
+    assert cleared["status"] == "PASS"
+    assert (await service.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    assert session.breakpoints.get_for_file(source) == []
+
+
+@pytest.mark.asyncio
 async def test_clear_group_reports_leaked_group_owned_breakpoints() -> None:
     session = FakeInstrumentationSession()
     service = InstrumentationGroupService(session)
@@ -164,8 +329,28 @@ async def test_clear_group_reports_leaked_group_owned_breakpoints() -> None:
     assert cleared["leaks"] == [
         {"kind": "breakpoint", "file": os.path.normpath(source), "line": 10}
     ]
-    assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+    assert (await service.inspect_group("flow")).to_dict()["status"] == "FAIL"
+    assert "flow" in session.runtime_smoke.instrumentation_groups
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leak", [False, True])
+async def test_group_tracepoint_cleanup_preserves_user_and_detects_leak(
+    leak: bool,
+) -> None:
+    session = FakeInstrumentationSession()
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+    await session.add_breakpoint(source, 10)
+    await service.create_group(
+        "flow", tracepoints=[{"file": source, "line": 10, "expression": "i"}]
+    )
+    session.leak_breakpoint_removal = leak
+
+    cleared = (await service.clear_group("flow")).to_dict()
+
+    assert cleared["status"] == ("FAIL" if leak else "PASS")
+    assert session.breakpoints.get_for_file(source)[0].user_owned
 
 @pytest.mark.asyncio
 async def test_unknown_group_clear_fails_without_mutating_other_groups() -> None:
@@ -202,18 +387,26 @@ async def test_create_group_rolls_back_partial_breakpoints_and_tracepoints() -> 
 
 
 @pytest.mark.asyncio
-async def test_runtime_smoke_reset_clears_groups_idempotently() -> None:
+async def test_runtime_smoke_reset_retains_groups_until_async_cleanup() -> None:
     session = FakeInstrumentationSession()
     service = InstrumentationGroupService(session)
-
+    source = "C:/repo/Program.cs"
     await service.create_group(
-        "flow",
-        breakpoints=[{"file": "C:/repo/Program.cs", "line": 10}],
+        "flow", breakpoints=[{"file": source, "line": 10}],
+        tracepoints=[{"file": source, "line": 20, "expression": "i"}],
     )
-    session.runtime_smoke.reset()
-    session.runtime_smoke.reset()
 
-    assert session.runtime_smoke.instrumentation_groups == {}
+    first = session.runtime_smoke.reset()
+    second = session.runtime_smoke.reset()
+
+    assert first and second
+    assert "flow" in session.runtime_smoke.instrumentation_groups
+    assert len(session.breakpoints.get_for_file(source)) == 2
+    assert session._tracepoint_manager.tracepoints
+    assert (await service.clear_group("flow")).to_dict()["status"] == "PASS"
+    assert session.runtime_smoke.reset() == ()
+    assert session.breakpoints.get_for_file(source) == []
+    assert session._tracepoint_manager.tracepoints == {}
 
 
 @pytest.mark.asyncio

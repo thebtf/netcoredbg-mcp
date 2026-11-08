@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 _DEFAULT_FORCE_TIMEOUT = 2.0
+_POLICY_ACK_TIMEOUT = 2.0
 _launch_reclaimers: set[asyncio.Task[None]] = set()
 
 
@@ -75,6 +76,10 @@ class PosixOwnedProcess:
         self._cleanup_task: asyncio.Task[PosixCleanupResult] | None = None
         self._result: PosixCleanupResult | None = None
         self._closed = False
+        self._attach_safe = False
+        self._policy_uncertain = False
+        self._attach_ready: asyncio.Future[None] | None = None
+        self._launch_ready: asyncio.Future[None] | None = None
         self._messages = asyncio.create_task(self._read_messages())
 
     @property
@@ -184,11 +189,67 @@ class PosixOwnedProcess:
             raise RuntimeError("POSIX guardian lost before reporting the adapter exit")
         return self._returncode
 
+    async def prepare_attach_safe(self) -> None:
+        if self._closed or self._control_eof or self._cleanup_task is not None:
+            raise RuntimeError("POSIX guardian is already closing")
+        if self._launch_ready is not None:
+            raise RuntimeError("POSIX guardian launch-mode restoration is unresolved")
+        if self._attach_safe and not self._policy_uncertain:
+            return
+        self._attach_safe = True
+        self._policy_uncertain = True
+
+        async def handshake() -> None:
+            if self._attach_ready is None:
+                self._attach_ready = asyncio.get_running_loop().create_future()
+                self._control_writer.write(b'{"command":"attach_safe"}\n')
+                await self._control_writer.drain()
+            await asyncio.shield(self._attach_ready)
+
+        try:
+            await asyncio.wait_for(handshake(), timeout=_POLICY_ACK_TIMEOUT)
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("POSIX guardian attach-safety acknowledgement timed out") from error
+        self._policy_uncertain = False
+
+    async def restore_pre_attach(self) -> None:
+        if self._closed or self._control_eof:
+            raise RuntimeError("POSIX guardian is unavailable for policy restoration")
+        self._policy_uncertain = True
+
+        async def handshake() -> None:
+            if self._launch_ready is None:
+                self._launch_ready = asyncio.get_running_loop().create_future()
+                self._control_writer.write(b'{"command":"launch_mode"}\n')
+                await self._control_writer.drain()
+            await asyncio.shield(self._launch_ready)
+
+        try:
+            await asyncio.wait_for(handshake(), timeout=_POLICY_ACK_TIMEOUT)
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("POSIX guardian launch-mode acknowledgement timed out") from error
+        self._attach_safe = False
+        self._policy_uncertain = False
+        self._attach_ready = None
+        self._launch_ready = None
+
+    async def observe_passive(self, timeout: float = 0.0) -> PosixCleanupResult:
+        if not self._attach_safe:
+            raise RuntimeError("POSIX guardian is not attach-safe")
+        if self._returncode is None and timeout > 0:
+            try:
+                await asyncio.wait_for(self._root_exit.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+        return PosixCleanupResult(self._returncode, self._guardian.returncode, False, False)
+
     async def cleanup(self, grace_timeout: float, force_timeout: float) -> PosixCleanupResult:
         """Join one cleanup; a cancelled waiter does not cancel the retained owner."""
 
         if any(not math.isfinite(value) or value < 0 for value in (grace_timeout, force_timeout)):
             raise ValueError("cleanup timeouts must be finite and non-negative")
+        if self._attach_safe:
+            return await self.observe_passive(grace_timeout)
         if self._result is not None and self._result.complete:
             return self._result
         if self._cleanup_task is None or self._cleanup_task.done():
@@ -270,6 +331,14 @@ class PosixOwnedProcess:
                         raise ValueError("invalid adapter exit status")
                     self._returncode = code
                     self._root_exit.set()
+                elif event == "attach_safe":
+                    if self._attach_ready is None or self._attach_ready.done():
+                        raise ValueError("unexpected attach-safe acknowledgement")
+                    self._attach_ready.set_result(None)
+                elif event == "launch_mode":
+                    if self._launch_ready is None or self._launch_ready.done():
+                        raise ValueError("unexpected launch-mode acknowledgement")
+                    self._launch_ready.set_result(None)
                 elif event == "group_signal_sent":
                     self._group_signal_sent = True
                     self._control_failed = False
@@ -291,6 +360,14 @@ class PosixOwnedProcess:
             self._control_failed = True
         finally:
             self._control_eof = True
+            if self._attach_ready is not None and not self._attach_ready.done():
+                self._attach_ready.set_exception(
+                    RuntimeError("POSIX guardian lost during preparation")
+                )
+            if self._launch_ready is not None and not self._launch_ready.done():
+                self._launch_ready.set_exception(
+                    RuntimeError("POSIX guardian lost during restoration")
+                )
             self._root_exit.set()
             if not self._started.done():
                 self._started.set_exception(RuntimeError("POSIX guardian admission failed"))
@@ -403,6 +480,7 @@ def _guardian_main(control_fd: int) -> int:
     _close_guardian_stdio()
     _notify(control, "started", pid=root.pid)
     reported = False
+    attach_safe = False
 
     def report_root() -> None:
         nonlocal reported
@@ -422,6 +500,9 @@ def _guardian_main(control_fd: int) -> int:
             except OSError:
                 chunk = b""
             if not chunk:
+                if attach_safe:
+                    root.wait()
+                    return 0
                 _guardian_cleanup(control, root, report_root, 0.1, _DEFAULT_FORCE_TIMEOUT)
                 continue
             pending += chunk
@@ -430,6 +511,14 @@ def _guardian_main(control_fd: int) -> int:
         line, pending = pending.split(b"\n", 1)
         try:
             command = json.loads(line)
+            if command["command"] == "attach_safe":
+                attach_safe = True
+                _notify(control, "attach_safe")
+                continue
+            if command["command"] == "launch_mode":
+                attach_safe = False
+                _notify(control, "launch_mode")
+                continue
             if command["command"] != "cleanup":
                 raise ValueError("unknown guardian command")
             grace = float(command["grace_timeout"])
@@ -437,6 +526,9 @@ def _guardian_main(control_fd: int) -> int:
             if any(not math.isfinite(value) or value < 0 for value in (grace, force)):
                 raise ValueError("invalid guardian deadlines")
         except (ValueError, TypeError, KeyError):
+            _notify(control, "cleanup_error")
+            continue
+        if attach_safe:
             _notify(control, "cleanup_error")
             continue
         _guardian_cleanup(control, root, report_root, grace, force)

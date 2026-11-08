@@ -15,7 +15,7 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "\\S",
-      "description": "Opaque process/session-local stopped-epoch token, obtained only from a successful get_call_stack with includeInspectionContext=true. Carry each numeric ID with the context from the same observation; the token does not prove that the numeric ID was ever issued. Execution, stopped replacement, terminal, invalidated, thread-exit, reader failure and cleanup invalidate the inspection epoch session-wide."
+      "description": "Opaque process/session-local stopped-epoch token, obtained from get_call_stack with includeInspectionContext=true or from a successful set_variable. A mutation replaces the previous context. Carry each numeric ID with the context from the same observation; the token does not prove that the numeric ID was ever issued. Execution, stopped replacement, terminal, invalidated, thread-exit, reader failure and cleanup invalidate the inspection epoch session-wide."
     },
     "lifecycleState": {
       "type": "object",
@@ -51,6 +51,84 @@
       },
       "additionalProperties": false
     },
+    "debugState": {
+      "type": "object",
+      "required": [
+        "event",
+        "stopReason",
+        "exitCode",
+        "loadedSources",
+        "loadedSourcesComplete"
+      ],
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "currentThreadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "loadedSources": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "maxProperties": 256,
+              "additionalProperties": {
+                "$ref": "#/$defs/loadedSource"
+              }
+            }
+          ]
+        },
+        "loadedSourcesComplete": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "loadedSourcesComplete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "loadedSources": {
+                "type": "object"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "loadedSources": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "startDebugArguments": {
       "type": "object",
       "properties": {
@@ -64,6 +142,201 @@
           "items": {
             "$ref": "#/$defs/sourceBreakpoint"
           }
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopAtEntry": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stop_at_entry": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "justMyCode": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "env": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "projectRoot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "launchProfile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "launch_profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preBuild": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "pre_build": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "buildProject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "build_project": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "buildConfiguration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "Debug",
+            "Release",
+            null
+          ]
+        },
+        "build_configuration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "Debug",
+            "Release",
+            null
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "stopAtEntry",
+              "stop_at_entry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "launchProfile",
+              "launch_profile"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "preBuild",
+              "pre_build"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "buildProject",
+              "build_project"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "buildConfiguration",
+              "build_configuration"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "launchEnvironmentMetadata": {
+      "type": "object",
+      "required": [
+        "source",
+        "profile",
+        "path",
+        "variableNames",
+        "appliedCount"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "tool-argument",
+            "project-launch-profile"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variableNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "appliedCount": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -136,11 +409,52 @@
       },
       "additionalProperties": false
     },
+    "getModulesArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
+    "getProgressArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
+    "getLoadedSourcesArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
     "getCallStackArguments": {
       "type": "object",
       "required": [
-        "debugSessionId",
-        "threadId"
+        "debugSessionId"
       ],
       "properties": {
         "debugSessionId": {
@@ -148,7 +462,18 @@
           "minLength": 1
         },
         "threadId": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": -2147483648,
           "maximum": 2147483647
         },
@@ -167,7 +492,17 @@
           "default": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        }
+      ]
     },
     "getScopesArguments": {
       "type": "object",
@@ -211,6 +546,83 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 2147483647
+        },
+        "start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "evaluateExpressionArguments": {
+      "type": "object",
+      "description": "All inputs are explicit. DAP watch can execute code or mutate the debuggee; it is not read-only or idempotent.",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "frameId",
+        "expression"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "frameId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "expression": {
+          "type": "string",
+          "description": "Forwarded exactly once, unchanged, with the explicit frameId and DAP context watch. No automatic retry or implicit frame selection."
+        }
+      },
+      "additionalProperties": false
+    },
+    "setVariableArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "variablesReference",
+        "name",
+        "value"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -218,8 +630,7 @@
     "stepOverArguments": {
       "type": "object",
       "required": [
-        "debugSessionId",
-        "threadId"
+        "debugSessionId"
       ],
       "properties": {
         "debugSessionId": {
@@ -227,18 +638,132 @@
           "minLength": 1
         },
         "threadId": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": -2147483648,
           "maximum": 2147483647
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        }
+      ]
+    },
+    "stepIntoArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threadId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "targetId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "target_id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "targetId",
+              "target_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "targetId"
+                ]
+              },
+              {
+                "required": [
+                  "target_id"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "inspectionContextId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "inspectionContextId"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "stepOutArguments": {
+      "$ref": "#/$defs/stepOverArguments"
+    },
+    "getStepInTargetsArguments": {
+      "$ref": "#/$defs/getScopesArguments"
     },
     "continueArguments": {
       "type": "object",
       "required": [
-        "debugSessionId",
-        "threadId"
+        "debugSessionId"
       ],
       "properties": {
         "debugSessionId": {
@@ -247,7 +772,53 @@
           "pattern": "\\S"
         },
         "threadId": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        }
+      ]
+    },
+    "getExceptionInfoArguments": {
+      "$ref": "#/$defs/continueArguments"
+    },
+    "pauseArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "threadId": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": -2147483648,
           "maximum": 2147483647
         }
@@ -302,6 +873,29 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "configureExceptionsArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "filters": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -768,6 +1362,35 @@
       ],
       "additionalProperties": false
     },
+    "searchOutputArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "contextLines": {
+          "type": "integer",
+          "default": 2
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "pattern"
+      ],
+      "additionalProperties": false
+    },
     "breakpointAdded": {
       "type": "object",
       "required": [
@@ -827,6 +1450,44 @@
         },
         "removed": {
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "exceptionFiltersAcknowledged": {
+      "type": "object",
+      "required": [
+        "kind",
+        "filters",
+        "breakpoints"
+      ],
+      "properties": {
+        "kind": {
+          "const": "exception_filters_acknowledged"
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "breakpoints": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "verified"
+            ],
+            "properties": {
+              "verified": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -926,6 +1587,402 @@
         },
         "output": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "pattern",
+        "matchCount",
+        "matches"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_success"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "matchCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matches": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "lineNumber",
+              "match",
+              "context"
+            ],
+            "properties": {
+              "lineNumber": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "match": {
+                "type": "string"
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchInvalidPattern": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_invalid_pattern"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_INVALID_PATTERN"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_timeout"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_too_large"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_TOO_LARGE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "loadedSource": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "sourceReference",
+        "origin",
+        "presentationHint",
+        "adapterData"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceReference": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presentationHint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapterData": {}
+      },
+      "additionalProperties": false
+    },
+    "loadedSourcesSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "sources",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "loaded_sources_success"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/loadedSource"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_unsupported"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_refused"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_protocol_error"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeModule": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "path",
+        "version",
+        "isOptimized",
+        "symbolStatus"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isOptimized": {
+          "type": "boolean"
+        },
+        "symbolStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "modulesSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "modules",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "modules_success"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeModule"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeProgress": {
+      "type": "object",
+      "required": [
+        "progressId",
+        "title",
+        "message",
+        "percentage",
+        "cancellable",
+        "startedAt"
+      ],
+      "properties": {
+        "progressId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "percentage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "cancellable": {
+          "type": "boolean"
+        },
+        "startedAt": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "progressSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "progress",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "progress_success"
+        },
+        "progress": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeProgress"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInventoryIncomplete": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "kind": {
+          "const": "runtime_inventory_incomplete"
+        },
+        "error": {
+          "const": "RUNTIME_INVENTORY_INCOMPLETE"
+        },
+        "tool": {
+          "enum": [
+            "get_modules",
+            "get_progress"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInventoryTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "kind": {
+          "const": "runtime_inventory_too_large"
+        },
+        "error": {
+          "const": "RUNTIME_INVENTORY_TOO_LARGE"
+        },
+        "tool": {
+          "enum": [
+            "get_modules",
+            "get_progress"
+          ]
         }
       },
       "additionalProperties": false
@@ -1168,6 +2225,9 @@
           "items": {
             "$ref": "#/$defs/initialBreakpoint"
           }
+        },
+        "launchEnvironment": {
+          "$ref": "#/$defs/launchEnvironmentMetadata"
         }
       },
       "additionalProperties": false
@@ -1187,7 +2247,23 @@
           "$ref": "#/$defs/debugSessionId"
         },
         "state": {
-          "$ref": "#/$defs/lifecycleState"
+          "$ref": "#/$defs/debugState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "debugStateTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "debug_state_too_large"
+        },
+        "error": {
+          "const": "DEBUG_STATE_TOO_LARGE"
         }
       },
       "additionalProperties": false
@@ -1279,6 +2355,113 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepInTargetsSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "targets"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_in_targets_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "targets": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              },
+              "label": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "endLine": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "endColumn": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_unsupported"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_PROTOCOL_ERROR"
         }
       },
       "additionalProperties": false
@@ -1420,6 +2603,119 @@
       },
       "additionalProperties": false
     },
+    "exceptionInfoSuccess": {
+      "type": "object",
+      "description": "Current stopped-thread observation. The complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive; the exception body is preserved without truncating nested details or extension fields.",
+      "required": [
+        "kind",
+        "exception"
+      ],
+      "properties": {
+        "kind": {
+          "const": "exception_info_success"
+        },
+        "exception": {
+          "type": "object",
+          "required": [
+            "exceptionId",
+            "breakMode"
+          ],
+          "properties": {
+            "exceptionId": {
+              "type": "string"
+            },
+            "breakMode": {
+              "enum": [
+                "never",
+                "always",
+                "unhandled",
+                "userUnhandled"
+              ]
+            },
+            "description": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "evaluateSuccess": {
+      "type": "object",
+      "description": "Complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive. Success is a current adapter response, not a read-only or no-side-effect claim.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "result",
+        "type",
+        "variablesReference"
+      ],
+      "properties": {
+        "kind": {
+          "const": "evaluate_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "result": {
+          "type": "string"
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024,
+          "description": "Null when the adapter omits type or explicitly returns null. A present string is limited to 1024 UTF-8 bytes."
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "A positive reference can be expanded with get_variables using the same current inspectionContextId; zero is a leaf."
+        }
+      },
+      "additionalProperties": false
+    },
+    "setVariableSuccess": {
+      "type": "object",
+      "description": "The complete serialized result is bounded to 262144 UTF-8 bytes. The returned context replaces the old context; mutation is not read-only or idempotent.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "value",
+        "type",
+        "variablesReference"
+      ],
+      "properties": {
+        "kind": {
+          "const": "set_variable_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "value": {
+          "type": "string"
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "stepOverSuccess": {
       "type": "object",
       "required": [
@@ -1472,6 +2768,138 @@
       "properties": {
         "kind": {
           "const": "step_over_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepIntoSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_success"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepIntoTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepIntoTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_success"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_timed_out"
         },
         "threadId": {
           "type": "integer",
@@ -1565,6 +2993,48 @@
       },
       "additionalProperties": false
     },
+    "pauseAcknowledged": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pause_acknowledged"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "pauseTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pause_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -1645,6 +3115,57 @@
       },
       "additionalProperties": false
     },
+    "dapExceptionInfoUnsupported": {
+      "type": "object",
+      "description": "The capability was absent or false at admission; no exceptionInfo request was written. Revocation alone does not invalidate an already admitted response in the same stopped epoch.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_unsupported"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionInfoRefused": {
+      "type": "object",
+      "description": "The stopped target was unavailable or stale, the adapter refused the request, or lifecycle invalidation preceded reader correlation. No stale exception body is returned and no retry is performed.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_refused"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionInfoProtocolError": {
+      "type": "object",
+      "description": "A malformed, oversized, timed-out or failed exchange uses lease-release-before-close-and-drain and returns no adapter diagnostic or exception body.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_protocol_error"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapScopesRefused": {
       "type": "object",
       "required": [
@@ -1709,6 +3230,121 @@
       },
       "additionalProperties": false
     },
+    "dapEvaluateRefused": {
+      "type": "object",
+      "description": "The inspection context was unavailable or stale before writer handoff; no evaluate request was sent.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_refused"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapEvaluateFailed": {
+      "type": "object",
+      "description": "The adapter returned a negative evaluate response. Expression side effects may already have occurred; no no-effect claim or automatic retry follows.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_failed"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapEvaluateOutcomeUnknown": {
+      "type": "object",
+      "description": "A stale post-write response or malformed, oversized, timed-out or failed exchange cannot establish a usable result or absence of expression effects. The session is drained; never retry automatically. Caller cancellation after a possible write also invalidates inspection and drains before server cleanup finishes, without inventing a result.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_outcome_unknown"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_OUTCOME_UNKNOWN"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_unsupported"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_refused"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_failed"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableOutcomeUnknown": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_outcome_unknown"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_OUTCOME_UNKNOWN"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapStepOverRefused": {
       "type": "object",
       "required": [
@@ -1741,6 +3377,70 @@
       },
       "additionalProperties": false
     },
+    "dapStepIntoRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_into_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_INTO_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepIntoProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_into_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_INTO_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepOutRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_out_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_OUT_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepOutProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_out_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_OUT_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapContinueRefused": {
       "type": "object",
       "required": [
@@ -1769,6 +3469,70 @@
         },
         "error": {
           "const": "DAP_CONTINUE_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_refused"
+        },
+        "error": {
+          "const": "DAP_PAUSE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseNoThreads": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_no_threads"
+        },
+        "error": {
+          "const": "DAP_PAUSE_NO_THREADS"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_timeout"
+        },
+        "error": {
+          "const": "DAP_PAUSE_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_protocol_error"
+        },
+        "error": {
+          "const": "DAP_PAUSE_PROTOCOL_ERROR"
         }
       },
       "additionalProperties": false
@@ -1837,6 +3601,275 @@
       },
       "additionalProperties": false
     },
+    "dapExceptionFiltersUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_unsupported"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionFiltersRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_refused"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionFiltersProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_protocol_error"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildProjectRequired": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_project_required"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_PROJECT_REQUIRED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildProjectInvalid": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_project_invalid"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_PROJECT_INVALID"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildBusy": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_busy"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_BUSY"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildCleanupUnconfirmed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_cleanup_unconfirmed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_CLEANUP_UNCONFIRMED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_timeout"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildStartFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_start_failed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_START_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugProgramUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_program_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_PROGRAM_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugBuildFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "stage",
+        "exitCode",
+        "stdout",
+        "stderr",
+        "stdoutTruncated",
+        "stderrTruncated"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_build_failed"
+        },
+        "error": {
+          "const": "START_DEBUG_BUILD_FAILED"
+        },
+        "stage": {
+          "enum": [
+            "restore",
+            "build"
+          ]
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "stdout": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "stderr": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "stdoutTruncated": {
+          "type": "boolean"
+        },
+        "stderrTruncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugProjectUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_project_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_PROJECT_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugLaunchProfileInvalid": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_launch_profile_invalid"
+        },
+        "error": {
+          "const": "START_DEBUG_LAUNCH_PROFILE_INVALID"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugCwdUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_cwd_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_CWD_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugDotnetUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_dotnet_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_DOTNET_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -1849,6 +3882,22 @@
         },
         "error": {
           "const": "START_DEBUG_SOURCE_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLaunchRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_launch_refused"
+        },
+        "error": {
+          "const": "DAP_LAUNCH_REFUSED"
         }
       },
       "additionalProperties": false
@@ -1922,29 +3971,188 @@
             "stop_debug",
             "get_threads",
             "get_call_stack",
+            "get_step_in_targets",
             "get_scopes",
             "get_variables",
+            "evaluate_expression",
+            "set_variable",
+            "get_exception_info",
+            "get_stop_context",
+            "get_exception_context",
+            "get_modules",
+            "get_progress",
+            "get_loaded_sources",
             "step_over",
+            "step_into",
+            "step_out",
             "continue_execution",
+            "pause_execution",
             "add_breakpoint",
             "remove_breakpoint",
+            "configure_exceptions",
             "ui_invoke",
             "ui_invoke_observed",
             "ui_get_window_tree",
             "get_output",
-            "get_output_tail"
+            "get_output_tail",
+            "search_output"
           ]
         }
       },
       "additionalProperties": false
     },
+    "compositeContextSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "state",
+        "reason",
+        "threadId",
+        "inspectionContextId",
+        "frames"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "stop_context_success",
+            "exception_context_success"
+          ]
+        },
+        "state": {
+          "const": "stopped"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "description": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {}
+        },
+        "locals": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/variable"
+          }
+        },
+        "recentOutput": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {}
+        },
+        "exception": {},
+        "totalFrames": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "innerExceptions": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "compositeContextError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "additionalProperties": false,
+      "description": "A fixed redacted context error; no partial context is returned.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "debug_context_unavailable",
+            "debug_context_not_exception",
+            "debug_context_stale",
+            "debug_context_refused",
+            "debug_context_too_large",
+            "debug_context_protocol_error",
+            "debug_context_evaluation_failed",
+            "debug_context_evaluation_unknown"
+          ]
+        },
+        "error": {
+          "enum": [
+            "DEBUG_CONTEXT_UNAVAILABLE",
+            "DEBUG_CONTEXT_NOT_EXCEPTION",
+            "DEBUG_CONTEXT_STALE",
+            "DEBUG_CONTEXT_REFUSED",
+            "DEBUG_CONTEXT_TOO_LARGE",
+            "DEBUG_CONTEXT_PROTOCOL_ERROR",
+            "DEBUG_CONTEXT_EVALUATION_FAILED",
+            "DEBUG_CONTEXT_EVALUATION_UNKNOWN"
+          ]
+        }
+      }
+    },
     "toolStructuredContent": {
       "oneOf": [
+        {
+          "$ref": "#/$defs/compositeContextSuccess"
+        },
+        {
+          "$ref": "#/$defs/compositeContextError"
+        },
         {
           "$ref": "#/$defs/startDebugSuccess"
         },
         {
+          "$ref": "#/$defs/startDebugBuildProjectRequired"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildProjectInvalid"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildBusy"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildCleanupUnconfirmed"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildTimeout"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildStartFailed"
+        },
+        {
+          "$ref": "#/$defs/startDebugProgramUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugBuildFailed"
+        },
+        {
+          "$ref": "#/$defs/startDebugProjectUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugLaunchProfileInvalid"
+        },
+        {
           "$ref": "#/$defs/debugStateSuccess"
+        },
+        {
+          "$ref": "#/$defs/debugStateTooLarge"
         },
         {
           "$ref": "#/$defs/stopDebugSuccess"
@@ -1956,10 +4164,55 @@
           "$ref": "#/$defs/callStackSuccess"
         },
         {
+          "$ref": "#/$defs/stepInTargetsSuccess"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsProtocolError"
+        },
+        {
           "$ref": "#/$defs/scopesSuccess"
         },
         {
           "$ref": "#/$defs/variablesSuccess"
+        },
+        {
+          "$ref": "#/$defs/evaluateSuccess"
+        },
+        {
+          "$ref": "#/$defs/setVariableSuccess"
+        },
+        {
+          "$ref": "#/$defs/exceptionInfoSuccess"
+        },
+        {
+          "$ref": "#/$defs/modulesSuccess"
+        },
+        {
+          "$ref": "#/$defs/progressSuccess"
+        },
+        {
+          "$ref": "#/$defs/loadedSourcesSuccess"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesRefused"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesProtocolError"
+        },
+        {
+          "$ref": "#/$defs/runtimeInventoryIncomplete"
+        },
+        {
+          "$ref": "#/$defs/runtimeInventoryTooLarge"
         },
         {
           "$ref": "#/$defs/stepOverSuccess"
@@ -1971,6 +4224,24 @@
           "$ref": "#/$defs/stepOverTimedOut"
         },
         {
+          "$ref": "#/$defs/stepIntoSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepIntoTerminal"
+        },
+        {
+          "$ref": "#/$defs/stepIntoTimedOut"
+        },
+        {
+          "$ref": "#/$defs/stepOutSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepOutTerminal"
+        },
+        {
+          "$ref": "#/$defs/stepOutTimedOut"
+        },
+        {
           "$ref": "#/$defs/continueStopped"
         },
         {
@@ -1980,10 +4251,19 @@
           "$ref": "#/$defs/continueTimedOut"
         },
         {
+          "$ref": "#/$defs/pauseAcknowledged"
+        },
+        {
+          "$ref": "#/$defs/pauseTerminal"
+        },
+        {
           "$ref": "#/$defs/breakpointAdded"
         },
         {
           "$ref": "#/$defs/breakpointRemoved"
+        },
+        {
+          "$ref": "#/$defs/exceptionFiltersAcknowledged"
         },
         {
           "$ref": "#/$defs/uiInvokeSuccess"
@@ -1996,6 +4276,18 @@
         },
         {
           "$ref": "#/$defs/outputTailSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputSearchSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputSearchInvalidPattern"
+        },
+        {
+          "$ref": "#/$defs/outputSearchTimeout"
+        },
+        {
+          "$ref": "#/$defs/outputSearchTooLarge"
         },
         {
           "$ref": "#/$defs/uiInvokeToolError"
@@ -2028,6 +4320,15 @@
           "$ref": "#/$defs/dapStackTraceProtocolError"
         },
         {
+          "$ref": "#/$defs/dapExceptionInfoUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionInfoRefused"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionInfoProtocolError"
+        },
+        {
           "$ref": "#/$defs/dapScopesRefused"
         },
         {
@@ -2040,10 +4341,43 @@
           "$ref": "#/$defs/dapVariablesProtocolError"
         },
         {
+          "$ref": "#/$defs/dapEvaluateRefused"
+        },
+        {
+          "$ref": "#/$defs/dapEvaluateFailed"
+        },
+        {
+          "$ref": "#/$defs/dapEvaluateOutcomeUnknown"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableRefused"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableFailed"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableOutcomeUnknown"
+        },
+        {
           "$ref": "#/$defs/dapStepOverRefused"
         },
         {
           "$ref": "#/$defs/dapStepOverProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStepIntoRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepIntoProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStepOutRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepOutProtocolError"
         },
         {
           "$ref": "#/$defs/dapContinueRefused"
@@ -2052,7 +4386,28 @@
           "$ref": "#/$defs/dapContinueProtocolError"
         },
         {
+          "$ref": "#/$defs/dapPauseRefused"
+        },
+        {
+          "$ref": "#/$defs/dapPauseNoThreads"
+        },
+        {
+          "$ref": "#/$defs/dapPauseTimeout"
+        },
+        {
+          "$ref": "#/$defs/dapPauseProtocolError"
+        },
+        {
           "$ref": "#/$defs/startDebugSourceUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugCwdUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugDotnetUnavailable"
+        },
+        {
+          "$ref": "#/$defs/dapLaunchRefused"
         },
         {
           "$ref": "#/$defs/dapBreakpointsRefused"
@@ -2071,6 +4426,15 @@
         },
         {
           "$ref": "#/$defs/dapSetBreakpointsProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersRefused"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"

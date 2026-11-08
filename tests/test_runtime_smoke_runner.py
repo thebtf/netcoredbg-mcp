@@ -359,7 +359,11 @@ async def test_runner_cleanup_failure_changes_success_to_fail_with_residue_evide
         if item["operation"] == "runtime_smoke_residue"
     )
     assert residue_failure["remaining_runtime_smoke_state"]["instrumentation_groups"] == ["leak"]
-    assert result["cleanup"]["remaining_runtime_smoke_state"]["instrumentation_groups"] == []
+    assert result["cleanup"]["remaining_runtime_smoke_state"]["instrumentation_groups"] == ["leak"]
+    assert result["cleanup"]["reset_failures"] == [{
+        "name": "instrumentation_groups",
+        "error": "instrumentation groups require asynchronous cleanup",
+    }]
 
 
 @pytest.mark.asyncio
@@ -5715,8 +5719,7 @@ async def test_v1_graceful_cleanup_respects_current_target_ownership(
     from netcoredbg_mcp.session import SessionManager
     from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 
-    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
-    manager = SessionManager()
+    manager = SessionManager(netcoredbg_path="/unused-in-memory-dap")
     generation = object()
     owner = OwnedProcessRef("runtime-smoke-adapter", generation, 44010) if with_owner else None
     client = MagicMock()
@@ -5725,7 +5728,8 @@ async def test_v1_graceful_cleanup_respects_current_target_ownership(
     client.is_running = True
     client.capabilities = {"supportsTerminateRequest": True}
     client.terminate = AsyncMock()
-    client.disconnect = AsyncMock()
+    client.disconnect = AsyncMock(return_value=SimpleNamespace(success=True))
+    client.attach_may_have_dispatched.return_value = True
     client.stop = AsyncMock(
         return_value=OwnerDrainReceipt(
             owner=owner,
@@ -5752,14 +5756,22 @@ async def test_v1_graceful_cleanup_respects_current_target_ownership(
         }
     )
 
-    assert result["status"] == "PASS", result
-    assert result["cleanup"]["debug_stop"]["status"] == "PASS", result
     if target_mode == "attach":
+        assert result["status"] == "FAIL", result
+        assert result["cleanup"]["debug_stop"]["status"] == "FAIL", result
+        assert "CLR detach unconfirmed" in result["cleanup"]["debug_stop"]["reason"]
         client.terminate.assert_not_awaited()
-    client.disconnect.assert_awaited_once_with(terminate=target_mode == "launch")
-    client.stop.assert_awaited_once()
-    assert manager._active_dap_run is None
-    assert manager._debuggee_mode is None
+        client.disconnect.assert_awaited_once_with(terminate=False)
+        client.stop.assert_not_awaited()
+        assert manager._active_dap_run is generation
+        assert manager._debuggee_mode == (generation, "attach")
+    else:
+        assert result["status"] == "PASS", result
+        assert result["cleanup"]["debug_stop"]["status"] == "PASS", result
+        client.disconnect.assert_awaited_once_with(terminate=True)
+        client.stop.assert_awaited_once()
+        assert manager._active_dap_run is None
+        assert manager._debuggee_mode is None
 
 
 @pytest.mark.asyncio
@@ -6279,8 +6291,7 @@ async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_f
 ) -> None:
     from netcoredbg_mcp.session import SessionManager
 
-    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
-    manager = SessionManager()
+    manager = SessionManager(netcoredbg_path="/unused-in-memory-dap")
     generation = object()
     client = MagicMock()
     client.adapter_owner = client.adapter_cleanup_owner = None
@@ -6303,10 +6314,12 @@ async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_f
     async def disconnect_dap(*, terminate):
         assert terminate is False
         events.append("dap.disconnect")
+        return SimpleNamespace(success=True)
 
     async def drain_adapter(**kwargs):
         events.append("adapter.drain")
 
+    client.attach_may_have_dispatched.return_value = True
     client.disconnect = AsyncMock(side_effect=disconnect_dap)
     client.stop = AsyncMock(side_effect=drain_adapter)
     manager._client = client
@@ -6334,12 +6347,10 @@ async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_f
         }
     )
 
-    assert events == (["ui.invoke", "ui.disconnect"] if use_ui else []) + [
-        "dap.disconnect",
-        "adapter.drain",
-    ]
-    assert result["status"] == ("FAIL" if disconnect_fails else "PASS"), result
-    assert result["cleanup"]["debug_stop"]["status"] == "PASS", result
+    assert events == (["ui.invoke", "ui.disconnect"] if use_ui else []) + ["dap.disconnect"]
+    assert result["status"] == "FAIL", result
+    assert result["cleanup"]["debug_stop"]["status"] == "FAIL", result
+    assert "CLR detach unconfirmed" in result["cleanup"]["debug_stop"]["reason"]
     assert ("ui.disconnect" in result["cleanup"]["attempted"]) is use_ui
     if disconnect_fails:
         assert any(
@@ -6360,8 +6371,8 @@ async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_f
     else:
         assert "ui_disconnect" not in result["cleanup"]
     client.terminate.assert_not_awaited()
-    client.stop.assert_awaited_once()
-    assert manager._active_dap_run is None
+    client.stop.assert_not_awaited()
+    assert manager._active_dap_run is generation
 
 
 @pytest.mark.asyncio
@@ -6383,8 +6394,7 @@ async def test_public_v1_plans_disconnect_shared_ui_before_adapter_drain(
 ) -> None:
     from netcoredbg_mcp.session import SessionManager
 
-    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
-    manager = SessionManager()
+    manager = SessionManager(netcoredbg_path="/unused-in-memory-dap")
     generation = object()
     client = MagicMock()
     client.adapter_owner = client.adapter_cleanup_owner = None
@@ -6416,13 +6426,15 @@ async def test_public_v1_plans_disconnect_shared_ui_before_adapter_drain(
         events.append("ui.connect")
         backend_arg.process_id = process_id
 
-    async def disconnect_dap(*, terminate: bool) -> None:
+    async def disconnect_dap(*, terminate: bool) -> SimpleNamespace:
         assert terminate is False
         events.append("dap.disconnect")
+        return SimpleNamespace(success=True)
 
     async def drain_adapter() -> None:
         events.append("adapter.drain")
 
+    client.attach_may_have_dispatched.return_value = True
     client.disconnect = AsyncMock(side_effect=disconnect_dap)
     client.stop = AsyncMock(side_effect=drain_adapter)
     manager._client = client
@@ -6482,13 +6494,11 @@ async def test_public_v1_plans_disconnect_shared_ui_before_adapter_drain(
     )
 
     result = second["data"]
-    assert events == (["ui.connect", "ui.find", "ui.disconnect"] if use_ui else []) + [
-        "dap.disconnect",
-        "adapter.drain",
-    ]
+    assert events == (["ui.connect", "ui.find", "ui.disconnect"] if use_ui else []) + ["dap.disconnect"]
     assert result["completed_steps"] == []
-    assert result["status"] == ("FAIL" if disconnect_fails else "PASS"), second
-    assert result["cleanup"]["debug_stop"]["status"] == "PASS", second
+    assert result["status"] == "FAIL", second
+    assert result["cleanup"]["debug_stop"]["status"] == "FAIL", second
+    assert "CLR detach unconfirmed" in result["cleanup"]["debug_stop"]["reason"]
     assert ("ui.disconnect" in result["cleanup"]["attempted"]) is use_ui
     if use_ui:
         backend_factory.assert_called_once_with(process_registry=manager.process_registry)
@@ -6512,7 +6522,7 @@ async def test_public_v1_plans_disconnect_shared_ui_before_adapter_drain(
     wait_restore.assert_not_awaited()
     client.terminate.assert_not_awaited()
     client.disconnect.assert_awaited_once_with(terminate=False)
-    client.stop.assert_awaited_once()
-    assert manager._active_dap_run is None
-    assert manager._debuggee_mode is None
-    assert manager.state.state == DebugState.IDLE
+    client.stop.assert_not_awaited()
+    assert manager._active_dap_run is generation
+    assert manager._debuggee_mode == (generation, "attach")
+    assert manager.state.state == DebugState.STOPPED
