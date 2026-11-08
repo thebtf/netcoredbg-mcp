@@ -812,6 +812,18 @@ class FlaUIBackend:
         params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("invoke_element", params)
 
+    async def invoke_element_app_dispatch(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke through a bridge route that never falls back to physical input."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
+        return await self._client.call("invoke_element_app_dispatch", params)
+
     async def toggle_element(
         self,
         automation_id: str | None = None,

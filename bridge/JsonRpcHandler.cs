@@ -175,6 +175,7 @@ public static class JsonRpcHandler
             ["expand_collapse"] = SelectionCommands.ExpandCollapse,
             ["screenshot"] = ScreenshotCommands.Screenshot,
             ["invoke_element"] = PatternCommands.InvokeElement,
+            ["invoke_element_app_dispatch"] = PatternCommands.InvokeElementAppDispatch,
             ["toggle_element"] = PatternCommands.ToggleElement,
             ["find_by_xpath"] = ElementCommands.FindByXPath,
             ["find_all_cascade"] = ElementCommands.FindAllCascade,

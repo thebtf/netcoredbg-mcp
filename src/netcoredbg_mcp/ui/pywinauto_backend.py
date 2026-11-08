@@ -216,7 +216,34 @@ class PywinautoBackend:
         root_id: str | None = None,
         xpath: str | None = None,
     ) -> dict[str, Any]:
-        """Invoke element via pywinauto (IUIAutomationInvokePattern)."""
+        """Invoke with the legacy click fallback when InvokePattern is unavailable."""
+        return await self._invoke_element(
+            automation_id, name, control_type, root_id, xpath, allow_physical_fallback=True
+        )
+
+    async def invoke_element_app_dispatch(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke only through InvokePattern, without a click or retry fallback."""
+        return await self._invoke_element(
+            automation_id, name, control_type, root_id, xpath, allow_physical_fallback=False
+        )
+
+    async def _invoke_element(
+        self,
+        automation_id: str | None,
+        name: str | None,
+        control_type: str | None,
+        root_id: str | None,
+        xpath: str | None,
+        *,
+        allow_physical_fallback: bool,
+    ) -> dict[str, Any]:
         if xpath:
             raise NotImplementedError(
                 "XPath search requires FlaUI backend. "
@@ -233,25 +260,38 @@ class PywinautoBackend:
 
         loop = asyncio.get_running_loop()
 
-        def _invoke():
+        def _invoke() -> dict[str, Any]:
             method = "InvokePattern"
             try:
                 iface = element.iface_invoke
                 if iface is not None:
                     iface.Invoke()
-                else:
+                elif allow_physical_fallback:
                     element.click()
                     method = "Click"
+                else:
+                    return {
+                        "status": "BLOCKED",
+                        "reason": "InvokePattern is unavailable; click fallback is prohibited.",
+                        "invoked": False,
+                        "physicalFallbackAttempted": False,
+                    }
             except Exception as exc:
+                if not allow_physical_fallback:
+                    return {
+                        "status": "BLOCKED",
+                        "reason": f"InvokePattern failed; provider outcome may be unknown: {exc}",
+                        "providerOutcome": "unknown",
+                        "physicalFallbackAttempted": False,
+                    }
                 logger.debug("InvokePattern failed, falling back to Click: %s", exc)
                 element.click()
                 method = "Click"
-            return method
+            return {"invoked": True, "method": method}
 
-        method = await loop.run_in_executor(self._ui._executor, _invoke)
+        outcome = await loop.run_in_executor(self._ui._executor, _invoke)
         return {
-            "invoked": True,
-            "method": method,
+            **outcome,
             "automationId": info.automation_id,
             "name": info.name,
             "controlType": info.control_type,
