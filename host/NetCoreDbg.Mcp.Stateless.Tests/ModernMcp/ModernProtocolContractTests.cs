@@ -6304,6 +6304,13 @@ public sealed class ModernProtocolContractTests
             Assert.Equal("build", entry?["progress_id"]?.GetValue<string>());
             Assert.Equal(20, entry?["percentage"]?.GetValue<int>());
             Assert.Equal(entry?["startedAt"]?.GetValue<double>(), entry?["started_at"]?.GetValue<double>());
+            var initialState = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), reader);
+            var initialData = Assert.IsType<JsonObject>(initialState["data"]);
+            Assert.Equal(initialState["state"]?.GetValue<string>(), initialData["state"]?.GetValue<string>());
+            Assert.True(initialData.ContainsKey("debuggeeAlive"));
+            Assert.Null(initialData["debuggeeAlive"]);
+            Assert.Equal("initial", Assert.Single(Assert.IsType<JsonArray>(initialData["modules"]))?["name"]?.GetValue<string>());
+            Assert.Equal(20, initialData["activeProgress"]?["build"]?["percentage"]?.GetValue<int>());
             var before = (await driver.ReadNativeActionsAsync()).Count;
             var sources = await LegacyConsoleCallAsync(driver, "get_loaded_sources", new JsonObject(), reader);
             Assert.Equal(1, sources["data"]?["count"]?.GetValue<int>());
@@ -6317,7 +6324,50 @@ public sealed class ModernProtocolContractTests
             Assert.Equal(75, updatedEntry?["percentage"]?.GetValue<int>());
             var refreshed = await LegacyConsoleCallAsync(driver, "get_loaded_sources", new JsonObject(), reader);
             Assert.Equal(1, refreshed["data"]?["count"]?.GetValue<int>());
+            var updatedState = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), reader);
+            var updatedData = Assert.IsType<JsonObject>(updatedState["data"]);
+            Assert.Equal(updatedState["state"]?.GetValue<string>(), updatedData["state"]?.GetValue<string>());
+            Assert.Equal("updated", Assert.Single(Assert.IsType<JsonArray>(updatedData["modules"]))?["name"]?.GetValue<string>());
+            Assert.Equal(75, updatedData["activeProgress"]?["build"]?["percentage"]?.GetValue<int>());
+            Assert.Contains(Assert.IsType<JsonObject>(updatedData["loadedSources"]),
+                static source => source.Value?["name"]?.GetValue<string>() == "Marker.cs");
             Assert.Equal(2, (await driver.ReadNativeActionsAsync()).Skip(before).Count(action => action.Command == "loadedSources"));
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_ActiveDebugState_IncompleteOrOversizedDetailsReportPartialState(bool oversized)
+    {
+        var events = oversized
+            ? new JsonArray(
+                new JsonObject { ["event"] = "module", ["generatedTextLength"] = 160 * 1024,
+                    ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 1, ["name"] = "module" } } },
+                new JsonObject { ["event"] = "loadedSource", ["generatedTextLength"] = 110 * 1024,
+                    ["body"] = new JsonObject { ["reason"] = "new", ["source"] = new JsonObject { ["name"] = "source" } } })
+            : new JsonArray(new JsonObject { ["event"] = "loadedSource", ["body"] = new JsonObject { ["reason"] = "broken" } });
+        var script = new JsonObject { ["launch"] = events };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "partial-state-owner" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var state = await LegacyConsoleCallAsync(driver, "get_debug_state", new JsonObject(), owner);
+            var data = Assert.IsType<JsonObject>(state["data"]);
+            Assert.Equal(state["state"]?.GetValue<string>(), data["state"]?.GetValue<string>());
+            Assert.NotEqual("idle", state["state"]?.GetValue<string>());
+            Assert.False(data.ContainsKey("loadedSources"));
+            Assert.Contains("only execution state", state["warning"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
         }
         finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
     }

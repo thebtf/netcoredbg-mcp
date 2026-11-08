@@ -711,7 +711,7 @@ internal static class Program
             finally { _legacyGate.Release(); }
         }
 
-        private object CreateLegacyResourceState()
+        private (object Data, string State) CreateLegacyResourceState()
         {
             if (_legacyStarting || _legacyStopping)
                 throw new McpProtocolException("Debug session transition is in progress.", McpErrorCode.InvalidRequest);
@@ -785,12 +785,12 @@ internal static class Program
                 lastInvalidation = idle ? null : state.Invalidation,
                 lastMemoryEvent = idle ? null : state.MemoryEvent,
             };
-            return payload;
+            return (payload, lifecycle.State);
         }
 
         private string SerializeLegacyResourceState()
         {
-            var serialized = JsonSerializer.Serialize(CreateLegacyResourceState());
+            var serialized = JsonSerializer.Serialize(CreateLegacyResourceState().Data);
             if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
                 throw new McpProtocolException("Debug state resource is too large.", McpErrorCode.InvalidRequest);
             return serialized;
@@ -2174,12 +2174,36 @@ internal static class Program
                 if (name == GetDebugState)
                 {
                     var snapshot = LegacySnapshot();
-                    if (snapshot.State == "idle" && !_legacyStopping)
+                    string? warning = null;
+                    if (!_legacyStarting && !_legacyStopping && !_legacyAttachClosing)
                     {
-                        try { return LegacyResponse(CreateLegacyResourceState(), snapshot.State); }
-                        catch (McpProtocolException exception) { return LegacyError(exception.Message, "unknown"); }
+                        try
+                        {
+                            var full = CreateLegacyResourceState();
+                            var serialized = JsonSerializer.Serialize(new
+                            {
+                                state = full.State,
+                                next_actions = LegacyActions(full.State),
+                                message = full.State == "idle" ? "No active debug session." : "Debug session state observed.",
+                                data = full.Data,
+                            });
+                            if (Encoding.UTF8.GetByteCount(serialized) <= MaximumSerializedInspectionBytes)
+                                return SerializedResult(serialized, false);
+                            warning = "Full debug state exceeds the native response limit; only execution state is returned.";
+                        }
+                        catch (McpProtocolException exception)
+                        {
+                            if (snapshot.State == "idle") return LegacyError(exception.Message, "unknown");
+                            warning = "Full debug state is unavailable; only execution state is returned.";
+                        }
                     }
-                    return LegacyResponse(new
+                    else
+                    {
+                        warning = "Full debug state is unavailable during a session transition; only execution state is returned.";
+                    }
+
+                    snapshot = LegacySnapshot();
+                    var partial = new
                     {
                         state = snapshot.State,
                         execState = snapshot.State == "stopped" ? snapshot.Reason switch
@@ -2193,7 +2217,15 @@ internal static class Program
                         currentThreadId = snapshot.ThreadId,
                         stopReason = snapshot.Reason,
                         exitCode = snapshot.ExitCode
-                    }, snapshot.State);
+                    };
+                    return Result(new
+                    {
+                        state = snapshot.State,
+                        next_actions = LegacyActions(snapshot.State),
+                        message = snapshot.State == "idle" ? "No active debug session." : "Debug session state observed.",
+                        data = partial,
+                        warning,
+                    }, false);
                 }
                 if (name == DebuggeeActivity)
                 {
@@ -9280,7 +9312,7 @@ internal static class Program
                 Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
                 Tool("apply_code_change", "Apply sequential same-line Edit-and-Continue deltas while the source and observed module state remain compatible. Windows and an EnC-enabled debugger are required; unconfirmed outcomes are not retried.", """{"type":"object","properties":{"file":{"type":"string","minLength":1},"edits":{"type":"array","items":{"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"},"new_text":{"type":"string"}},"required":["start_line","end_line","new_text"]}}},"required":["file","edits"],"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
                 Tool("cleanup_processes", "View process observations or join captured cleanup owners. PIDs do not authorize termination; attached detach remains unconfirmed.", """{"type":"object","properties":{"force":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true, OpenWorldHint = false }),
-                Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_debug_state", "Read observed implicit session state. Inventories are not atomic; active debuggee liveness and unobserved threads remain null. Unavailable or oversized details return only execution state with a warning.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("debuggee_activity", "Observe DAP events and trace entries during a bounded running-session window.", """{"type":"object","properties":{"window_ms":{"type":"integer","minimum":1,"maximum":30000,"default":1000}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, OpenWorldHint = false }),
                 Tool("verify_debug_freshness", "Compare recorded DAP process metadata, observed inventories, workspace and artifact paths; a recorded PID does not prove liveness or process identity.", """{"type":"object","properties":{"expected_process_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"expected_process_name":{"type":["string","null"]},"expected_workspace":{"type":["string","null"]},"expected_sources":{"type":["array","null"],"items":{"type":"string"}},"expected_modules":{"type":["array","null"],"items":{"type":"string"}},"expected_artifacts":{"type":["array","null"],"items":{"type":"string"}},"require_active_process":{"type":"boolean","default":false}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, OpenWorldHint = false }),
                 Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
