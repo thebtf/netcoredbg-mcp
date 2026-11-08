@@ -1346,7 +1346,11 @@ consumer-mode release gate and the examples in [`docs/examples/`](docs/examples/
 for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 
 The source-built opt-in `--legacy-compat` host supports one inline v2 case with
-one after-phase probe, an optional `ui.noop` action, and no cleanup. A
+one transition and up to 16 after-phase `file.json`, `output.since`, or
+`output.field` probes, or one `debug.evaluate` probe. It also supports an
+optional `ui.noop` action and no cleanup. Read-only probes run in order even
+when one fails; the combined status gives `FAIL` precedence over `BLOCKED` and
+`IMPASSE`. Duplicate probe paths are rejected before execution. A
 `file.json` probe is Windows-only and requires an absolute path on a drive that
 Windows reports as fixed. JSONPath is limited to dotted identifiers; expected
 values are strings or null, and files are limited to 16 MiB. Device paths,

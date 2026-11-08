@@ -907,6 +907,96 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Theory]
+    [InlineData("ready", "PASS")]
+    [InlineData("wrong", "FAIL")]
+    public async Task LegacyRuntimeSmoke_MultipleReadOnlyProbesCollectEveryResult(string expected, string status)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "multi-smoke-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready","route":"applied"}""");
+        var checkpoint = Content(await harness.CallLegacyAsync("output_checkpoint", new JsonObject { ["name"] = "multi" }, "multi-checkpoint"));
+        Assert.Equal("PASS", checkpoint["data"]?["status"]?.GetValue<string>());
+        var plan = FileJsonSmokePlan(path, expected);
+        var probes = plan["cases"]![0]!["transitions"]![0]!["probes"]!.AsArray();
+        probes.Add(new JsonObject
+        {
+            ["kind"] = "output.since",
+            ["phase"] = "after",
+            ["name"] = "empty",
+            ["checkpoint"] = "multi",
+            ["regex"] = false,
+            ["required"] = new JsonArray(),
+            ["forbidden"] = new JsonArray(),
+        });
+        probes.Add(new JsonObject
+        {
+            ["kind"] = "file.json",
+            ["phase"] = "after",
+            ["name"] = "route",
+            ["path"] = path,
+            ["jsonpath"] = "$.route",
+            ["expected"] = "applied",
+        });
+
+        var validation = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan", new JsonObject { ["plan"] = plan.DeepClone() }, "multi-validate"));
+        Assert.True(validation["data"]?["can_run"]?.GetValue<bool>());
+        var direct = Content(await harness.CallLegacyAsync("run_runtime_smoke", new JsonObject { ["plan"] = plan.DeepClone() }, "multi-direct"));
+        var started = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = plan.DeepClone() }, "multi-start"));
+        var runId = Assert.IsType<string>(started["data"]?["run_id"]?.GetValue<string>());
+        var finished = Content(await harness.CallLegacyAsync("runtime_smoke_wait_for_result",
+            new JsonObject { ["run_id"] = runId, ["timeout_ms"] = 5000 }, "multi-wait").WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(finished["data"]?["final"]?.GetValue<bool>());
+        var retained = Content(await harness.CallLegacyAsync("runtime_smoke_get_result", new JsonObject { ["run_id"] = runId }, "multi-result"));
+        foreach (var data in new[] { direct["data"], retained["data"] })
+        {
+            Assert.Equal(status, data?["status"]?.GetValue<string>());
+            var transition = data?["cases"]?[0]?["transitions"]?[0];
+            var observed = Assert.IsType<JsonArray>(transition?["probes"]?["after"]);
+            Assert.Equal(3, observed.Count);
+            Assert.Equal(new[] { "file.json.run_id", "output.since.empty", "file.json.route" }, observed.Select(x => x?["path"]?.GetValue<string>()));
+            Assert.Equal(expected == "ready" ? "PASS" : "FAIL", observed[0]?["status"]?.GetValue<string>());
+            Assert.Equal("PASS", observed[1]?["status"]?.GetValue<string>());
+            Assert.Equal("PASS", observed[2]?["status"]?.GetValue<string>());
+            Assert.Equal("ready", transition?["after"]?["file.json.run_id"]?.GetValue<string>());
+            Assert.Equal("applied", transition?["after"]?["file.json.route"]?.GetValue<string>());
+            Assert.Equal(3, data?["evidence_refs"]?.AsArray().Count);
+        }
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeSmoke_MultipleProbesRejectDuplicatePathsAndEvaluationBeforeExecution()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration());
+        harness.EnableLegacyCompat();
+        var path = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "multi-smoke-state.json");
+        await File.WriteAllTextAsync(path, """{"run_id":"ready"}""");
+        var plan = FileJsonSmokePlan(path, "ready");
+        var probes = plan["cases"]![0]!["transitions"]![0]!["probes"]!.AsArray();
+        probes.Add(probes[0]!.DeepClone());
+        var duplicate = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan", new JsonObject { ["plan"] = plan.DeepClone() }, "multi-duplicate"));
+        Assert.Equal("INVALID_SETUP", duplicate["data"]?["status"]?.GetValue<string>());
+        probes[1] = new JsonObject { ["kind"] = "debug.evaluate", ["phase"] = "after", ["expression"] = "1" };
+        var blocked = Content(await harness.CallLegacyAsync("runtime_smoke_run_plan", new JsonObject { ["plan"] = plan }, "multi-evaluate"));
+        Assert.Equal("BLOCKED", blocked["data"]?["status"]?.GetValue<string>());
+        Assert.Null(blocked["data"]?["run_id"]);
+        var tooMany = FileJsonSmokePlan(path, "ready");
+        var manyProbes = tooMany["cases"]![0]!["transitions"]![0]!["probes"]!.AsArray();
+        for (int i = 1; i < 17; i++)
+        {
+            var extra = manyProbes[0]!.DeepClone().AsObject();
+            extra["name"] = $"probe-{i}";
+            manyProbes.Add(extra);
+        }
+        var bounded = Content(await harness.CallLegacyAsync("runtime_smoke_validate_plan", new JsonObject { ["plan"] = tooMany }, "multi-limit"));
+        Assert.Equal("BLOCKED", bounded["data"]?["status"]?.GetValue<string>());
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
     [InlineData("action")]
     [InlineData("cleanup")]
     [InlineData("baseline")]
