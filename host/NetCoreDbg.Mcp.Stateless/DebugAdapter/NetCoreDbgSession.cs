@@ -3842,6 +3842,10 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                     _inspectionClosed = true;
                     Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
                 }
+                else
+                {
+                    responseContext = GetOrCreateInspectionContext();
+                }
             }
             request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True,
                 targetCurrent, responseContext, serializedContent));
@@ -5063,6 +5067,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             try
             {
                 await ObserveBackgroundTasksAsync().ConfigureAwait(false);
+                await DisposeLegacyEncGenerationsAsync().ConfigureAwait(false);
             }
             finally
             {

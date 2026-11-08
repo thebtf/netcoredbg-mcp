@@ -30,6 +30,8 @@
     <ProjectReference Include="Fixtures\ControlledDapAdapter\ControlledDapAdapter.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="Fixtures\NativeSceneProbe.WpfFixture\NativeSceneProbe.WpfFixture.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
     <ProjectReference Include="..\NetCoreDbg.Mcp.Stateless\NetCoreDbg.Mcp.Stateless.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\tools\enc_compiler\EncCompiler.csproj" />
+    <ProjectReference Include="..\..\tests\fixtures\NativePauseApp\NativePauseApp.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

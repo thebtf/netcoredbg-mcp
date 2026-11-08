@@ -30,6 +30,230 @@ public sealed class DeltaEmitter
         optimizationLevel: OptimizationLevel.Debug,
         allowUnsafe: true);
 
+    /// <summary>Creates a generation chain that retains the module and PDB until disposed.</summary>
+    public DeltaGeneration StartGeneration(
+        string projectPath,
+        string filePath,
+        string originalSource,
+        string modulePath,
+        CancellationToken cancellationToken = default)
+    {
+        return new DeltaGeneration(projectPath, filePath, originalSource, modulePath, cancellationToken);
+    }
+
+    /// <summary>Proposes deltas from the last committed compilation without changing the debuggee.</summary>
+    public sealed class DeltaGeneration : IDisposable
+    {
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly PathMap _projectRoot;
+        private readonly BaselineArtifacts _artifacts;
+        private CSharpCompilation _compilation;
+        private EmitBaseline _baseline;
+        private object _generation = new();
+        private bool _disposed;
+
+        internal DeltaGeneration(
+            string projectPath,
+            string filePath,
+            string originalSource,
+            string modulePath,
+            CancellationToken cancellationToken)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(modulePath);
+            ArgumentNullException.ThrowIfNull(originalSource);
+            cancellationToken.ThrowIfCancellationRequested();
+            _projectRoot = ResolveProjectRoot(projectPath);
+            var targetFile = ResolveTargetFile(_projectRoot, filePath);
+            _compilation = CreateCompilation(_projectRoot, targetFile, originalSource, modulePath);
+            if (!_compilation.SyntaxTrees.Any(tree =>
+                string.Equals(tree.FilePath, targetFile, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException($"Target file is not a compilation input: {targetFile}");
+            }
+
+            var artifacts = CreateBaselineArtifacts(modulePath, _compilation, cancellationToken);
+            try
+            {
+                _baseline = EmitBaseline.CreateInitialBaseline(
+                    _compilation,
+                    artifacts.Module,
+                    artifacts.GetDebugInformation,
+                    artifacts.GetLocalSignature,
+                    artifacts.HasPortableDebugInformation);
+                _artifacts = artifacts;
+            }
+            catch
+            {
+                artifacts.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>Emits a candidate delta; the supplied source must match the last committed generation.</summary>
+        public async Task<DeltaGenerationProposal> ProposeAsync(
+            string filePath,
+            string originalSource,
+            IReadOnlyList<SourceEdit> edits,
+            string outputDirectory,
+            CancellationToken cancellationToken = default)
+        {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                ArgumentNullException.ThrowIfNull(originalSource);
+                ArgumentNullException.ThrowIfNull(edits);
+                ArgumentNullException.ThrowIfNull(outputDirectory);
+
+                if (edits.Count == 0)
+                {
+                    return FailedProposal(Failure("No edits provided."));
+                }
+
+                var targetFile = ResolveTargetFile(_projectRoot, filePath);
+                var originalTree = _compilation.SyntaxTrees.FirstOrDefault(tree =>
+                    string.Equals(tree.FilePath, targetFile, StringComparison.OrdinalIgnoreCase));
+                if (originalTree is null)
+                {
+                    return FailedProposal(Failure($"Target file is not a compilation input: {targetFile}"));
+                }
+
+                if (!string.Equals(originalTree.GetText(cancellationToken).ToString(), originalSource, StringComparison.Ordinal))
+                {
+                    return FailedProposal(Failure($"Source does not match the committed generation: {targetFile}"));
+                }
+
+                var editedSource = ApplyEdits(originalSource, edits);
+                var rudeEdits = DetectRudeEdits(originalSource, editedSource);
+                if (rudeEdits.Count > 0)
+                {
+                    return FailedProposal(new DeltaEmitResult(false, null, null, null, rudeEdits, Array.Empty<string>()));
+                }
+
+                var editedTree = originalTree.WithChangedText(SourceText.From(editedSource, originalTree.Encoding ?? Encoding.UTF8));
+                var editedCompilation = _compilation.ReplaceSyntaxTree(originalTree, editedTree);
+                var semanticEdits = FindSemanticEdits(_compilation, editedCompilation);
+                if (semanticEdits.Length == 0)
+                {
+                    return FailedProposal(Failure("No supported method body edits found."));
+                }
+
+                using var metadataDelta = new MemoryStream();
+                using var ilDelta = new MemoryStream();
+                using var pdbDelta = new MemoryStream();
+                var difference = editedCompilation.EmitDifference(
+                    _baseline,
+                    semanticEdits,
+                    _ => false,
+                    metadataDelta,
+                    ilDelta,
+                    pdbDelta,
+                    cancellationToken);
+                if (!difference.Success)
+                {
+                    return FailedProposal(Failure(FormatDiagnostics(difference.Diagnostics)));
+                }
+
+                var nextBaseline = difference.Baseline
+                    ?? throw new InvalidOperationException("Successful delta did not provide a baseline.");
+                var outputRoot = ResolveOutputDirectory(outputDirectory);
+                var prefix = $"{Path.GetFileNameWithoutExtension(targetFile)}-{Guid.NewGuid():N}";
+                var metadataPath = Path.Combine(outputRoot, $"{prefix}.metadata");
+                var ilPath = Path.Combine(outputRoot, $"{prefix}.il");
+                var pdbPath = Path.Combine(outputRoot, $"{prefix}.pdb");
+                await WriteGenerationDeltaAsync(metadataPath, metadataDelta, cancellationToken).ConfigureAwait(false);
+                await WriteGenerationDeltaAsync(ilPath, ilDelta, cancellationToken).ConfigureAwait(false);
+                await WriteGenerationDeltaAsync(pdbPath, pdbDelta, cancellationToken).ConfigureAwait(false);
+
+                var result = new DeltaEmitResult(
+                    true, ilPath, metadataPath, pdbPath, Array.Empty<string>(), Array.Empty<string>());
+                return new DeltaGenerationProposal(this, _generation, result, editedCompilation, nextBaseline);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+
+        /// <summary>Advances the chain after the caller confirms that this exact proposal was applied.</summary>
+        public void Commit(DeltaGenerationProposal proposal)
+        {
+            ArgumentNullException.ThrowIfNull(proposal);
+            _gate.Wait();
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (!ReferenceEquals(proposal.Owner, this)
+                    || !ReferenceEquals(proposal.Generation, _generation)
+                    || !proposal.Result.Success
+                    || proposal.Compilation is null
+                    || proposal.Baseline is null)
+                {
+                    throw new InvalidOperationException("Proposal is unsuccessful, stale, or belongs to another generation.");
+                }
+
+                _compilation = proposal.Compilation;
+                _baseline = proposal.Baseline;
+                _generation = new object();
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+
+        /// <summary>Releases the retained baseline metadata after pending proposals have settled.</summary>
+        public void Dispose()
+        {
+            _gate.Wait();
+            try
+            {
+                if (!_disposed)
+                {
+                    _disposed = true;
+                    _artifacts.Dispose();
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+
+        private DeltaGenerationProposal FailedProposal(DeltaEmitResult result) =>
+            new(this, _generation, result, null, null);
+
+        private static async Task WriteGenerationDeltaAsync(string path, MemoryStream delta, CancellationToken cancellationToken)
+        {
+            await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+            await output.WriteAsync(delta.GetBuffer().AsMemory(0, checked((int)delta.Length)), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>A candidate delta whose generation can be committed only once to its creating chain.</summary>
+    public sealed class DeltaGenerationProposal
+    {
+        internal DeltaGenerationProposal(
+            DeltaGeneration owner,
+            object generation,
+            DeltaEmitResult result,
+            CSharpCompilation? compilation,
+            EmitBaseline? baseline)
+        {
+            Owner = owner;
+            Generation = generation;
+            Result = result;
+            Compilation = compilation;
+            Baseline = baseline;
+        }
+
+        public DeltaEmitResult Result { get; }
+        internal DeltaGeneration Owner { get; }
+        internal object Generation { get; }
+        internal CSharpCompilation? Compilation { get; }
+        internal EmitBaseline? Baseline { get; }
+    }
+
     public Task<DeltaEmitResult> EmitDeltaAsync(
         string projectPath,
         string filePath,

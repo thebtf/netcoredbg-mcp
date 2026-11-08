@@ -22,6 +22,10 @@ internal sealed record LegacyEncResult(
 internal sealed partial class NetCoreDbgSession
 {
     private readonly HashSet<string> _legacyEncAttempts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, LegacyEncGeneration> _legacyEncGenerations = new(StringComparer.OrdinalIgnoreCase);
+    private TaskCompletionSource<bool>? _legacyEncSettled;
+    private sealed record LegacyEncGeneration((string Name, string Path) Module, string ProjectRoot,
+        (long NewCount, long ChangedCount, long RemovedCount) Revision, DeltaEmitter.DeltaGeneration Compiler);
     private (long NewCount, long ChangedCount, long RemovedCount)? _legacyEncModuleRevision;
 
     internal async Task<LegacyEncResult> ApplyLegacyCodeChangeAsync(
@@ -29,11 +33,18 @@ internal sealed partial class NetCoreDbgSession
     {
         if (!_encEnabled)
             return new(false, "Edit-and-Continue is unavailable; use a debugger with ncdbhook.dll and restart debugging.");
-        if (!TryAdmitExecution())
-            return new(false, "Another execution operation is in progress or the debug session is closing.");
+        lock (_stateGate)
+        {
+            if (!TryAdmitExecution())
+                return new(false, "Another execution operation is in progress or the debug session is closing.");
+            _legacyEncSettled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
 
         LegacyEncSource? source = null;
         PendingRequest? request = null;
+        DeltaEmitter.DeltaGeneration? generation = null;
+        var ownsGeneration = false;
+        (long NewCount, long ChangedCount, long RemovedCount) moduleRevision = default;
         string? moduleName = null;
         string? deltaDirectory = null;
         var sourceWriteAttempted = false;
@@ -52,23 +63,39 @@ internal sealed partial class NetCoreDbgSession
             try
             {
                 lock (_stateGate)
-                    _legacyEncModuleRevision = (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
+                {
+                    moduleRevision = (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
+                    _legacyEncModuleRevision = moduleRevision;
+                }
                 module = ResolveLegacyEncModule(projectRoot, source.TargetPath);
             }
             finally { _callStackAdmissionGate.Release(); }
             if (module is null) return new(false, "The loaded project module is unavailable or ambiguous.");
             moduleName = module.Value.Name;
+            LegacyEncGeneration? retained;
+            var normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectRoot));
             lock (_stateGate)
             {
-                if (_legacyEncAttempts.Contains(moduleName))
-                    return new(false, "An Edit-and-Continue delta was already attempted for this module; restart debugging.");
+                _legacyEncGenerations.TryGetValue(moduleName, out retained);
+                if (retained is null && _legacyEncAttempts.Contains(moduleName))
+                    return new(false, "An Edit-and-Continue delta outcome is unavailable for this module; restart debugging.");
+                if (retained is not null && (retained.Module != module.Value || retained.Revision != moduleRevision
+                    || !StringComparer.OrdinalIgnoreCase.Equals(retained.ProjectRoot, normalizedRoot)))
+                    return new(false, "The loaded module changed since the previous code change; restart debugging.");
             }
 
             deltaDirectory = Directory.CreateTempSubdirectory("netcoredbg-mcp-enc-").FullName;
             var compilerEdits = edits.Select(static edit => new SourceEdit(edit.StartLine, edit.EndLine, edit.NewText)).ToArray();
-            var emitter = new DeltaEmitter();
-            var delta = await emitter.EmitDeltaFromSourceAsync(projectRoot, source.TargetPath, source.Snapshot,
-                compilerEdits, module.Value.Path, deltaDirectory, cancellationToken).ConfigureAwait(false);
+            generation = retained?.Compiler;
+            if (generation is null)
+            {
+                generation = new DeltaEmitter().StartGeneration(projectRoot, source.TargetPath, source.Snapshot,
+                    module.Value.Path, cancellationToken);
+                ownsGeneration = true;
+            }
+            var proposal = await generation.ProposeAsync(source.TargetPath, source.Snapshot, compilerEdits,
+                deltaDirectory, cancellationToken).ConfigureAwait(false);
+            var delta = proposal.Result;
             if (!delta.Success)
             {
                 var details = delta.RudeEdits.Count != 0 ? delta.RudeEdits : delta.Diagnostics;
@@ -103,8 +130,7 @@ internal sealed partial class NetCoreDbgSession
                         || !StringComparer.Ordinal.Equals(_inspectionContextId, stopped.Value.Context)
                         || _legacyEncModuleRevision != (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved))
                         throw new InvalidOperationException("The stopped debug context changed before delta dispatch.");
-                    _legacyEncAttempts.Add(moduleName);
-                    attempted = true;
+                    attempted = _legacyEncAttempts.Add(moduleName);
                 }
                 request = await BeginRequestAsync("applyDeltas", new
                 {
@@ -119,16 +145,38 @@ internal sealed partial class NetCoreDbgSession
             finally { _callStackAdmissionGate.Release(); }
 
             var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
-            bool moduleCurrent;
-            lock (_stateGate)
-                moduleCurrent = _legacyEncModuleRevision == (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
-            if (!response.Success || !response.TargetCurrent || !moduleCurrent || IsRetirementRequested)
+            await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                preserveDeltas = true;
-                MarkLegacyEncUnknown();
-                return new(false, "The delta outcome is unknown; source edits were retained. Restart debugging.",
-                    BackupPath: source.BackupPath, OutcomeUnknown: true, RequiresDrain: true);
+                bool current;
+                lock (_stateGate)
+                    current = !_inspectionClosed && !IsRetirementRequested && _executionAdmission == ExecutionAdmission.Active
+                        && _state.Event == "stopped" && _state.CurrentThreadId == threadId
+                        && response.InspectionContextId is not null
+                        && StringComparer.Ordinal.Equals(_inspectionContextId, response.InspectionContextId)
+                        && _legacyEncModuleRevision == (_activityModuleNew, _activityModuleChanged, _activityModuleRemoved);
+                if (!response.Success || !response.TargetCurrent || !current
+                    || ResolveLegacyEncModule(projectRoot, source.TargetPath) != module)
+                {
+                    preserveDeltas = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                    lock (_stateGate)
+                    {
+                        _inspectionContextId = null;
+                        _inspectionClosed = true;
+                    }
+                    return new(false, "The delta outcome is unknown; source edits were retained. Restart debugging.",
+                        BackupPath: source.BackupPath, OutcomeUnknown: true, RequiresDrain: true);
+                }
+                generation.Commit(proposal);
+                if (ownsGeneration)
+                {
+                    lock (_stateGate)
+                        _legacyEncGenerations.Add(moduleName, new(module.Value, normalizedRoot, moduleRevision, generation));
+                    ownsGeneration = false;
+                }
             }
+            finally { _callStackAdmissionGate.Release(); }
             preserveDeltas = true;
             string? retainedBackup = null;
             try { await source.CompleteAsync().ConfigureAwait(false); }
@@ -184,6 +232,7 @@ internal sealed partial class NetCoreDbgSession
             try
             {
                 if (request is not null) RemovePending(request);
+                if (ownsGeneration) generation?.Dispose();
                 if (source is not null) await source.DisposeAsync().ConfigureAwait(false);
                 if (deltaDirectory is not null && !preserveDeltas && request?.WriteStarted != true)
                 {
@@ -195,12 +244,28 @@ internal sealed partial class NetCoreDbgSession
                 lock (_stateGate)
                 {
                     _legacyEncModuleRevision = null;
+                    _legacyEncSettled?.TrySetResult(true);
+                    _legacyEncSettled = null;
                     if (_executionAdmission == ExecutionAdmission.Active) _executionAdmission = ExecutionAdmission.Available;
                     _executionSettled?.TrySetResult(true);
                     _executionSettled = null;
                 }
             }
         }
+    }
+
+    private async Task DisposeLegacyEncGenerationsAsync()
+    {
+        Task? settled;
+        lock (_stateGate) settled = _legacyEncSettled?.Task;
+        if (settled is not null) await settled.ConfigureAwait(false);
+        LegacyEncGeneration[] generations;
+        lock (_stateGate)
+        {
+            generations = _legacyEncGenerations.Values.ToArray();
+            _legacyEncGenerations.Clear();
+        }
+        foreach (var generation in generations) generation.Compiler.Dispose();
     }
 
     private void MarkLegacyEncUnknown()

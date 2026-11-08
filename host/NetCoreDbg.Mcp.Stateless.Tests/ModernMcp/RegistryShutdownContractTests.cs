@@ -62,6 +62,150 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyApplyCodeChange_RefusedDeltaReturnsUnknownAndRetainsSourceAndBackup()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = ModernMcpScratchDirectory.Create();
+        RegistryHostHarness? harness = null;
+        Task<CallToolResult>? apply = null;
+        SemaphoreSlim? admission = null;
+        string? deltaDirectory = null;
+        try
+        {
+            var originalProject = Path.Combine(RepositoryLayout.Root, "tests", "fixtures", "NativePauseApp");
+            var originalModule = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+                Path.Combine("tests", "fixtures", "NativePauseApp"), "NativePauseApp");
+            var project = Path.Combine(scratch, "project");
+            Directory.CreateDirectory(project);
+            foreach (var name in new[] { "NativePauseApp.csproj", "Program.cs" })
+                File.Copy(Path.Combine(originalProject, name), Path.Combine(project, name));
+            var artifacts = RepositoryLayout.OutputRoot("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH");
+            var outputDirectory = Path.GetDirectoryName(originalModule)!;
+            var configuration = artifacts is null ? Directory.GetParent(outputDirectory)!.Name : "Debug";
+            var framework = artifacts is null ? Path.GetFileName(outputDirectory) : "net8.0";
+            var module = Path.Combine(project, "bin", configuration, framework, "NativePauseApp.dll");
+            Directory.CreateDirectory(Path.GetDirectoryName(module)!);
+            File.Copy(originalModule, module);
+            File.Copy(Path.ChangeExtension(originalModule, ".pdb"), Path.ChangeExtension(module, ".pdb"));
+            var generated = Path.Combine("obj", configuration, framework);
+            var originalGenerated = artifacts is null
+                ? Path.Combine(originalProject, generated)
+                : Path.Combine(artifacts, "obj", "NativePauseApp", Path.GetFileName(outputDirectory));
+            var copiedGenerated = Path.Combine(project, generated);
+            Directory.CreateDirectory(copiedGenerated);
+            foreach (var file in Directory.EnumerateFiles(originalGenerated, "*.cs"))
+                File.Copy(file, Path.Combine(copiedGenerated, Path.GetFileName(file)));
+            var source = Path.Combine(project, "Program.cs");
+            var originalBytes = await File.ReadAllBytesAsync(source);
+            var originalText = await File.ReadAllTextAsync(source);
+            var lines = originalText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+            var line = Array.FindIndex(lines, text => text.Contains("iteration = unchecked(iteration + 1);", StringComparison.Ordinal)) + 1;
+            Assert.True(line > 0);
+            var script = new JsonObject
+            {
+                ["applyDeltasRefused"] = true,
+                ["launch"] = new JsonArray(new JsonObject
+                {
+                    ["event"] = "module",
+                    ["body"] = new JsonObject
+                    {
+                        ["reason"] = "new",
+                        ["module"] = new JsonObject
+                        {
+                            ["id"] = 1,
+                            ["name"] = "NativePauseApp.dll",
+                            ["path"] = module,
+                        }
+                    },
+                }),
+            };
+            harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"),
+                outputScript: script, debuggerPathFactory: directory =>
+                {
+                    var fixture = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+                    Assert.Empty(fixture.Arguments);
+                    var copy = Path.Combine(directory, "adapter");
+                    Directory.CreateDirectory(copy);
+                    foreach (var file in Directory.EnumerateFiles(Path.GetDirectoryName(fixture.Command)!))
+                        File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
+                    File.WriteAllBytes(Path.Combine(copy, "ncdbhook.dll"), []);
+                    return Path.Combine(copy, Path.GetFileName(fixture.Command));
+                });
+            harness.SetProjectRoot(project);
+            harness.EnableLegacyCompat();
+            const string owner = "enc-refusal-owner";
+            var started = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = module,
+                ["pre_build"] = false,
+            }, "enc-refusal-start", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>(), started["error"]?.GetValue<string>());
+            using (var stoppedDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            {
+                while (true)
+                {
+                    var state = Content(await harness.CallLegacyWithMetaAsync("get_debug_state", new JsonObject(), "enc-refusal-state", owner).WaitAsync(stoppedDeadline.Token));
+                    if (state["state"]?.GetValue<string>() == "stopped") break;
+                    await Task.Delay(20, stoppedDeadline.Token);
+                }
+            }
+            admission = harness.LegacySessionAdmissionGate;
+            var arguments = new JsonObject
+            {
+                ["file"] = source,
+                ["edits"] = new JsonArray(new JsonObject
+                {
+                    ["start_line"] = line,
+                    ["end_line"] = line,
+                    ["new_text"] = "            iteration = unchecked(iteration + 100);"
+                }),
+            };
+            apply = Task.Run(() => harness.CallLegacyWithMetaAsync("apply_code_change", arguments, "enc-refusal-apply", owner));
+            var completed = await Task.WhenAny(apply, Task.Delay(TimeSpan.FromSeconds(60))) == apply;
+            if (!completed)
+            {
+                var transcript = await harness.Fixture.ReadTranscriptAsync();
+                var sent = transcript.SingleOrDefault(item => item.Kind == "request" && item.Command == "applyDeltas");
+                if (sent?.RawPayload is { } raw)
+                    deltaDirectory = Path.GetDirectoryName(JsonNode.Parse(raw)?["arguments"]?["metadataPath"]?.GetValue<string>());
+                if (transcript.Any(item => item.Kind == "apply-deltas-refused") && admission.CurrentCount == 0)
+                    admission.Release();
+                await Record.ExceptionAsync(async () => await apply.WaitAsync(TimeSpan.FromSeconds(20)));
+                Assert.Fail("apply_code_change did not return within the deadline after the controlled refusal.");
+            }
+            var response = Content(await apply);
+            var transcriptAfter = await harness.Fixture.ReadTranscriptAsync();
+            var request = Assert.Single(transcriptAfter, item => item.Kind == "request" && item.Command == "applyDeltas");
+            Assert.Single(transcriptAfter, item => item.Kind == "apply-deltas-refused");
+            var payload = JsonNode.Parse(Assert.IsType<string>(request.RawPayload))!;
+            deltaDirectory = Path.GetDirectoryName(Assert.IsType<string>(payload["arguments"]?["metadataPath"]?.GetValue<string>()));
+            var error = Assert.IsType<string>(response["error"]?.GetValue<string>());
+            Assert.Contains("outcome is unknown", error, StringComparison.OrdinalIgnoreCase);
+            var backup = Assert.Single(Directory.EnumerateFiles(project, "Program.cs.*.enc-backup"));
+            Assert.Contains(backup, error, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(backup));
+            Assert.Contains("iteration = unchecked(iteration + 100);", await File.ReadAllTextAsync(source));
+            var cleanup = Content(await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "enc-refusal-stop", owner).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.True(cleanup["data"]?["success"]?.GetValue<bool>(), cleanup["error"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (harness is not null)
+                await Task.Run(async () => await harness.DisposeAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+            if (deltaDirectory is not null && Directory.Exists(deltaDirectory))
+            {
+                var directory = new DirectoryInfo(deltaDirectory);
+                Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath())),
+                    Path.TrimEndingDirectorySeparator(directory.Parent!.FullName), ignoreCase: OperatingSystem.IsWindows());
+                Assert.StartsWith("netcoredbg-mcp-enc-", directory.Name, StringComparison.Ordinal);
+                Assert.False((directory.Attributes & FileAttributes.ReparsePoint) != 0);
+                directory.Delete(recursive: true);
+            }
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+    [Fact]
     public async Task LegacyLaunchCompatibility_InspectsWithoutClaimingAShimSwap()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -3631,6 +3775,13 @@ public sealed class RegistryShutdownContractTests
             return name => observe.Invoke(generation, [name]);
         }
         public void EnableLegacyCompat() => registry.GetType().GetProperty("LegacyCompat", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(registry, true);
+        public void SetProjectRoot(string root)
+        {
+            var field = registry.GetType().GetField("_projectRootResolver", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var constructor = field.FieldType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
+                [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(string)], null)!;
+            field.SetValue(registry, constructor.Invoke([root, null, null, false, root]));
+        }
         public void ReplaceSmokeRuns(object runs)
         {
             var field = registry.GetType().GetField("_legacySmoke", BindingFlags.Instance | BindingFlags.NonPublic)!;
