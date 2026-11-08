@@ -1264,10 +1264,13 @@ request requires a debugging restart.
 
 The source-built opt-in `--legacy-compat` host also exposes `apply_code_change`
 on Windows for launched sessions using an EnC-enabled debugger. It accepts
-same-line edits and one delta attempt per module per debuggee session. The
-source must be a UTF-8 file on a local fixed drive, inside the project root with
-matching path casing, without reparse points or hard-link aliases, and available
-for exclusive access. The host retains an adjacent original-byte `.enc-backup`
+successive same-line edits while the target source matches its last accepted
+generation and no module inventory change has been observed since that edit.
+Other source changes are not incorporated automatically; restart debugging to
+establish a new baseline. The source must be a UTF-8 file on a local fixed drive,
+inside the project root with matching path casing, without reparse points or
+hard-link aliases, and available for exclusive access. The host retains an
+adjacent original-byte `.enc-backup`
 when application or restoration is unconfirmed. Errors can include its path;
 cancellation may return no response. Returned delta files remain in the host's
 temporary directory; automatic retention cleanup is not yet provided. Module

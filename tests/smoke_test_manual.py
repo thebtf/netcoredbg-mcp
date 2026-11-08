@@ -10,6 +10,8 @@ Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
 The opt-in ``Native WPF Concurrent Continue Stop``, ``Native Terminal Output Retention``,
 and ``Native WPF Discovery To Observed Invoke`` scenarios use prebuilt source native-host/fixture
 outputs and real netcoredbg; they never build or select the Python backend.
+The opt-in ``Native Sequential EnC`` builds an owned no-window scratch fixture
+and requires an EnC-enabled netcoredbg with adjacent ncdbhook.dll.
 """
 
 import asyncio
@@ -9013,6 +9015,14 @@ async def test_two_application_gui_verification(*, extended_gui: bool = False):
     )
 
 
+async def test_native_sequential_enc() -> None:
+    from pathlib import Path
+
+    from tests.smoke_native_enc import run
+
+    await run(Path(BASE), check)
+
+
 def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Two-Application Core Smoke", test_two_application_gui_verification),
@@ -9024,6 +9034,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
         ("Native WPF Concurrent Continue Stop", test_native_wpf_concurrent_continue_stop),
         ("Native Terminal Output Retention", test_native_terminal_output_retention),
         ("Native WPF Discovery To Observed Invoke", test_native_wpf_discovery_to_invoke),
+        ("Native Sequential EnC", test_native_sequential_enc),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),

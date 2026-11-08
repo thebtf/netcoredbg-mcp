@@ -1035,6 +1035,13 @@ internal sealed class ControlledDapAdapter
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
                 return false;
+            case "applyDeltas":
+                var refuseDeltas = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("applyDeltasRefused", out var deltaRefused)
+                    && deltaRefused.ValueKind == JsonValueKind.True;
+                if (refuseDeltas) await RecordAsync(new { kind = "apply-deltas-refused", sequence }, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken, success: !refuseDeltas);
+                return false;
             case "writeMemory":
                 var writeMode = _outputScript.ValueKind == JsonValueKind.Object
                     && _outputScript.TryGetProperty("memoryWriteMode", out var writeModeElement)
