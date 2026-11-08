@@ -64,13 +64,15 @@ internal static class Program
             return;
         }
 
+        var legacyCompat = arguments.Contains("--legacy-compat", StringComparer.Ordinal);
+        var debuggerPath = Environment.GetEnvironmentVariable("NETCOREDBG_PATH");
         var sessions = new DebugSessionRegistry(
-            Environment.GetEnvironmentVariable("NETCOREDBG_PATH"),
+            legacyCompat ? LegacyDebuggerDiscovery.Resolve(debuggerPath) : debuggerPath,
             Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
             Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"))
         {
             ProjectRootResolver = ProjectRootResolver.FromHostArguments(arguments, Environment.CurrentDirectory),
-            LegacyCompat = arguments.Contains("--legacy-compat", StringComparer.Ordinal),
+            LegacyCompat = legacyCompat,
         };
         var host = BuildHost(sessions);
         await host.RunAsync().ConfigureAwait(false);
