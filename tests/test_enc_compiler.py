@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -24,6 +28,62 @@ def enc_compiler_dll() -> Path:
         / "net8.0"
         / "enc_compiler.dll"
     )
+
+def test_wheel_default_compiler_emits_a_delta(tmp_path: Path) -> None:
+    wheel_dir = tmp_path / "wheel"
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env.pop("NETCOREDBG_MCP_ENC_COMPILER", None)
+    env.update(
+        DOTNET_ADD_GLOBAL_TOOLS_TO_PATH="false",
+        DOTNET_GENERATE_ASPNET_CERTIFICATE="false",
+        DOTNET_CLI_TELEMETRY_OPTOUT="1",
+        DOTNET_CLI_HOME=str(tmp_path / "dotnet-home"),
+        MSBUILDDISABLENODEREUSE="1",
+        DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER="1",
+        NuGetAudit="false",
+        RestoreIgnoreFailedSources="true",
+        UseSharedCompilation="false",
+    )
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required to build the wheel"
+    build = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(wheel_dir)],
+        cwd=root, env=env, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    wheels = list(wheel_dir.glob("netcoredbg_mcp-*.whl"))
+    assert len(wheels) == 1
+    package = tmp_path / "package"
+    with zipfile.ZipFile(wheels[0]) as archive:
+        archive.extractall(package)
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    project, source = _write_fixture_project(fixture)
+    env["PYTHONPATH"] = str(package)
+    program = """
+import sys
+from pathlib import Path
+import netcoredbg_mcp.enc.compiler as compiler
+assert Path(compiler.__file__).resolve().is_relative_to(Path(sys.argv[4]).resolve())
+result = compiler.compile_delta(
+    sys.argv[1], sys.argv[2],
+    [compiler.SourceEdit(int(sys.argv[5]), int(sys.argv[5]), '        return 2;')],
+    output_dir=sys.argv[3], timeout=120,
+)
+assert result.success, result.diagnostics
+assert all(Path(path).is_file() and Path(path).stat().st_size > 0 for path in (
+    result.il_delta_path, result.metadata_delta_path, result.pdb_delta_path,
+))
+"""
+    result = subprocess.run(
+        [
+            sys.executable, "-c", program, str(project), str(source),
+            str(tmp_path / "deltas"), str(package), str(_line_number(source, "return 1;")),
+        ],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_compile_delta_emits_files_for_method_body_change(
