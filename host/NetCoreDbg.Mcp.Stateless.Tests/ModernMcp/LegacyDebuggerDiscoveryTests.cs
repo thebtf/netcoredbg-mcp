@@ -1,3 +1,5 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -145,6 +147,69 @@ public sealed class LegacyDebuggerDiscoveryTests
             Assert.Empty(await driver.ReadNativeActionsAsync());
         }
         finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
+    public async Task LegacyStart_UsesPathWhenManagedDirectoryCannotBeEnumerated()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var scratch = ModernMcpScratchDirectory.Create();
+        var home = Path.Combine(scratch, "home");
+        var managed = Path.Combine(home, ".netcoredbg-mcp", "netcoredbg");
+        var pathDirectory = Path.Combine(scratch, "path");
+        Directory.CreateDirectory(managed);
+        var directory = new DirectoryInfo(managed);
+        var restrictedSecurity = directory.GetAccessControl();
+        var denyList = new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.WorldSid, null), FileSystemRights.ListDirectory,
+            InheritanceFlags.None, PropagationFlags.None, AccessControlType.Deny);
+        restrictedSecurity.AddAccessRule(denyList);
+        var restricted = false;
+        var startAttempted = false;
+        var cleanupConfirmed = false;
+        try
+        {
+            CopyAdapter(pathDirectory);
+            directory.SetAccessControl(restrictedSecurity);
+            restricted = true;
+            Assert.True(Directory.Exists(managed));
+            Assert.Throws<UnauthorizedAccessException>(() => Directory.EnumerateDirectories(managed).ToArray());
+
+            await using (var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                InheritEnvironmentVariables: false, AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["USERPROFILE"] = home,
+                    ["PATH"] = pathDirectory,
+                    ["NETCOREDBG_PATH"] = null,
+                })))
+            {
+                var owner = new JsonObject { ["muxSessionId"] = "inaccessible-managed-debugger" };
+                var inspection = await CallAsync(driver, "inspect_debug_launch_compatibility",
+                    new JsonObject { ["program"] = driver.InertProgramPath }, owner);
+                Assert.Equal(Path.Combine(pathDirectory, "dbgshim.dll"), inspection["data"]?["activeDbgshim"]?["path"]?.GetValue<string>());
+                startAttempted = true;
+                var started = await CallAsync(driver, "start_debug", new JsonObject
+                {
+                    ["program"] = driver.InertProgramPath,
+                    ["pre_build"] = false,
+                }, owner);
+                Assert.True(started["data"]?["success"]?.GetValue<bool>(), started.ToJsonString());
+                var stopped = await CallAsync(driver, "stop_debug", new JsonObject(), owner);
+                Assert.True(stopped["data"]?["success"]?.GetValue<bool>(), stopped.ToJsonString());
+            }
+            cleanupConfirmed = true;
+        }
+        finally
+        {
+            if (restricted)
+            {
+                var restoredSecurity = directory.GetAccessControl();
+                restoredSecurity.RemoveAccessRuleSpecific(denyList);
+                directory.SetAccessControl(restoredSecurity);
+            }
+            if (!startAttempted || cleanupConfirmed) await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
     }
 
     private static async Task<JsonObject> CallAsync(ModernMcpProcessDriver driver, string name, JsonObject arguments, JsonObject owner)
