@@ -6116,6 +6116,50 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_Freshness_UsesPythonUnicodeCasefoldForNames()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["event"] = "process", ["body"] = new JsonObject { ["name"] = "Straße", ["isLocalProcess"] = false } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 1, ["name"] = "Straße.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 2, ["name"] = "İ.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 3, ["name"] = "ς.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 4, ["name"] = "\U00010400.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 5, ["name"] = "ﬀ.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 6, ["name"] = "\uE000.dll" } } },
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "\U00010000.dll" } } })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "freshness-unicode-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var result = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject
+            {
+                ["expected_process_name"] = "STRASSE",
+                ["expected_modules"] = new JsonArray("STRASSE.dll", "i\u0307.dll", "σ.dll", "\U00010428.dll", "FF.dll")
+            }, owner);
+            Assert.Equal("PASS", result["data"]?["status"]?.GetValue<string>());
+            Assert.Equal(new[] { "ff.dll", "i\u0307.dll", "strasse.dll", "σ.dll", "\uE000.dll", "\U00010000.dll", "\U00010428.dll" },
+                Assert.IsType<JsonArray>(result["data"]?["modules"]?["names"]).Select(static item => item?.GetValue<string>()));
+            var mismatch = await LegacyConsoleCallAsync(driver, "verify_debug_freshness", new JsonObject
+            {
+                ["expected_process_name"] = "STRASSE2",
+                ["expected_modules"] = new JsonArray("FF2.dll")
+            }, owner);
+            Assert.Equal("FAIL", mismatch["data"]?["status"]?.GetValue<string>());
+            var kinds = Assert.IsType<JsonArray>(mismatch["data"]?["mismatches"]).Select(static item => item?["kind"]?.GetValue<string>());
+            Assert.Contains("process_name_mismatch", kinds);
+            Assert.Contains("expected_module_missing", kinds);
+        }
+        finally { await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner)); }
+    }
+
+    [Fact]
     public async Task LegacyCompat_Freshness_UnavailableObservationsWarnAndInvalidInputsHaveNoEffects()
     {
         var root = ModernMcpScratchDirectory.Create();

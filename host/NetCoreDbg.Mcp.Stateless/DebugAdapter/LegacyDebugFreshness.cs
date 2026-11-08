@@ -8,6 +8,7 @@ internal static class LegacyDebugFreshness
     private const int MaximumInputBytes = 64 * 1024;
     private const int MaximumPaths = 256;
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+    private static readonly IComparer<string> ModuleNameComparer = Comparer<string>.Create(Unicode15CaseFold.CompareCodePoints);
 
     internal sealed record Arguments(int? ProcessId, string? ProcessName, string? Workspace,
         string[] Sources, string[] Modules, string[] Artifacts, bool RequireActive);
@@ -105,7 +106,7 @@ internal static class LegacyDebugFreshness
         if (!string.IsNullOrEmpty(args.ProcessName))
         {
             if (string.IsNullOrEmpty(processName)) warnings.Add(new { kind = "process_name_unavailable", expected = args.ProcessName });
-            else if (!StringComparer.OrdinalIgnoreCase.Equals(processName, args.ProcessName)) mismatches.Add(new { kind = "process_name_mismatch", expected = args.ProcessName, actual = processName });
+            else if (!Unicode15CaseFold.Equals(processName, args.ProcessName)) mismatches.Add(new { kind = "process_name_mismatch", expected = args.ProcessName, actual = processName });
         }
         bool? matched = null;
         if (expectedWorkspace is not null)
@@ -126,7 +127,7 @@ internal static class LegacyDebugFreshness
                 if (!Within(path, expectedWorkspace)) mismatches.Add(new { kind = "source_workspace_mismatch", expected_workspace = expectedWorkspace, actual = path });
         var records = new List<Dictionary<string, object?>>();
         var modulePaths = new List<string>();
-        var moduleNames = new SortedSet<string>(StringComparer.Ordinal);
+        var moduleNames = new SortedSet<string>(ModuleNameComparer);
         foreach (var module in modules.EnumerateArray())
         {
             var rawPath = module.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
@@ -138,11 +139,11 @@ internal static class LegacyDebugFreshness
                 if (module.TryGetProperty(key, out var value) && value.ValueKind != JsonValueKind.Null) record[key] = value.Clone();
             records.Add(record);
             if (path is not null) modulePaths.Add(path);
-            moduleNames.Add((name ?? string.Empty).ToLowerInvariant());
+            moduleNames.Add(Unicode15CaseFold.Fold(name ?? string.Empty));
         }
         if (expectedModules.Length > 0 && records.Count == 0) warnings.Add(new { kind = "modules_unavailable", expected = expectedModules });
         foreach (var path in expectedModules)
-            if (records.Count > 0 && !modulePaths.Any(actual => SamePath(actual, path)) && !moduleNames.Contains(Path.GetFileName(path).ToLowerInvariant()))
+            if (records.Count > 0 && !modulePaths.Any(actual => SamePath(actual, path)) && !moduleNames.Contains(Unicode15CaseFold.Fold(Path.GetFileName(path))))
                 mismatches.Add(new { kind = "expected_module_missing", expected = path });
         var existing = new List<string>();
         var missing = new List<string>();

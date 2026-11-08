@@ -114,6 +114,8 @@ internal static class Unicode15Lower
         });
     }
 
+    internal static int SimpleLowerScalar(int scalar) => LowerScalar(string.Empty, 0, scalar, false);
+
     private static int LowerScalar(string source, int nextOffset, int scalar, bool precededByCased)
     {
         if (scalar == 0x03A3 && precededByCased && !FollowedByCased(source, nextOffset)) return 0x03C2;
@@ -165,7 +167,7 @@ internal static class Unicode15Lower
         return false;
     }
 
-    private static int ReadScalar(string value, ref int offset)
+    internal static int ReadScalar(string value, ref int offset)
     {
         var first = value[offset++];
         if (char.IsHighSurrogate(first) && offset < value.Length && char.IsLowSurrogate(value[offset]))
@@ -173,7 +175,7 @@ internal static class Unicode15Lower
         return first;
     }
 
-    private static void WriteScalar(Span<char> destination, ref int offset, int scalar)
+    internal static void WriteScalar(Span<char> destination, ref int offset, int scalar)
     {
         if (scalar <= 0xFFFF) destination[offset++] = (char)scalar;
         else
