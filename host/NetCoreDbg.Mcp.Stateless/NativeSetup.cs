@@ -72,12 +72,30 @@ internal static class NativeSetup
                 downloaded = true;
             }
 
+            try
+            {
+                var cacheHome = LegacyDebuggerDiscovery.GetHomeDirectory();
+                if (string.IsNullOrWhiteSpace(cacheHome))
+                    await Console.Error.WriteLineAsync("Warning: dbgshim cache has no managed home directory.").ConfigureAwait(false);
+                else
+                {
+                    var cache = NativeDbgshimCache.Populate(cacheHome);
+                    await Console.Error.WriteLineAsync($"dbgshim cache: {cache.Cached} added, {cache.Reused} reused, {cache.Conflicts} conflicts.").ConfigureAwait(false);
+                    foreach (var warning in cache.Warnings)
+                        await Console.Error.WriteLineAsync($"Warning: dbgshim cache: {JsonSerializer.Serialize(warning)}").ConfigureAwait(false);
+                }
+            }
+            catch (Exception exception) when (IsReportableFailure(exception))
+            {
+                await Console.Error.WriteLineAsync("Warning: dbgshim cache could not be inspected or updated.").ConfigureAwait(false);
+            }
+
             var environment = new Dictionary<string, string> { ["NETCOREDBG_PATH"] = debugger };
             if (bridge is not null) environment["FLAUI_BRIDGE_PATH"] = bridge;
 
             var config = new { mcpServers = new Dictionary<string, object> { ["netcoredbg"] = new { command = Path.GetFullPath(processPath), args, env = environment } } };
             await Console.Error.WriteLineAsync(downloaded ? "Downloaded a verified managed debugger." : "Existing debugger reused; no download was needed.").ConfigureAwait(false);
-            await Console.Error.WriteLineAsync("Warning: setup does not cache dbgshim or build the FlaUI bridge; these remain unimplemented.").ConfigureAwait(false);
+            await Console.Error.WriteLineAsync("Warning: setup does not build the FlaUI bridge; this remains unimplemented.").ConfigureAwait(false);
             await Console.Out.WriteLineAsync(JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })).ConfigureAwait(false);
             return true;
         }

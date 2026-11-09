@@ -106,9 +106,17 @@ directory-rename primitive. Interrupted setup can leave a `.netcoredbg-stage-*`
 directory; a cleanup failure reports its path. An invalid
 explicit debugger or `FLAUI_BRIDGE_PATH` fails without falling back. A valid
 explicit bridge is included, or on Windows the existing managed bridge is used
-when present. Diagnostics go to stderr. Setup does not cache dbgshim, build a
-bridge, edit a client configuration or modify PATH. File checks and release
-digests do not prove binary compatibility. Python remains the installed default.
+when present. Diagnostics go to stderr. On Windows, setup caches discovered
+runtime dbgshim files without overwriting a different existing cached file;
+conflicts and partial failures are reported. Each file is limited to 32 MiB,
+and a run adds at most 256 MiB; this is not a lifetime cache quota. Existing
+reparse-point cache directories are refused, but the path checks do not pin
+ancestors against replacement by another process during setup. The compatibility
+inspection can report a cached candidate, but native launch does
+not select or replace a shim. Linux and macOS shim caching and bridge build
+remain unimplemented. Setup does not edit client configuration or modify PATH.
+File checks and release digests do not prove binary compatibility. Python
+remains the installed default.
 
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at
