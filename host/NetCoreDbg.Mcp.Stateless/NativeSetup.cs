@@ -33,9 +33,11 @@ internal static class NativeSetup
                 if (bridge is null)
                     return await ErrorAsync("FLAUI_BRIDGE_PATH does not identify an existing bridge; no fallback was selected.").ConfigureAwait(false);
             }
-            else if (OperatingSystem.IsWindows() && LegacyDebuggerDiscovery.GetHomeDirectory() is { Length: > 0 } home)
+            else if (OperatingSystem.IsWindows())
             {
-                bridge = ValidBridge(Path.Combine(home, ".netcoredbg-mcp", "bridge", "FlaUIBridge.exe"));
+                if (LegacyDebuggerDiscovery.GetHomeDirectory() is { Length: > 0 } home)
+                    bridge = ValidBridge(Path.Combine(home, ".netcoredbg-mcp", "bridge", "FlaUIBridge.exe"));
+                bridge ??= ValidBridge(Path.Combine(AppContext.BaseDirectory, "bridge", "FlaUIBridge.exe"));
             }
             var configured = Environment.GetEnvironmentVariable("NETCOREDBG_PATH");
             var selected = LegacyDebuggerDiscovery.Resolve(configured);
@@ -95,7 +97,9 @@ internal static class NativeSetup
 
             var config = new { mcpServers = new Dictionary<string, object> { ["netcoredbg"] = new { command = Path.GetFullPath(processPath), args, env = environment } } };
             await Console.Error.WriteLineAsync(downloaded ? "Downloaded a verified managed debugger." : "Existing debugger reused; no download was needed.").ConfigureAwait(false);
-            await Console.Error.WriteLineAsync("Warning: setup does not build the FlaUI bridge; this remains unimplemented.").ConfigureAwait(false);
+            await Console.Error.WriteLineAsync(bridge is null
+                ? "Warning: FlaUI bridge not found; setup does not build it."
+                : "FlaUI bridge configured; setup did not build it.").ConfigureAwait(false);
             await Console.Out.WriteLineAsync(JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })).ConfigureAwait(false);
             return true;
         }
