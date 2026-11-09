@@ -35,6 +35,9 @@ internal static class NativeDebuggerInstaller
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(releaseApi);
         ArgumentException.ThrowIfNullOrWhiteSpace(installDirectory);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(client.Timeout);
+        cancellationToken = deadline.Token;
         var (assetName, executable, isTar) = assetKey switch
         {
             "win64" => ("netcoredbg-win64.zip", "netcoredbg.exe", false),

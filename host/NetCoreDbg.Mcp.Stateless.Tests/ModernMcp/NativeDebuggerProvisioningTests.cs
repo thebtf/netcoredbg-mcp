@@ -56,6 +56,46 @@ public sealed class NativeDebuggerProvisioningTests
         finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
     }
 
+    [Theory]
+    [InlineData("manifest-stall")]
+    [InlineData("archive-stall")]
+    public async Task ClientDeadlineCancelsStalledResponseBody(string fault)
+    {
+        var install = Installer();
+        var scratch = ModernMcpScratchDirectory.Create();
+        using var handler = new ReleaseHandler(CreateArchive(), fault);
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(1) };
+        var target = Path.Combine(scratch, "managed");
+        try
+        {
+            var operation = install(client, new Uri(ApiUrl), target, "win64", CancellationToken.None);
+            var entered = await Task.WhenAny(handler.BodyReadStarted, operation, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (!ReferenceEquals(entered, handler.BodyReadStarted))
+            {
+                handler.ReleaseStall();
+                try { await operation; } catch (Exception) { }
+                Assert.Fail("The fixture did not reach the response body.");
+            }
+            var completed = await Task.WhenAny(operation, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (!ReferenceEquals(completed, operation))
+            {
+                handler.ReleaseStall();
+                try { await operation; } catch (Exception) { }
+                Assert.Fail("The response body exceeded the configured setup deadline.");
+            }
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+            Assert.Equal(fault == "manifest-stall" ? 1 : 2, handler.RequestCount);
+            Assert.False(Directory.Exists(target));
+            Assert.Empty(Directory.GetDirectories(scratch, ".netcoredbg-stage-*"));
+        }
+        finally
+        {
+            handler.ReleaseStall();
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+
     [Fact]
     public void SetupClassifiesInvalidReleaseDataAsReportable()
     {
@@ -306,6 +346,9 @@ public sealed class NativeDebuggerProvisioningTests
     {
         internal int RequestCount { get; private set; }
         internal int DownloadCount { get; private set; }
+        private readonly StalledStream _stall = new();
+        internal Task BodyReadStarted => _stall.Started;
+        internal void ReleaseStall() => _stall.Release();
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -315,6 +358,8 @@ public sealed class NativeDebuggerProvisioningTests
             var url = request.RequestUri!.AbsoluteUri;
             if (url == ApiUrl)
             {
+                if (fault == "manifest-stall")
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(_stall) });
                 if (fault is "missing-assets" or "wrong-assets" or "missing-digest-property" or "wrong-size-type")
                 {
                     var malformed = fault switch
@@ -348,6 +393,8 @@ public sealed class NativeDebuggerProvisioningTests
             if (url == assetUrl)
             {
                 DownloadCount++;
+                if (fault == "archive-stall")
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(_stall) });
                 if (fault is "foreign-redirect" or "approved-redirect")
                 {
                     var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
@@ -361,6 +408,29 @@ public sealed class NativeDebuggerProvisioningTests
             if (url == "https://release-assets.githubusercontent.com/fixture" && fault == "approved-redirect")
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(archive) });
             throw new InvalidOperationException("Unexpected network destination in controlled fixture.");
+        }
+    }
+    private sealed class StalledStream : Stream
+    {
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal Task Started => _started.Task;
+        internal void Release() => _release.TrySetResult(true);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _started.TrySetResult(true);
+            await _release.Task.WaitAsync(cancellationToken);
+            return 0;
         }
     }
 }

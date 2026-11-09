@@ -88,9 +88,11 @@ prints a JSON MCP client configuration for this exact source-built apphost or
 latest matching Samsung GitHub release into the managed directory, verifying
 the release's published SHA-256 digest. Download supports Windows x64, Linux
 x64/arm64 and macOS arm64; a missing digest or an existing destination without
-a usable debugger fails without overwriting it. Linux and macOS require an
-available exclusive directory-rename primitive. Interrupted setup can leave a
-`.netcoredbg-stage-*` directory; a cleanup failure reports its path. An invalid
+a usable debugger fails without overwriting it. Acquisition has a 120-second
+cancellation deadline, including response-body reads; blocked local filesystem
+operations may take longer. Linux and macOS require an available exclusive
+directory-rename primitive. Interrupted setup can leave a `.netcoredbg-stage-*`
+directory; a cleanup failure reports its path. An invalid
 explicit debugger or `FLAUI_BRIDGE_PATH` fails without falling back. A valid
 explicit bridge is included, or on Windows the existing managed bridge is used
 when present. Diagnostics go to stderr. Setup does not cache dbgshim, build a
