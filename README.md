@@ -69,15 +69,21 @@ Otherwise it searches `~/.netcoredbg-mcp/netcoredbg/` (including one directory
 level below it), then `PATH`. Unlike Python discovery, a managed-directory
 enumeration error falls through to `PATH`, which may select a different version.
 An invalid explicit path is not replaced by a different debugger. This native
-lookup does not download or build a debugger; native setup and complete Python
-replacement remain open.
+lookup does not automatically download or build a debugger; general native
+setup and complete Python replacement remain open.
 
 In this opt-in mode, `--help` and `--version` exit without starting the MCP
 server; the version is the native host's build version, not the Python package
 version. Invalid arguments and conflicting project options fail before startup.
-`setup` and `--setup` report that native setup is unavailable rather than
-starting the server. Use the installed Python entry point for setup until its
-native replacement is delivered.
+`--legacy-compat setup --enc` (or `--legacy-compat --setup --enc`) invokes the
+packaged PowerShell installer for the pinned Windows EnC debugger. It downloads
+from GitHub and writes to `~/.netcoredbg-mcp`; an existing installation and
+configuration are retained in sibling backup paths reported by the installer.
+Backups are not removed automatically. The installer refuses malformed or
+excessively nested configuration before replacement; successful configuration
+updates use UTF-8 without BOM. Failures report recovery paths, and replacement
+is not crash-atomic. General `setup` without `--enc` remains unavailable in
+the native host; the installed Python entry point remains the default.
 
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at
