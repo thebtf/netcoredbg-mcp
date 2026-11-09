@@ -220,12 +220,12 @@ internal static class LegacyLaunchCompatibility
     {
         const string selection = "same_major_highest_numeric_tuple";
         CandidateEvidence Empty(string status) => new(null, null, null, null, selection, status);
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (string.IsNullOrEmpty(home)) return Empty("unreadable");
-        var cache = Path.Combine(home, ".netcoredbg-mcp", "dbgshim");
-        var filename = OperatingSystem.IsWindows() ? "dbgshim.dll" : "libdbgshim.so";
         try
         {
+            var home = LegacyDebuggerDiscovery.GetHomeDirectory();
+            if (string.IsNullOrWhiteSpace(home)) return Empty("unreadable");
+            var cache = Path.Combine(Path.GetFullPath(home), ".netcoredbg-mcp", "dbgshim");
+            var filename = OperatingSystem.IsWindows() ? "dbgshim.dll" : "libdbgshim.so";
             if ((File.GetAttributes(cache) & FileAttributes.Directory) == 0) return Empty("no_match");
             string? bestPath = null;
             BigInteger[]? bestKey = null;
@@ -245,7 +245,7 @@ internal static class LegacyLaunchCompatibility
             return new(version?.Text, version?.Major, bestPath, "cache_directory_name", selection, version is null ? "malformed" : "known");
         }
         catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { return Empty("missing"); }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Empty("unreadable"); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException) { return Empty("unreadable"); }
     }
 
     private static int Compare(BigInteger[] left, BigInteger[] right)
