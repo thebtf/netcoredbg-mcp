@@ -68,7 +68,7 @@ internal static class NativeCommandLine
         if (setupRequested && encRequested)
             return await RunEncSetupAsync().ConfigureAwait(false);
         if (setupRequested)
-            return await ErrorAsync("native setup is not available; use the installed Python netcoredbg-mcp setup command").ConfigureAwait(false);
+            return await NativeSetup.RunAsync().ConfigureAwait(false);
         return false;
     }
 
@@ -115,7 +115,7 @@ internal static class NativeCommandLine
         --help, -h          Show this help and exit.
         --version           Show the native host build version and exit.
 
+        setup, --setup      Configure the client; download a supported debugger if needed.
         setup --enc         Install the pinned EnC-capable debugger (PowerShell required).
-        General native setup is not available; use the installed Python netcoredbg-mcp setup command.
         """;
 }

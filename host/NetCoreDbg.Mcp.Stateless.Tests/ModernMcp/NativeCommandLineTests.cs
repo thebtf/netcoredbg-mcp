@@ -54,12 +54,13 @@ public sealed class NativeCommandLineTests
     [Theory]
     [InlineData("--setup")]
     [InlineData("setup")]
-    public async Task UnsupportedSetupIsReportedInsteadOfStartingMcp(string setup)
+    public async Task SetupWithMissingExplicitDebuggerFailsInsteadOfStartingMcp(string setup)
     {
         var result = await RunAsync("--legacy-compat", setup);
 
         Assert.NotEqual(0, result.ExitCode);
-        Assert.Contains("setup", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NETCOREDBG_PATH", result.StandardError, StringComparison.Ordinal);
+        Assert.Empty(result.StandardOutput);
         Assert.DoesNotContain("transport reading messages", result.StandardError, StringComparison.OrdinalIgnoreCase);
     }
 

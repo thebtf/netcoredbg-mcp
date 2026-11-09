@@ -6,18 +6,7 @@ internal static class LegacyDebuggerDiscovery
     {
         if (!string.IsNullOrEmpty(configuredPath)) return configuredPath;
 
-        var home = OperatingSystem.IsWindows()
-            ? Environment.GetEnvironmentVariable("USERPROFILE")
-            : Environment.GetEnvironmentVariable("HOME");
-        if (OperatingSystem.IsWindows() && home is null
-            && Environment.GetEnvironmentVariable("HOMEPATH") is { } homePath)
-        {
-            var drive = Environment.GetEnvironmentVariable("HOMEDRIVE") ?? string.Empty;
-            home = Path.IsPathFullyQualified(homePath) || (homePath.Length >= 2 && homePath[1] == ':')
-                ? homePath
-                : Path.IsPathRooted(homePath) || drive.EndsWith(':') ? drive + homePath : Path.Combine(drive, homePath);
-        }
-        if (!OperatingSystem.IsWindows() && home is null) home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var home = GetHomeDirectory();
         if (!string.IsNullOrEmpty(home))
         {
             try
@@ -43,5 +32,22 @@ internal static class LegacyDebuggerDiscovery
         }
 
         return DapLaunchEnvironment.FindExecutable("netcoredbg");
+    }
+
+    internal static string? GetHomeDirectory()
+    {
+        var home = OperatingSystem.IsWindows()
+            ? Environment.GetEnvironmentVariable("USERPROFILE")
+            : Environment.GetEnvironmentVariable("HOME");
+        if (OperatingSystem.IsWindows() && home is null
+            && Environment.GetEnvironmentVariable("HOMEPATH") is { } homePath)
+        {
+            var drive = Environment.GetEnvironmentVariable("HOMEDRIVE") ?? string.Empty;
+            home = Path.IsPathFullyQualified(homePath) || (homePath.Length >= 2 && homePath[1] == ':')
+                ? homePath
+                : Path.IsPathRooted(homePath) || drive.EndsWith(':') ? drive + homePath : Path.Combine(drive, homePath);
+        }
+        if (!OperatingSystem.IsWindows() && home is null) home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return home;
     }
 }
