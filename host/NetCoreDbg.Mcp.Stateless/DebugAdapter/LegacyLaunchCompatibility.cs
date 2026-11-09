@@ -34,7 +34,7 @@ internal static class LegacyLaunchCompatibility
         {
             verdict = "unknown";
             compatible = null;
-            warning = "Active dbgshim version is unavailable; native launch does not select a cached candidate.";
+            warning = "Active dbgshim version is unavailable; native launch may select a cached candidate for a verified managed Windows installation. The loaded shim and runtime compatibility are not verified.";
         }
         else if (target.Major == active.Major)
         {
@@ -46,7 +46,7 @@ internal static class LegacyLaunchCompatibility
         {
             verdict = "unknown";
             compatible = null;
-            warning = "Target and adjacent dbgshim major versions differ; native launch does not select a cached candidate, and the loaded shim is not verified.";
+            warning = "Target and adjacent dbgshim major versions differ; native launch may select a cached candidate for a verified managed Windows installation. The loaded shim and runtime compatibility are not verified.";
         }
         if (!Path.IsPathFullyQualified(program))
             warning = (warning is null ? "" : warning + " ") + "The diagnostic resolves a relative program against the project root; native launch resolves it against the server working directory.";

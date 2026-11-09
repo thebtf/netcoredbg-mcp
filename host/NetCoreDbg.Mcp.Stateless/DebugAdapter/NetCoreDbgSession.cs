@@ -52,6 +52,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
     private readonly Stream _output;
     private readonly Stream _error;
     private readonly IProcessTreeOwnership? _processTreeOwnership;
+    private NativeShimStage? _shimStage;
     private SafeProcessHandle? _attachTarget;
     private int _attachProcessId;
     private bool _attachMayHaveDispatched;
@@ -640,7 +641,10 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
         Action? failedStartCleanupCompleted,
         DapLaunchOptions? launchOptions,
-        CancellationToken cancellationToken, Action<string>? resourceEventObserver = null, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
+        CancellationToken cancellationToken, Action<string>? resourceEventObserver = null, LegacyFunctionBreakpoint[]? functionBreakpoints = null,
+        Action<object>? jobObservationForTest = null, Action<string, IntPtr, IntPtr>? launchPhaseForTest = null,
+        Func<IntPtr, IntPtr, bool>? launchTerminateForTest = null, Func<IntPtr, uint, uint>? launchWaitForTest = null,
+        NativeShimStage? shimStage = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(programPath);
@@ -660,7 +664,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             {
                 using var childEnvironment = WindowsChildEnvironmentBlock.Create(removals, dapEnvironment?.Keys);
                 dapEnvironment = childEnvironment.MatchInheritedSpellings(dapEnvironment);
-                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath, childEnvironment);
+                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath, childEnvironment, jobObservationForTest, launchPhaseForTest, launchTerminateForTest, launchWaitForTest);
                 process = windowsLaunch.Process;
                 session = new NetCoreDbgSession(
                     process,
@@ -670,6 +674,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                     requestTimeout,
                     stopTimeout,
                     windowsLaunch.Ownership, resourceEventObserver: resourceEventObserver);
+                session._shimStage = shimStage;
                 windowsLaunch = null;
             }
             else
@@ -705,7 +710,13 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 }
                 else if (windowsLaunch is not null)
                 {
-                    windowsLaunch.Dispose();
+                    if (shimStage is null) windowsLaunch.Dispose();
+                    else
+                    {
+                        var owner = new FailedConstructedLaunchOwner(windowsLaunch, shimStage, stopTimeout);
+                        try { await owner.CleanupAsync().ConfigureAwait(false); }
+                        catch (Exception failure) { throw new FailedConstructedLaunchCleanupException(owner, startupFailure, failure); }
+                    }
                 }
                 else if (process is not null)
                 {
@@ -717,9 +728,11 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                     failedStartCleanupCompleted?.Invoke();
                 }
             }
+            catch (FailedConstructedLaunchCleanupException) { throw; }
             catch (Exception cleanupFailure)
             {
-                throw new DapStartupCleanupException(startupFailure, cleanupFailure);
+                throw new DapStartupCleanupException(startupFailure, cleanupFailure,
+                    cleanupFailure is WindowsJobCleanupUnconfirmedException ? session : null);
             }
 
             throw;
@@ -727,7 +740,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
     }
     internal static async Task<NetCoreDbgSession> PrepareAttachAsync(
         string debuggerPath, int processId, TimeSpan initializeTimeout, TimeSpan requestTimeout,
-        TimeSpan stopTimeout, CancellationToken cancellationToken, Action<string>? resourceEventObserver = null)
+        TimeSpan stopTimeout, CancellationToken cancellationToken, Action<string>? resourceEventObserver = null,
+        Action<object>? jobObservationForTest = null, Action<object>? beforeAttachInitializeForTest = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Attach is supported only on Windows.");
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -742,10 +756,11 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         {
             if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process is unavailable or access is denied.");
             using var environment = WindowsChildEnvironmentBlock.Create(null, null);
-            launch = WindowsProcessTreeOwnership.Start(debuggerPath, environment);
+            launch = WindowsProcessTreeOwnership.Start(debuggerPath, environment, jobObservationForTest);
             session = new NetCoreDbgSession(launch.Process, launch.Input, launch.Output, launch.Error,
                 requestTimeout, stopTimeout, launch.Ownership, resourceEventObserver: resourceEventObserver);
             launch = null;
+            beforeAttachInitializeForTest?.Invoke(session);
             await session.InitializeProtocolAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
             if (!WindowsNativeSceneProcess.IsAlive(target)) throw new InvalidOperationException("The requested process exited before attach preparation completed.");
             ((WindowsProcessTreeOwnership)session._processTreeOwnership!).MakeAttachPassive();
@@ -765,7 +780,11 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 }
                 else launch?.Dispose();
             }
-            catch (Exception cleanupFailure) { throw new DapStartupCleanupException(startupFailure, cleanupFailure); }
+            catch (Exception cleanupFailure)
+            {
+                throw new DapStartupCleanupException(startupFailure, cleanupFailure,
+                    cleanupFailure is WindowsJobCleanupUnconfirmedException ? session : null);
+            }
             throw;
         }
         finally { target?.Dispose(); }
@@ -4981,6 +5000,20 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                     _processTreeOwnership?.Terminate();
                 }
             }
+            if (_shimStage is { } stage)
+            {
+                try
+                {
+                    if (!HasExited()) throw new InvalidOperationException("The staged debugger exit is unconfirmed.");
+                    stage.Cleanup();
+                    _shimStage = null;
+                }
+                catch (Exception exception)
+                {
+                    retainOwnership = true;
+                    throw new WindowsJobCleanupUnconfirmedException(new NativeShimStageCleanupException(stage, exception));
+                }
+            }
         }
         finally
         {
@@ -5640,10 +5673,19 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
         private readonly SafeKernelHandle _job;
 
-        private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
+        private readonly Action<object>? _jobObservationForTest;
 
-        public static WindowsProcessTreeLaunch Start(string debuggerPath, WindowsChildEnvironmentBlock environment) =>
-            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment, workingDirectory: null);
+        private WindowsProcessTreeOwnership(SafeKernelHandle job, Action<object>? jobObservationForTest = null)
+        {
+            _job = job;
+            _jobObservationForTest = jobObservationForTest;
+        }
+
+        public static WindowsProcessTreeLaunch Start(string debuggerPath, WindowsChildEnvironmentBlock environment, Action<object>? jobObservationForTest = null,
+            Action<string, IntPtr, IntPtr>? launchPhaseForTest = null, Func<IntPtr, IntPtr, bool>? launchTerminateForTest = null,
+            Func<IntPtr, uint, uint>? launchWaitForTest = null) =>
+            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment, workingDirectory: null,
+                jobObservationForTest, launchPhaseForTest, launchTerminateForTest, launchWaitForTest);
 
         internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments) =>
             StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory: null);
@@ -5652,7 +5694,9 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null, workingDirectory);
 
         private static WindowsProcessTreeLaunch StartCore(
-            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment, string? workingDirectory)
+            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment, string? workingDirectory,
+            Action<object>? jobObservationForTest = null, Action<string, IntPtr, IntPtr>? launchPhaseForTest = null,
+            Func<IntPtr, IntPtr, bool>? launchTerminateForTest = null, Func<IntPtr, uint, uint>? launchWaitForTest = null)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
             ArgumentNullException.ThrowIfNull(arguments);
@@ -5669,6 +5713,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             SafeKernelHandle? job = null;
             IntPtr processHandle = IntPtr.Zero;
             IntPtr threadHandle = IntPtr.Zero;
+            var jobAssigned = false;
             Process? process = null;
             Stream? input = null;
             Stream? output = null;
@@ -5701,11 +5746,14 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 childError.Dispose();
                 childError = null;
 
+                if (!atomicJobAssignment) launchPhaseForTest?.Invoke("before-assignment", processHandle, job.DangerousGetHandle());
                 if (!atomicJobAssignment && !AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
                 {
                     throw LastWin32Error("Could not assign the debugger process to its job object.");
                 }
 
+                if (!atomicJobAssignment) jobAssigned = true;
+                if (!atomicJobAssignment) launchPhaseForTest?.Invoke("after-assignment", processHandle, job.DangerousGetHandle());
                 process = Process.GetProcessById(checked((int)processInformation.ProcessId));
                 // Keep the same process instance while the original creation handle still prevents PID reuse.
                 _ = process.SafeHandle;
@@ -5722,7 +5770,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 standardOutput = null;
                 error = new FileStream(standardError, FileAccess.Read, bufferSize: 4096, isAsync: false);
                 standardError = null;
-                var ownership = new WindowsProcessTreeOwnership(job);
+                var ownership = new WindowsProcessTreeOwnership(job, jobObservationForTest);
                 var launch = new WindowsProcessTreeLaunch(process, input, output, error, ownership);
                 CloseHandle(processHandle);
                 processHandle = IntPtr.Zero;
@@ -5745,9 +5793,26 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                             cleanupFailure = exception;
                         }
                     }
-                    else
+                    else if (!atomicJobAssignment && job is not null)
                     {
-                        TerminateProcess(processHandle, 1);
+                        var owner = new FailedLaunchOwner(new SafeProcessHandle(processHandle, ownsHandle: true), job,
+                            jobAssigned, launchTerminateForTest, launchWaitForTest);
+                        processHandle = IntPtr.Zero;
+                        job = null;
+                        try { owner.Cleanup(); }
+                        catch (Exception exception)
+                        {
+                            Exception? disposalFailure = null;
+                            try
+                            {
+                                input?.Dispose();
+                                output?.Dispose();
+                                error?.Dispose();
+                                process?.Dispose();
+                            }
+                            catch (Exception disposeFailure) { disposalFailure = disposeFailure; }
+                            throw new FailedLaunchCleanupException(failure, exception, owner, disposalFailure);
+                        }
                     }
                 }
 
@@ -5781,6 +5846,82 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             }
         }
 
+        internal sealed class FailedLaunchOwner(
+            SafeProcessHandle process, SafeKernelHandle job, bool assigned, Func<IntPtr, IntPtr, bool>? terminateForTest,
+            Func<IntPtr, uint, uint>? waitForTest)
+        {
+            private bool _terminationRequested;
+            private bool _cleaned;
+            private NativeShimStage? _shimStage;
+            private readonly object _cleanupGate = new();
+
+            internal void AttachStage(NativeShimStage stage)
+            {
+                lock (_cleanupGate)
+                {
+                    if (_cleaned || _shimStage is not null) throw new InvalidOperationException("Failed launch owner cannot accept a stage.");
+                    _shimStage = stage;
+                }
+            }
+
+            internal void Cleanup()
+            {
+                lock (_cleanupGate)
+                {
+                    if (_cleaned) return;
+                    CleanupCore();
+                    _cleaned = true;
+                }
+            }
+
+            private void CleanupCore()
+            {
+                var handle = process.DangerousGetHandle();
+                var state = WaitForSingleObject(handle, 0);
+                if (state == uint.MaxValue) throw LastWin32Error("Could not inspect the failed launch process.");
+                if (state != 0)
+                {
+                    if (state != 258) throw new InvalidOperationException("Unexpected failed launch process wait result.");
+                    if (!_terminationRequested)
+                    {
+                        var terminated = terminateForTest is null
+                            ? TerminateProcess(handle, 1)
+                            : terminateForTest(handle, job.DangerousGetHandle());
+                        if (!terminated && WaitForSingleObject(handle, 0) != 0)
+                            throw LastWin32Error("Could not terminate the failed launch process.");
+                        _terminationRequested = true;
+                    }
+                    var waited = waitForTest is null ? WaitForSingleObject(handle, 5000) : waitForTest(handle, 5000);
+                    if (waited == uint.MaxValue) throw LastWin32Error("Could not wait for the failed launch process.");
+                    if (waited != 0) throw new TimeoutException("The failed launch process did not exit.");
+                }
+                if (assigned)
+                {
+                    if (!TerminateJobObject(job.DangerousGetHandle(), 1))
+                        throw LastWin32Error("Could not terminate the failed launch job object.");
+                    var elapsed = Stopwatch.StartNew();
+                    while (ActiveProcessCount(job) != 0)
+                    {
+                        if (elapsed.Elapsed >= TimeSpan.FromSeconds(5))
+                            throw new TimeoutException("The failed launch job did not drain.");
+                        Thread.Sleep(50);
+                    }
+                }
+                _shimStage?.Cleanup();
+                _shimStage = null;
+                process.Dispose();
+                job.Dispose();
+            }
+        }
+
+        internal sealed class FailedLaunchCleanupException(Exception startupFailure, Exception cleanupFailure, FailedLaunchOwner owner, Exception? disposalFailure)
+            : AggregateException("The failed debugger launch cleanup is unconfirmed.",
+                disposalFailure is null ? [startupFailure, cleanupFailure] : [startupFailure, cleanupFailure, disposalFailure])
+        {
+            internal FailedLaunchOwner Owner { get; } = owner;
+            internal Exception? DisposalFailure { get; } = disposalFailure;
+        }
+
         public void Dispose() => _job.Dispose();
 
         internal bool Contains(SafeProcessHandle process) =>
@@ -5791,6 +5932,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         internal async Task WaitForDrainAsync(TimeSpan timeout)
         {
             var started = Stopwatch.GetTimestamp();
+            _jobObservationForTest?.Invoke(this);
             while (ActiveProcessCount() != 0)
             {
                 var remaining = timeout - Stopwatch.GetElapsedTime(started);
@@ -6298,13 +6440,41 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             public ulong OtherTransferCount;
         }
 
-        private sealed class SafeKernelHandle : SafeHandleZeroOrMinusOneIsInvalid
+        internal sealed class SafeKernelHandle : SafeHandleZeroOrMinusOneIsInvalid
         {
             public SafeKernelHandle(IntPtr handle)
                 : base(ownsHandle: true) => SetHandle(handle);
 
             protected override bool ReleaseHandle() => CloseHandle(handle);
         }
+    }
+
+    internal sealed class FailedConstructedLaunchOwner(WindowsProcessTreeLaunch launch, NativeShimStage stage, TimeSpan timeout)
+    {
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private bool _cleaned;
+
+        internal async Task CleanupAsync()
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_cleaned) return;
+                launch.Ownership.Terminate();
+                await launch.Process.WaitForExitAsync().WaitAsync(timeout).ConfigureAwait(false);
+                await launch.Ownership.WaitForDrainAsync(timeout).ConfigureAwait(false);
+                stage.Cleanup();
+                launch.Dispose();
+                _cleaned = true;
+            }
+            finally { _gate.Release(); }
+        }
+    }
+
+    internal sealed class FailedConstructedLaunchCleanupException(FailedConstructedLaunchOwner owner, Exception startupFailure, Exception inner)
+        : AggregateException("Staged debugger launch cleanup is unconfirmed.", startupFailure, inner)
+    {
+        internal FailedConstructedLaunchOwner Owner { get; } = owner;
     }
 
     internal sealed class WindowsProcessTreeLaunch(
@@ -6755,11 +6925,12 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
     }
 }
 
-internal sealed class DapStartupCleanupException(Exception startupFailure, Exception cleanupFailure)
+internal sealed class DapStartupCleanupException(Exception startupFailure, Exception cleanupFailure, NetCoreDbgSession? retainedSession = null)
     : AggregateException("DAP startup cleanup failed.", cleanupFailure, startupFailure)
 {
     internal Exception StartupFailure { get; } = startupFailure;
     internal Exception CleanupFailure { get; } = cleanupFailure;
+    internal NetCoreDbgSession? RetainedSession { get; } = retainedSession;
 }
 
 internal sealed class DapLaunchRefusedException() : Exception("DAP launch request was refused.");

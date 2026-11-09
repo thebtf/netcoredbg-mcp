@@ -41,6 +41,82 @@ public sealed class NativeDebuggerProvisioningTests
     }
 
     [Fact]
+    public async Task VerifiedReleasePublishesExactFileManifest()
+    {
+        var install = Installer();
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var target = Path.Combine(scratch, "managed");
+            var archive = CreateArchive();
+            using var handler = new ReleaseHandler(archive);
+            using var client = new HttpClient(handler);
+
+            await install(client, new Uri(ApiUrl), target, "win64", CancellationToken.None);
+
+            using var receipt = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(target, ".native-debugger-manifest.json")));
+            var root = receipt.RootElement;
+            Assert.Equal(new[] { "archiveSha256", "asset", "files", "schema" },
+                root.EnumerateObject().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+            Assert.Equal("netcoredbg-mcp.native-debugger-install/1", root.GetProperty("schema").GetString());
+            Assert.Equal("netcoredbg-win64.zip", root.GetProperty("asset").GetString());
+            Assert.Equal(Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant(), root.GetProperty("archiveSha256").GetString());
+
+            var entries = root.GetProperty("files").EnumerateArray().ToArray();
+            var expected = new[]
+            {
+                (Path: "netcoredbg/ManagedPart.dll", Content: "fixture-library"),
+                (Path: "netcoredbg/netcoredbg.exe", Content: "fixture-debugger"),
+            };
+            Assert.Equal(expected.Length, entries.Length);
+            for (var i = 0; i < expected.Length; i++)
+            {
+                var entry = entries[i];
+                var bytes = Encoding.UTF8.GetBytes(expected[i].Content);
+                Assert.Equal(new[] { "path", "sha256", "size" },
+                    entry.EnumerateObject().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+                Assert.Equal(expected[i].Path, entry.GetProperty("path").GetString());
+                Assert.Equal((long)bytes.Length, entry.GetProperty("size").GetInt64());
+                Assert.Equal(Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), entry.GetProperty("sha256").GetString());
+                Assert.Equal(bytes, await File.ReadAllBytesAsync(Path.Combine(target, expected[i].Path.Replace('/', Path.DirectorySeparatorChar))));
+            }
+            Assert.Equal(new[] { ".native-debugger-manifest.json", "netcoredbg/ManagedPart.dll", "netcoredbg/netcoredbg.exe" },
+                Directory.GetFiles(target, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(target, path).Replace('\\', '/'))
+                    .OrderBy(path => path, StringComparer.Ordinal).ToArray());
+            Assert.Equal(2, handler.RequestCount);
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Theory]
+    [InlineData("receipt-collision")]
+    [InlineData("receipt-collision-uppercase")]
+    [InlineData("receipt-collision-directory")]
+    public async Task ReservedManifestArchiveEntryCannotPublishOrOverwriteFiles(string fault)
+    {
+        var install = Installer();
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var target = Path.Combine(scratch, "managed", "netcoredbg");
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            var sentinel = Path.Combine(scratch, "managed", "keep.txt");
+            await File.WriteAllTextAsync(sentinel, "preserve");
+            using var handler = new ReleaseHandler(CreateArchive(fault));
+            using var client = new HttpClient(handler);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => install(client, new Uri(ApiUrl), target, "win64", CancellationToken.None));
+
+            Assert.Equal(1, handler.DownloadCount);
+            Assert.False(Directory.Exists(target));
+            Assert.False(File.Exists(Path.Combine(target, ".native-debugger-manifest.json")));
+            Assert.Equal("preserve", await File.ReadAllTextAsync(sentinel));
+        }
+        finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
+    }
+
+    [Fact]
     public async Task ApprovedAssetRedirectIsFollowed()
     {
         var install = Installer();
@@ -86,6 +162,7 @@ public sealed class NativeDebuggerProvisioningTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
             Assert.Equal(fault == "manifest-stall" ? 1 : 2, handler.RequestCount);
             Assert.False(Directory.Exists(target));
+            Assert.False(File.Exists(Path.Combine(target, ".native-debugger-manifest.json")));
             Assert.Empty(Directory.GetDirectories(scratch, ".netcoredbg-stage-*"));
         }
         finally
@@ -136,6 +213,7 @@ public sealed class NativeDebuggerProvisioningTests
             await Assert.ThrowsAsync<InvalidDataException>(() => install(client, new Uri(ApiUrl), target, "win64", CancellationToken.None));
 
             Assert.False(Directory.Exists(target));
+            Assert.False(File.Exists(Path.Combine(target, ".native-debugger-manifest.json")));
             Assert.False(File.Exists(Path.Combine(scratch, "managed", "escape.txt")));
             if (fault == "foreign-url") Assert.Equal(0, handler.DownloadCount);
             if (fault == "foreign-redirect") Assert.Equal(2, handler.RequestCount);
@@ -224,6 +302,7 @@ public sealed class NativeDebuggerProvisioningTests
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => install(client, new Uri(ApiUrl), target, "win64", cancellation.Token));
             Assert.False(Path.Exists(target));
+            Assert.False(File.Exists(Path.Combine(target, ".native-debugger-manifest.json")));
         }
         finally { await ModernMcpScratchDirectory.DeleteAsync(scratch); }
     }
@@ -358,6 +437,9 @@ public sealed class NativeDebuggerProvisioningTests
             WriteEntry(archive, "netcoredbg/ManagedPart.dll", "fixture-library");
             if (fault == "duplicate") WriteEntry(archive, "netcoredbg/netcoredbg.exe", "duplicate");
             if (fault == "traversal") WriteEntry(archive, "../escape.txt", "escape");
+            if (fault == "receipt-collision") WriteEntry(archive, ".native-debugger-manifest.json", "archive-controlled");
+            if (fault == "receipt-collision-uppercase") WriteEntry(archive, ".NATIVE-DEBUGGER-MANIFEST.JSON", "archive-controlled");
+            if (fault == "receipt-collision-directory") WriteEntry(archive, ".native-debugger-manifest.json/nested", "archive-controlled");
             if (fault == "symlink")
             {
                 var entry = archive.CreateEntry("netcoredbg/link");

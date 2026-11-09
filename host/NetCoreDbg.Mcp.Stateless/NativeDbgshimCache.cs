@@ -203,9 +203,17 @@ internal static class NativeDbgshimCache
             throw new IOException($"'{path}' is not a non-reparse directory.");
     }
 
-    private static FileStream OpenRegularFile(string path)
+    internal static string ToExtendedPath(string path)
     {
-        var handle = CreateFile(path, GenericRead, (uint)FileShare.Read, IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
+        var full = Path.GetFullPath(path);
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+        return full.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
+    }
+
+    internal static FileStream OpenRegularFile(string path)
+    {
+        var handle = CreateFile(ToExtendedPath(path), GenericRead, (uint)FileShare.Read, IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             var error = Marshal.GetLastWin32Error();

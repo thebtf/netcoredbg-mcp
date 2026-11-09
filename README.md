@@ -112,11 +112,17 @@ caches discovered runtime dbgshim files without overwriting a different existing
 conflicts and partial failures are reported. Each file is limited to 32 MiB,
 and a run adds at most 256 MiB; this is not a lifetime cache quota. Existing
 reparse-point cache directories are refused, but the path checks do not pin
-ancestors against replacement by another process during setup. The compatibility
-inspection can report a cached candidate, but native launch does not select or
-replace a shim. Linux and macOS shim caching remains unimplemented. Setup does
-not edit client configuration or modify PATH. File checks and release digests
-do not prove binary compatibility. Python remains the installed default.
+ancestors against replacement by another process during setup. For an eligible
+managed Windows installation, a legacy launch can use a same-major cached shim
+from a per-session debugger copy without changing the shared installation or cache.
+Eligibility requires a native installation receipt and a compatible cached shim;
+older or unsupported installations fall back to their configured debugger. While
+the private copy is owned, its ancestor directory handles may prevent those
+directories from being renamed or removed until cleanup completes. The receipt
+records local consistency, not authenticity against a same-user writer.
+Linux and macOS shim caching remains unimplemented. Setup does not edit client
+configuration or modify PATH. File checks and release digests do not prove binary
+compatibility. Python remains the installed default.
 
 For a Windows x64 source candidate, publish the host and bridge once each as
 self-contained outputs:
@@ -1161,10 +1167,11 @@ inspect the selected runtime and shim without starting the process.
 
 The source-built opt-in `--legacy-compat` host also provides this read-only
 diagnostic. It reports the shim beside the configured absolute debugger and a
-cached candidate, but native launch does not select or replace a cached shim.
-Matching major versions are a heuristic, not proof of the loaded shim or of
-runtime compatibility. A mismatch or unavailable version produces `unknown`,
-not `compatible_after_swap`.
+cached candidate. An eligible managed Windows launch may instead run a private
+copy with a compatible cached shim; the diagnostic does not prove which shim
+will be loaded. Matching major versions are a heuristic, not proof of runtime
+compatibility. A mismatch or unavailable version produces `unknown`, not
+`compatible_after_swap`.
 Relative diagnostic paths use the selected project root, while legacy launch
 resolves them against the server working directory. Both resolve existing targets
 and select a matching `.dll` for a no-build `.exe` launch; pre-build link
