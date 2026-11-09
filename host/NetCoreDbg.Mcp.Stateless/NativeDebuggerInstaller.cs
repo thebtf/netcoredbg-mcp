@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
+using NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
 namespace NetCoreDbg.Mcp.Stateless;
 
@@ -25,10 +26,32 @@ internal static class NativeDebuggerInstaller
     private const int MaxEntries = 4096;
     private const int MaxRedirects = 5;
     private const string ApiPath = "/repos/Samsung/netcoredbg/releases/latest";
+    private static readonly SemaphoreSlim ProvisionGate = new(1, 1);
 
     // Callers must use this factory in production: automatic redirects would bypass
     // validation before the redirected request. Injected clients are for controlled tests.
     internal static HttpClient CreateHttpClient() => new(new HttpClientHandler { AllowAutoRedirect = false });
+
+    internal static async Task<string?> ProvisionAsync(CancellationToken cancellationToken)
+    {
+        await ProvisionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var existing = LegacyDebuggerDiscovery.Resolve(null);
+            if (existing is not null) return existing;
+            var home = LegacyDebuggerDiscovery.GetHomeDirectory();
+            var asset = NativeSetup.CurrentAsset();
+            if (string.IsNullOrWhiteSpace(home) || asset is null) return null;
+            var managedRoot = Path.Combine(Path.GetFullPath(home), ".netcoredbg-mcp");
+            Directory.CreateDirectory(managedRoot);
+            using var client = CreateHttpClient();
+            client.Timeout = TimeSpan.FromSeconds(120);
+            return await InstallAsync(client, new Uri("https://api.github.com/repos/Samsung/netcoredbg/releases/latest"),
+                Path.Combine(managedRoot, "netcoredbg"), asset, cancellationToken).ConfigureAwait(false);
+        }
+        finally { ProvisionGate.Release(); }
+    }
 
     internal static async Task<string> InstallAsync(HttpClient client, Uri releaseApi, string installDirectory, string assetKey, CancellationToken cancellationToken)
     {
@@ -162,7 +185,9 @@ internal static class NativeDebuggerInstaller
             {
                 if (result is not null)
                     throw new NativeDebuggerInstalledCleanupException(result, stage, cleanup);
-                throw new AggregateException($"Could not clean task-owned staging directory '{stage}'; inspect it before removal.", failure is null ? [cleanup] : [failure, cleanup]);
+                var unconfirmed = new AggregateException($"Could not clean task-owned staging directory '{stage}'; inspect it before removal.", failure is null ? [cleanup] : [failure, cleanup]);
+                unconfirmed.Data["StagingPath"] = stage;
+                throw unconfirmed;
             }
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
