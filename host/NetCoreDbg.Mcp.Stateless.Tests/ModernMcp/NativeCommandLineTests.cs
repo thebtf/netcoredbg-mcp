@@ -52,22 +52,31 @@ public sealed class NativeCommandLineTests
     }
 
     [Theory]
-    [InlineData("--setup", false)]
-    [InlineData("setup", false)]
-    [InlineData("--setup", true)]
-    [InlineData("setup", true)]
-    public async Task UnsupportedSetupIsReportedInsteadOfStartingMcp(string setup, bool enc)
+    [InlineData("--setup")]
+    [InlineData("setup")]
+    public async Task UnsupportedSetupIsReportedInsteadOfStartingMcp(string setup)
     {
-        var result = enc
-            ? await RunAsync("--legacy-compat", setup, "--enc")
-            : await RunAsync("--legacy-compat", setup);
+        var result = await RunAsync("--legacy-compat", setup);
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains("setup", result.StandardError, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("transport reading messages", result.StandardError, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunAsync(params string[] arguments)
+    [Fact]
+    public async Task EncSetupWithoutPowerShellFailsBeforeInstallation()
+    {
+        var result = await RunCoreAsync(true, ["--legacy-compat", "setup", "--enc"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("PowerShell", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("transport reading messages", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Task<(int ExitCode, string StandardOutput, string StandardError)> RunAsync(params string[] arguments) =>
+        RunCoreAsync(false, arguments);
+
+    private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunCoreAsync(bool noPowerShell, string[] arguments)
     {
         var candidate = TestOutputPathResolver.ResolveProcess(
             Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"),
@@ -92,6 +101,7 @@ public sealed class NativeCommandLineTests
         process.StartInfo.Environment["HOME"] = scratch;
         process.StartInfo.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         process.StartInfo.Environment["DOTNET_NOLOGO"] = "1";
+        if (noPowerShell) process.StartInfo.Environment["PATH"] = scratch;
         var started = false;
         try
         {

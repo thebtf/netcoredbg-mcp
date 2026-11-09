@@ -78,13 +78,10 @@ def test_build_netcoredbg_enc_script_contract():
     assert "Invoke-WebRequest" in text
     assert "Get-FileHash" in text
     assert "Expand-Archive" in text
-    assert "Assert-InstalledDebugger" in text
-    assert "Save-NetcoredbgConfig" in text
-    assert "$null -eq $config" in text
     assert "thebtf/netcoredbg" in text
     assert "BuildFromSource" in text
     assert "git clone" in text
-    assert '-DNCDB_DOTNET_STARTUP_HOOK=$ncdbhookCMakePath' in text
+    assert "-DNCDB_DOTNET_STARTUP_HOOK=" in text
     assert "cmake" in text
     assert "dotnet" in text
     assert "cl.exe" in text

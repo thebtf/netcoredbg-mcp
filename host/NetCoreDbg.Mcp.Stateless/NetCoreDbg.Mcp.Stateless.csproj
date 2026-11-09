@@ -23,6 +23,7 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../LICENSE" LogicalName="NetCoreDbg.Mcp.Stateless.LICENSE" />
+    <None Include="../../scripts/build-netcoredbg-enc.ps1" Link="scripts/build-netcoredbg-enc.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe.schema.json" Link="NativeScene/native-scene-probe.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe.schema.json" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe-v2.schema.json" Link="NativeScene/native-scene-probe-v2.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe-v2.schema.json" />
