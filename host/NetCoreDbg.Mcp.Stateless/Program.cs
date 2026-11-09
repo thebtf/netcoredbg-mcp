@@ -360,6 +360,30 @@ internal static class Program
         private int _starts;
         private TaskCompletionSource<bool>? _startsDrained;
         private Exception? _startCleanupFailure;
+        private readonly record struct CleanupAuthority(bool IsLegacy, string? MuxId);
+        private sealed class PendingShimStage(NativeShimStage stage)
+        {
+            private readonly object _gate = new();
+            private bool _cleaned;
+            internal void Cleanup()
+            {
+                lock (_gate)
+                {
+                    if (_cleaned) return;
+                    stage.Cleanup();
+                    _cleaned = true;
+                }
+            }
+        }
+        private readonly List<PendingShimStage> _failedShimStages = [];
+        private readonly Dictionary<PendingShimStage, CleanupAuthority> _failedShimAuthorities = [];
+        private readonly List<NetCoreDbgSession.FailedConstructedLaunchOwner> _failedConstructedOwners = [];
+        private readonly Dictionary<NetCoreDbgSession.FailedConstructedLaunchOwner, CleanupAuthority> _failedConstructedAuthorities = [];
+        private readonly List<NetCoreDbgSession> _failedStartOwners = [];
+        private readonly Dictionary<NetCoreDbgSession, CleanupAuthority> _failedStartAuthorities = [];
+        private readonly Dictionary<NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchOwner, CleanupAuthority> _failedLaunchAuthorities = [];
+        private readonly List<NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchOwner> _failedLaunchOwners = [];
+        private bool HasUnconfirmedStartCleanup => _startCleanupFailure is not null || _failedStartOwners.Count != 0 || _failedLaunchOwners.Count != 0 || _failedShimStages.Count != 0 || _failedConstructedOwners.Count != 0;
         private readonly CancellationTokenSource _startShutdown = new();
         private readonly CancellationTokenSource _provisionShutdown = new();
         private List<(CancellationToken Token, CancellationTokenRegistration Registration)>? _startShutdownRegistrations;
@@ -381,6 +405,12 @@ internal static class Program
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
         private readonly Action? _failedStartCleanupCompleted;
+        private readonly Action<object>? _jobObservationForTest;
+        private readonly Action<object>? _beforeAttachInitializeForTest;
+        private readonly Action<object>? _beforePublishForTest;
+        private readonly Action<string, IntPtr, IntPtr>? _launchPhaseForTest;
+        private readonly Func<IntPtr, IntPtr, bool>? _launchTerminateForTest;
+        private readonly Func<IntPtr, uint, uint>? _launchWaitForTest;
         internal bool LegacyCompat { get; init; }
         private readonly SemaphoreSlim _legacyGate = new(1, 1);
         private readonly LegacyOutputEvidence _legacyOutputEvidence = new();
@@ -726,7 +756,7 @@ internal static class Program
             var idle = _legacySessionId is null;
             lock (_lifetimeGate)
             {
-                if (_startCleanupFailure is not null)
+                if (HasUnconfirmedStartCleanup)
                     throw new McpProtocolException("Debug session cleanup is unconfirmed.", McpErrorCode.InvalidRequest);
             }
             NetCoreDbgSession? session = null;
@@ -970,7 +1000,11 @@ internal static class Program
                     if (configured is not null && (!double.TryParse(configured, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out timeout) || !double.IsFinite(timeout) || timeout < 0))
                         return LegacyError("Invalid NETCOREDBG_SESSION_TIMEOUT.");
-                    if (!_legacyAttachClosing && !(_legacyAttachSlot?.IsClosing ?? false) && _legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
+                    bool launchCleanupClosing;
+                    lock (_lifetimeGate)
+                        launchCleanupClosing = _legacySessionId is { } ownedSession
+                            && _ownedSlots.TryGetValue(ownedSession, out var ownership) && ownership.Slot.IsClosing;
+                    if (!launchCleanupClosing && !_legacyAttachClosing && !(_legacyAttachSlot?.IsClosing ?? false) && _legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
                         && _legacyCompositeEvaluations == 0 && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
                     {
                         _legacyHasOwner = false;
@@ -1680,7 +1714,7 @@ internal static class Program
                     var attachToken = CreateToken();
                     lock (_lifetimeGate)
                     {
-                        if (_shutdownRequested || _buildActive || _buildCleanupUnconfirmed || _startCleanupFailure is not null)
+                        if (_shutdownRequested || _buildActive || _buildCleanupUnconfirmed || HasUnconfirmedStartCleanup)
                             return LegacyError("Debug session cleanup is unconfirmed.");
                         _starts++;
                     }
@@ -1715,7 +1749,7 @@ internal static class Program
                             {
                                 attachResources!.Observe(eventName);
                                 if (eventName == "stopped") ScheduleLegacyTrace(attachGeneration);
-                            }).ConfigureAwait(false);
+                            }, _jobObservationForTest, _beforeAttachInitializeForTest).ConfigureAwait(false);
                         attachBinding = new NativeSceneSessionBinding(attachToken, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                         attachBinding.AttachSession(attached);
                         var attachOutput = new OutputLifetime(attached.OutputBuffer, attached);
@@ -1756,7 +1790,9 @@ internal static class Program
                     }
                     catch (Exception exception)
                     {
-                        if (exception is DapStartupCleanupException) RecordStartCleanupFailure(exception);
+                        if (exception is DapStartupCleanupException startupCleanup) RecordStartupCleanupException(startupCleanup, new CleanupAuthority(true, muxId));
+                        else if (exception is NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchCleanupException failedLaunch)
+                            RecordFailedLaunchCleanup(failedLaunch, new CleanupAuthority(true, muxId));
                     }
                     finally
                     {
@@ -1780,7 +1816,8 @@ internal static class Program
                             }
                             else
                             {
-                                try { await DisposeUnpublishedResourcesAsync(attached, attachBinding, CancellationToken.None).ConfigureAwait(false); }
+                                try { await DisposeUnpublishedResourcesAsync(attached, attachBinding, CancellationToken.None, new CleanupAuthority(true, muxId)).ConfigureAwait(false); }
+                                catch (Exception cleanupFailure) when (cleanupFailure is SessionCleanupUnconfirmedException) { }
                                 catch (Exception cleanupFailure) { RecordStartCleanupFailure(cleanupFailure); }
                             }
                         }
@@ -1891,7 +1928,7 @@ internal static class Program
                             generation.Observe(eventName);
                             if (eventName == "stopped") ScheduleLegacyTrace(traceGeneration);
                         }, breakpointOptions, _legacyFunctionBreakpoints.ToArray(), restarting ? _legacyResolvedLaunch : null, value => resolvedLaunch = value,
-                            () => adapterStartAttempted = true).ConfigureAwait(false);
+                            () => adapterStartAttempted = true, new CleanupAuthority(true, muxId)).ConfigureAwait(false);
                         startCompleted = true;
                     }
                     finally
@@ -2324,7 +2361,7 @@ internal static class Program
                     {
                         lock (_lifetimeGate)
                         {
-                            if (_startCleanupFailure is not null || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
+                            if (HasUnconfirmedStartCleanup || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
                                 return LegacyError("Debug session cleanup is unconfirmed.");
                         }
                     }
@@ -2390,8 +2427,23 @@ internal static class Program
                 if (cleanupForce && _legacySessionId is null)
                 {
                     KeyValuePair<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)>[] orphaned;
-                    lock (_lifetimeGate) orphaned = _ownedSlots.ToArray();
-                    if (orphaned.Length > 0 && (!_legacyHasOwner || _legacyOwner != muxId))
+                    NetCoreDbgSession[] failedStarts;
+                    NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchOwner[] failedLaunches;
+                    NetCoreDbgSession.FailedConstructedLaunchOwner[] failedConstructed;
+                    PendingShimStage[] failedStages;
+                    bool foreignRetained;
+                    lock (_lifetimeGate)
+                    {
+                        orphaned = _ownedSlots.ToArray();
+                        failedStarts = _failedStartOwners.ToArray();
+                        failedLaunches = _failedLaunchOwners.ToArray();
+                        failedConstructed = _failedConstructedOwners.ToArray();
+                        failedStages = _failedShimStages.ToArray();
+                        foreignRetained = _failedStartAuthorities.Values.Concat(_failedLaunchAuthorities.Values)
+                            .Concat(_failedConstructedAuthorities.Values).Concat(_failedShimAuthorities.Values)
+                            .Any(authority => !authority.IsLegacy || !StringComparer.Ordinal.Equals(authority.MuxId, muxId));
+                    }
+                    if (foreignRetained || (orphaned.Length > 0 && (!_legacyHasOwner || _legacyOwner != muxId)))
                         return LegacyCleanupResult(cleanupObservations!, false, "Cleanup owner is unavailable or belongs to another agent.");
                     _legacyStopping = true;
                     _legacyGate.Release();
@@ -2404,6 +2456,42 @@ internal static class Program
                             _ = CompleteRetirementAsync(entry.Key, entry.Value.Session, entry.Value.Slot, entry.Value.Output, close);
                             await Task.WhenAny(close, Task.Delay(StopTimeout)).ConfigureAwait(false);
                             if (close.IsFaulted) _ = close.Exception;
+                        }
+                        foreach (var owner in failedStarts)
+                        {
+                            try
+                            {
+                                await owner.StopForOwnerAsync(CancellationToken.None).ConfigureAwait(false);
+                                lock (_lifetimeGate) { _failedStartOwners.Remove(owner); _failedStartAuthorities.Remove(owner); }
+                            }
+                            catch (Exception) { }
+                        }
+                        foreach (var owner in failedLaunches)
+                        {
+                            try
+                            {
+                                await Task.Run(owner.Cleanup).ConfigureAwait(false);
+                                lock (_lifetimeGate) { _failedLaunchOwners.Remove(owner); _failedLaunchAuthorities.Remove(owner); }
+                            }
+                            catch (Exception) { }
+                        }
+                        foreach (var owner in failedConstructed)
+                        {
+                            try
+                            {
+                                await owner.CleanupAsync().ConfigureAwait(false);
+                                lock (_lifetimeGate) { _failedConstructedOwners.Remove(owner); _failedConstructedAuthorities.Remove(owner); }
+                            }
+                            catch (Exception) { }
+                        }
+                        foreach (var owner in failedStages)
+                        {
+                            try
+                            {
+                                await Task.Run(owner.Cleanup).ConfigureAwait(false);
+                                lock (_lifetimeGate) { _failedShimStages.Remove(owner); _failedShimAuthorities.Remove(owner); }
+                            }
+                            catch (Exception) { }
                         }
                     }
                     finally
@@ -2422,7 +2510,7 @@ internal static class Program
                         return LegacyError("A breakpoint update is still settling.");
                     lock (_lifetimeGate)
                     {
-                        if (_shutdownRequested || _startCleanupFailure is not null || _buildCleanupUnconfirmed || _buildActive
+                        if (_shutdownRequested || HasUnconfirmedStartCleanup || _buildCleanupUnconfirmed || _buildActive
                             || _starts != 0 || _ownedSlots.Count != 0 || _outputs.Count != 0 || !_sessions.IsEmpty || !_slots.IsEmpty)
                             return LegacyError("Debug session cleanup is unconfirmed.");
                         cancellationToken.ThrowIfCancellationRequested();
@@ -2438,7 +2526,7 @@ internal static class Program
                         return LegacyError("Debug session transition is in progress.");
                     lock (_lifetimeGate)
                     {
-                        if (_startCleanupFailure is not null)
+                        if (HasUnconfirmedStartCleanup)
                             return LegacyError("Debug session cleanup is unconfirmed.", "unknown");
                     }
                     return name == GetModules
@@ -4091,7 +4179,7 @@ internal static class Program
                         }
                         buffer = lifetime.Buffer;
                     }
-                    else if (_startCleanupFailure is not null || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
+                    else if (HasUnconfirmedStartCleanup || _buildCleanupUnconfirmed || _starts != 0 || _ownedSlots.Count != 0)
                     {
                         observed["reason"] = "debug session cleanup is unconfirmed";
                         return observed;
@@ -5015,10 +5103,14 @@ internal static class Program
         private LegacyCleanupSnapshot CaptureLegacyProcessEntries()
         {
             KeyValuePair<string, (SessionSlot Slot, OutputLifetime Output, NetCoreDbgSession Session)>[] owners;
-            lock (_lifetimeGate) owners = _ownedSlots.ToArray();
+            bool complete;
+            lock (_lifetimeGate)
+            {
+                owners = _ownedSlots.ToArray();
+                complete = _failedStartOwners.Count == 0 && _failedLaunchOwners.Count == 0 && _failedConstructedOwners.Count == 0 && _failedShimStages.Count == 0;
+            }
             var entries = new Dictionary<int, LegacyProcessEntry>();
             var capturedOwners = new (NetCoreDbgSession Session, int ForcedBefore)[owners.Length];
-            var complete = true;
             var budget = 0;
             for (var index = 0; index < owners.Length; index++)
             {
@@ -5065,8 +5157,8 @@ internal static class Program
             bool unavailable;
             lock (_lifetimeGate)
             {
-                remaining = _ownedSlots.Count;
-                unavailable = _shutdownRequested || _startCleanupFailure is not null || _buildCleanupUnconfirmed || _buildActive || _starts != 0;
+                remaining = _ownedSlots.Count + _failedStartOwners.Count + _failedLaunchOwners.Count + _failedConstructedOwners.Count + _failedShimStages.Count;
+                unavailable = _shutdownRequested || HasUnconfirmedStartCleanup || _buildCleanupUnconfirmed || _buildActive || _starts != 0;
             }
             var complete = success && remaining == 0 && !unavailable;
             var terminated = 0;
@@ -5172,6 +5264,28 @@ internal static class Program
             : this(debuggerPath, bridgePath: null, artifactRoot: null,
                 static session => session.IsUsable, static session => session.DisposeAsync(), failedStartCleanupCompleted)
         {
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Action? failedStartCleanupCompleted, Action<object>? jobObservationForTest)
+            : this(debuggerPath, failedStartCleanupCompleted)
+        {
+            _jobObservationForTest = jobObservationForTest;
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Action? failedStartCleanupCompleted, Action<object>? jobObservationForTest,
+            Action<object>? beforeAttachInitializeForTest, Action<object>? beforePublishForTest)
+            : this(debuggerPath, failedStartCleanupCompleted, jobObservationForTest)
+        {
+            _beforeAttachInitializeForTest = beforeAttachInitializeForTest;
+            _beforePublishForTest = beforePublishForTest;
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Action<string, IntPtr, IntPtr> launchPhaseForTest,
+            Func<IntPtr, IntPtr, bool> launchTerminateForTest, Func<IntPtr, uint, uint>? launchWaitForTest) : this(debuggerPath)
+        {
+            _launchPhaseForTest = launchPhaseForTest;
+            _launchTerminateForTest = launchTerminateForTest;
+            _launchWaitForTest = launchWaitForTest;
         }
 
         private DebugSessionRegistry(string? debuggerPath, Func<NetCoreDbgSession, bool> isUsable)
@@ -5284,7 +5398,7 @@ internal static class Program
             RequestContext<CallToolRequestParams> context,
             CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null, Action<string>? resourceObserver = null, LegacyRequestedLine[]? breakpointOptions = null,
             LegacyFunctionBreakpoint[]? functionBreakpoints = null, LegacyResolvedLaunch? resolvedLaunch = null, Action<LegacyResolvedLaunch>? captureResolvedLaunch = null,
-            Action? adapterStartAttempted = null)
+            Action? adapterStartAttempted = null, CleanupAuthority cleanupAuthority = default)
         {
             var arguments = argumentsOverride ?? context.Params.Arguments;
             if (!TryReadProgram(arguments, out var program, out var hasProgram)
@@ -5402,6 +5516,8 @@ internal static class Program
                 {
                     return NotFound();
                 }
+                if (HasUnconfirmedStartCleanup)
+                    return Error("debug_session_cleanup_unconfirmed", "DEBUG_SESSION_CLEANUP_UNCONFIRMED");
                 if (_buildCleanupUnconfirmed)
                     return Error("start_debug_build_cleanup_unconfirmed", "START_DEBUG_BUILD_CLEANUP_UNCONFIRMED");
                 if (_buildActive || (preBuild.Enabled && (_starts != 0 || _ownedSlots.Count != 0)))
@@ -5412,6 +5528,7 @@ internal static class Program
             }
 
             NetCoreDbgSession? session = null;
+            NativeShimStage? shimStage = null;
             NativeSceneSessionBinding? binding = null;
             SessionSlot? registeredSlot = null;
             string? registeredToken = null;
@@ -5555,11 +5672,18 @@ internal static class Program
                     if (string.IsNullOrWhiteSpace(debuggerPath))
                         return Error("debugger_provision_failed", "DEBUGGER_PROVISION_FAILED");
                 }
+                if (cleanupAuthority.IsLegacy && OperatingSystem.IsWindows())
+                {
+                    shimStage = NativeShimStage.Prepare(debuggerPath, program!, startupCancellation.Token);
+                    if (shimStage is not null)
+                        ReportProvisioningDiagnostic($"Debugger shim stage is owned at {JsonSerializer.Serialize(shimStage.RootPath)} until debugger cleanup is confirmed.");
+                }
+                var launchDebuggerPath = shimStage?.ExecutablePath ?? debuggerPath;
                 var token = CreateToken();
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                 adapterStartAttempted?.Invoke();
                 session = await NetCoreDbgSession.StartAsync(
-                    debuggerPath,
+                    launchDebuggerPath,
                     program!,
                     InitializeTimeout,
                     RequestTimeout,
@@ -5568,7 +5692,10 @@ internal static class Program
                     breakpoints,
                     _failedStartCleanupCompleted,
                     launchOptions,
-                    startupCancellation.Token, resourceObserver, functionBreakpoints).ConfigureAwait(false);
+                    startupCancellation.Token, resourceObserver, functionBreakpoints, _jobObservationForTest,
+                    _launchPhaseForTest, _launchTerminateForTest, _launchWaitForTest, shimStage).ConfigureAwait(false);
+                shimStage = null;
+                _beforePublishForTest?.Invoke(session);
                 binding.AttachSession(session);
                 var output = new OutputLifetime(session.OutputBuffer, LegacyCompat ? session : null);
                 SessionSlot? slot = null;
@@ -5630,12 +5757,12 @@ internal static class Program
                     }
                     catch (Exception cleanupFailure)
                     {
-                        RecordStartCleanupFailure(cleanupFailure);
+                        if (cleanupFailure is not SessionCleanupUnconfirmedException) RecordStartCleanupFailure(cleanupFailure);
                     }
                 }
                 else
                 {
-                    await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken).ConfigureAwait(false);
+                    await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken, cleanupAuthority).ConfigureAwait(false);
                 }
 
                 throw;
@@ -5647,9 +5774,26 @@ internal static class Program
             catch (Exception exception)
             {
                 var cleanupComplete = true;
-                if (exception is DapStartupCleanupException)
+                if (exception is NativeShimStageCleanupException stageFailure)
+                    RetainShimStage(stageFailure.Stage, cleanupAuthority);
+                else if (exception is DapStartupCleanupException startupCleanup)
                 {
-                    RecordStartCleanupFailure(exception);
+                    if (startupCleanup.RetainedSession is not null) shimStage = null;
+                    RecordStartupCleanupException(startupCleanup, cleanupAuthority);
+                }
+                else if (exception is NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchCleanupException failedLaunch)
+                {
+                    if (shimStage is not null) { failedLaunch.Owner.AttachStage(shimStage); shimStage = null; }
+                    RecordFailedLaunchCleanup(failedLaunch, cleanupAuthority);
+                }
+                else if (exception is NetCoreDbgSession.FailedConstructedLaunchCleanupException failedConstructed)
+                {
+                    shimStage = null;
+                    lock (_lifetimeGate)
+                    {
+                        _failedConstructedOwners.Add(failedConstructed.Owner);
+                        _failedConstructedAuthorities.Add(failedConstructed.Owner, cleanupAuthority);
+                    }
                 }
 
                 if (registeredSlot is not null)
@@ -5665,7 +5809,7 @@ internal static class Program
                     }
                     catch (Exception cleanupFailure)
                     {
-                        RecordStartCleanupFailure(cleanupFailure);
+                        if (cleanupFailure is not SessionCleanupUnconfirmedException) RecordStartCleanupFailure(cleanupFailure);
                         cleanupComplete = false;
                     }
                 }
@@ -5673,7 +5817,7 @@ internal static class Program
                 {
                     try
                     {
-                        await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken).ConfigureAwait(false);
+                        await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken, cleanupAuthority).ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
@@ -5700,6 +5844,11 @@ internal static class Program
             {
                 try
                 {
+                    if (shimStage is not null)
+                    {
+                        try { shimStage.Cleanup(); }
+                        catch (Exception) { RetainShimStage(shimStage, cleanupAuthority); }
+                    }
                     startupCancellation?.Dispose();
                 }
                 finally
@@ -7743,6 +7892,75 @@ internal static class Program
                 failure = exception;
             }
 
+            NetCoreDbgSession[] failedStartOwners;
+            lock (_lifetimeGate) failedStartOwners = _failedStartOwners.ToArray();
+            List<Exception>? retryFailures = null;
+            foreach (var owner in failedStartOwners)
+            {
+                try
+                {
+                    await owner.StopForOwnerAsync(CancellationToken.None).ConfigureAwait(false);
+                    lock (_lifetimeGate) { _failedStartOwners.Remove(owner); _failedStartAuthorities.Remove(owner); }
+                }
+                catch (Exception retryFailure)
+                {
+                    (retryFailures ??= []).Add(retryFailure);
+                }
+            }
+            NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchOwner[] failedLaunchOwners;
+            lock (_lifetimeGate) failedLaunchOwners = _failedLaunchOwners.ToArray();
+            foreach (var owner in failedLaunchOwners)
+            {
+                try
+                {
+                    await Task.Run(owner.Cleanup).ConfigureAwait(false);
+                    lock (_lifetimeGate) { _failedLaunchOwners.Remove(owner); _failedLaunchAuthorities.Remove(owner); }
+                }
+                catch (Exception retryFailure)
+                {
+                    (retryFailures ??= []).Add(retryFailure);
+                }
+            }
+            NetCoreDbgSession.FailedConstructedLaunchOwner[] failedConstructed;
+            PendingShimStage[] failedStages;
+            lock (_lifetimeGate)
+            {
+                failedConstructed = _failedConstructedOwners.ToArray();
+                failedStages = _failedShimStages.ToArray();
+            }
+            foreach (var owner in failedConstructed)
+            {
+                try
+                {
+                    await owner.CleanupAsync().ConfigureAwait(false);
+                    lock (_lifetimeGate) { _failedConstructedOwners.Remove(owner); _failedConstructedAuthorities.Remove(owner); }
+                }
+                catch (Exception retryFailure) { (retryFailures ??= []).Add(retryFailure); }
+            }
+            foreach (var owner in failedStages)
+            {
+                try
+                {
+                    await Task.Run(owner.Cleanup).ConfigureAwait(false);
+                    lock (_lifetimeGate) { _failedShimStages.Remove(owner); _failedShimAuthorities.Remove(owner); }
+                }
+                catch (Exception retryFailure) { (retryFailures ??= []).Add(retryFailure); }
+            }
+            if (retryFailures is not null)
+            {
+                if (failure is not null)
+                {
+                    retryFailures.Insert(0, failure);
+                    if (failure is not OperationCanceledException and not SessionCleanupUnconfirmedException) RecordStartCleanupFailure(failure);
+                }
+                lock (_lifetimeGate)
+                {
+                    if (_startCleanupFailure is { } recorded && !ReferenceEquals(recorded, failure))
+                        retryFailures.Insert(0, recorded);
+                }
+                failure = new SessionCleanupUnconfirmedException(new AggregateException(retryFailures));
+            }
+
             DisposeStartShutdownCancellation(out var startCleanupFailure, out var shutdownCancellation);
             if (failure is null or OperationCanceledException)
             {
@@ -7977,41 +8195,77 @@ internal static class Program
         private async ValueTask DisposeUnpublishedResourcesAsync(
             NetCoreDbgSession? session,
             NativeSceneSessionBinding? binding,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, CleanupAuthority cleanupAuthority = default)
         {
-            try
+            Exception? stopFailure = null;
+            Exception? bindingFailure = null;
+            Exception? disposeFailure = null;
+            if (session is not null)
             {
-                try
-                {
-                    if (session is not null)
-                    {
-                        // The startup token remains live through rollback so shutdown
-                        // can force a cleanup already waiting for a graceful response.
-                        await session.StopForOwnerAsync(cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    try
-                    {
-                        if (binding is not null)
-                        {
-                            await binding.DisposeAsync().ConfigureAwait(false);
-                        }
-                    }
-                    finally
-                    {
-                        if (session is not null)
-                        {
-                            await _dispose(session).ConfigureAwait(false);
-                        }
-                    }
-                }
+                try { await session.StopForOwnerAsync(cancellationToken).ConfigureAwait(false); }
+                catch (Exception exception) { stopFailure = exception; }
             }
-            catch (Exception exception)
+            if (binding is not null)
             {
-                RecordStartCleanupFailure(exception);
-                throw;
+                try { await binding.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception exception) { bindingFailure = exception; }
+            }
+            if (session is not null)
+            {
+                try { await _dispose(session).ConfigureAwait(false); }
+                catch (Exception exception) { disposeFailure = exception; }
+            }
+
+            var unconfirmed = session is not null &&
+                (disposeFailure is NetCoreDbgSession.WindowsJobCleanupUnconfirmedException ||
+                 (stopFailure is NetCoreDbgSession.WindowsJobCleanupUnconfirmedException && disposeFailure is not null));
+            if (unconfirmed) RetainFailedStartOwner(session!, cleanupAuthority);
+            var genuine = new[] { stopFailure, bindingFailure, disposeFailure }
+                .Where(static failure => failure is not null and not NetCoreDbgSession.WindowsJobCleanupUnconfirmedException)
+                .Cast<Exception>().ToArray();
+            if (genuine.Length != 0) RecordStartCleanupFailure(genuine.Length == 1 ? genuine[0] : new AggregateException(genuine));
+            if (unconfirmed)
+                throw new SessionCleanupUnconfirmedException(disposeFailure ?? stopFailure!);
+            if (genuine.Length == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(genuine[0]).Throw();
+            if (genuine.Length > 1) throw new AggregateException(genuine);
+        }
+
+        private void RetainShimStage(NativeShimStage stage, CleanupAuthority authority)
+        {
+            var owner = new PendingShimStage(stage);
+            lock (_lifetimeGate)
+            {
+                _failedShimStages.Add(owner);
+                _failedShimAuthorities.Add(owner, authority);
+            }
+            ReportProvisioningDiagnostic($"Debugger shim stage cleanup is unconfirmed at {JsonSerializer.Serialize(stage.RootPath)}; retry owner cleanup before removing it.");
+        }
+
+        private void RecordStartupCleanupException(DapStartupCleanupException exception, CleanupAuthority authority)
+        {
+            if (exception.RetainedSession is { } session) RetainFailedStartOwner(session, authority);
+            else RecordStartCleanupFailure(exception);
+        }
+
+        private void RecordFailedLaunchCleanup(NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchCleanupException exception, CleanupAuthority authority)
+        {
+            if (exception.DisposalFailure is { } failure) RecordStartCleanupFailure(failure);
+            RetainFailedLaunchOwner(exception.Owner, authority);
+        }
+
+        private void RetainFailedLaunchOwner(NetCoreDbgSession.WindowsProcessTreeOwnership.FailedLaunchOwner owner, CleanupAuthority authority)
+        {
+            lock (_lifetimeGate)
+            {
+                if (!_failedLaunchOwners.Contains(owner)) { _failedLaunchOwners.Add(owner); _failedLaunchAuthorities.Add(owner, authority); }
+            }
+        }
+
+        private void RetainFailedStartOwner(NetCoreDbgSession session, CleanupAuthority authority)
+        {
+            lock (_lifetimeGate)
+            {
+                if (!_failedStartOwners.Contains(session)) { _failedStartOwners.Add(session); _failedStartAuthorities.Add(session, authority); }
             }
         }
 

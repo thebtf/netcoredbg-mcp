@@ -40,6 +40,28 @@ public sealed class RegistryShutdownContractTests
     private static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr sourceHandle, IntPtr targetProcess,
         out IntPtr targetHandle, uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint options);
 
+    [DllImport("kernelbase.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(SafeFileHandle job, int informationClass,
+        out JobAccounting information, uint length, IntPtr returnLength);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobAccounting
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateOwnedWitness(SafeProcessHandle process, uint exitCode);
@@ -254,7 +276,7 @@ public sealed class RegistryShutdownContractTests
         Assert.Equal(activeMajor, data["activeDbgshim"]?["major"]?.GetValue<int>());
         Assert.Equal("unknown", data["verdict"]?.GetValue<string>());
         Assert.Null(data["compatible"]);
-        Assert.Contains("does not select a cached candidate", data["warning"]?.GetValue<string>());
+        Assert.Contains("may select a cached candidate", data["warning"]?.GetValue<string>());
         Assert.False(data["willMutateSharedDebugger"]?.GetValue<bool>());
         Assert.False(data["mutationPerformed"]?.GetValue<bool>());
         Assert.NotEqual("compatible_after_swap", data["verdict"]?.GetValue<string>());
@@ -2400,6 +2422,65 @@ public sealed class RegistryShutdownContractTests
                 "legacy-cleanup-retry-finally").WaitAsync(TimeSpan.FromSeconds(20)));
         }
     }
+    [Theory]
+    [InlineData("cleanup_processes")]
+    [InlineData("stop_debug")]
+    public async Task LegacyUnconfirmedLaunchCleanup_ExpiredLeaseCannotTransferOwner(string foreignOperation)
+    {
+        const string muxA = "retained-launch-owner-a";
+        const string muxB = "retained-launch-owner-b";
+        var previousTimeout = Environment.GetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT");
+        Environment.SetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT", "1");
+        var disposeAttempts = 0;
+        try
+        {
+            await using var harness = await RegistryHostHarness.CreateAsync(
+                new FixtureConfiguration(SupportsTerminate: true, SuppressLifecycleEvents: true),
+                disposeSession: session =>
+                {
+                    if (Interlocked.Increment(ref disposeAttempts) == 1)
+                        return ValueTask.FromException(new InvalidOperationException("controlled retained launch cleanup failure"));
+                    return RegistryHostHarness.DisposeSessionAsync(session);
+                });
+            harness.EnableLegacyCompat();
+            var started = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+            }, "retained-owner-start", muxA).WaitAsync(ObservationTimeout));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            var token = harness.LegacySessionId;
+            var slot = harness.OwnedSlot(token);
+            Assert.NotNull(slot);
+            var failed = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "retained-owner-first", muxA).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.NotNull(failed["error"]);
+            Assert.False(failed["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.Equal(1, Volatile.Read(ref disposeAttempts));
+            var before = await harness.Fixture.ReadTranscriptAsync();
+            await harness.ExpireLegacyOwnerForTestAsync();
+            Assert.Equal(muxA, harness.LegacyOwnerForTest());
+
+            var arguments = foreignOperation == "cleanup_processes" ? new JsonObject { ["force"] = true } : new JsonObject();
+            var denied = Content(await harness.CallLegacyWithMetaAsync(foreignOperation, arguments,
+                "retained-owner-foreign-" + foreignOperation, muxB).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(muxA, harness.LegacyOwnerForTest());
+            Assert.Same(slot, harness.OwnedSlot(token));
+            Assert.Equal(1, Volatile.Read(ref disposeAttempts));
+            Assert.Equal(before.Count, (await harness.Fixture.ReadTranscriptAsync()).Count);
+
+            var retry = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "retained-owner-retry", muxA).WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Null(retry["error"]);
+            Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+            Assert.Equal(2, Volatile.Read(ref disposeAttempts));
+            Assert.Null(harness.OwnedSlot(token));
+        }
+        finally { Environment.SetEnvironmentVariable("NETCOREDBG_SESSION_TIMEOUT", previousTimeout); }
+    }
+
     [Fact]
     public async Task StopDebug_CleanupFailureRetainsOwnerForRetryWithoutRepeatingDebuggerStop()
     {
@@ -4090,12 +4171,841 @@ public sealed class RegistryShutdownContractTests
         }
     }
 
+    [Theory]
+    [InlineData("before-assignment")]
+    [InlineData("after-assignment")]
+    public async Task FailedWindowsLaunch_UnconfirmedTermination_RetainsExactCreationHandles(string phase)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        SafeProcessHandle? witness = null;
+        SafeFileHandle? jobWitness = null;
+        IntPtr originalProcess = IntPtr.Zero;
+        IntPtr originalJob = IntPtr.Zero;
+        var terminationAttempts = 0;
+        var setupFailure = new InvalidOperationException("controlled failure before session construction");
+        void Phase(string current, IntPtr process, IntPtr job)
+        {
+            if (current != phase) return;
+            if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), out var processCopy, 0, false, 2)) return;
+            var processWitness = new SafeProcessHandle(processCopy, ownsHandle: true);
+            if (!DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out var jobCopy, 0, false, 2))
+            {
+                processWitness.Dispose();
+                return;
+            }
+            witness = processWitness;
+            jobWitness = new SafeFileHandle(jobCopy, ownsHandle: true);
+            originalProcess = process;
+            originalJob = job;
+            throw setupFailure;
+        }
+        bool Terminate(IntPtr process, IntPtr job)
+        {
+            var exactProcess = Assert.IsType<SafeProcessHandle>(witness);
+            Assert.True(CompareObjectHandles(process, exactProcess.DangerousGetHandle()));
+            if (phase == "after-assignment")
+                Assert.True(CompareObjectHandles(job, Assert.IsType<SafeFileHandle>(jobWitness).DangerousGetHandle()));
+            if (Interlocked.Increment(ref terminationAttempts) == 1) return false;
+            using var borrowed = new SafeProcessHandle(process, ownsHandle: false);
+            return TerminateOwnedWitness(borrowed, 1);
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), launchPhaseForTest: Phase,
+            launchTerminateForTest: Terminate);
+        try
+        {
+            var result = await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "pre-session-" + phase);
+            Assert.True(result.IsError == true);
+            harness.AssertNoPublishedSessions();
+            var process = Assert.IsType<SafeProcessHandle>(witness);
+            var job = Assert.IsType<SafeFileHandle>(jobWitness);
+            Assert.Equal(1, terminationAttempts);
+            Assert.Equal(258u, WaitForSingleObject(process, 0));
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()), "Unconfirmed cleanup must retain the original creation handle.");
+            if (phase == "after-assignment")
+                Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()), "The assigned Job handle must remain owned until drain.");
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            Assert.Equal(2, terminationAttempts);
+            Assert.Equal(0u, WaitForSingleObject(process, 5000));
+            Assert.True(QueryInformationJobObject(job, 1, out var accounting, (uint)Marshal.SizeOf<JobAccounting>(), IntPtr.Zero));
+            Assert.Equal(0u, accounting.ActiveProcesses);
+            Assert.False(CompareObjectHandles(originalProcess, process.DangerousGetHandle()), "The retained process handle must close after confirmed cleanup.");
+            if (phase == "after-assignment")
+                Assert.False(CompareObjectHandles(originalJob, job.DangerousGetHandle()), "The retained Job handle must close after confirmed drain.");
+        }
+        finally
+        {
+            if (witness is not null)
+            {
+                if (WaitForSingleObject(witness, 0) == 258u)
+                    Assert.True(TerminateOwnedWitness(witness, 1));
+                Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+                harness.Fixture.MarkCleanupConfirmed();
+            }
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+            jobWitness?.Dispose();
+            witness?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task FailedWindowsLaunch_UnconfirmedExitWait_RetainsAssignedCreationHandles()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        SafeProcessHandle? witness = null;
+        SafeFileHandle? jobWitness = null;
+        IntPtr originalProcess = IntPtr.Zero;
+        IntPtr originalJob = IntPtr.Zero;
+        var waitFailures = 0;
+        void Phase(string phase, IntPtr process, IntPtr job)
+        {
+            if (phase != "after-assignment") return;
+            if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), out var processCopy, 0, false, 2)) return;
+            var processWitness = new SafeProcessHandle(processCopy, ownsHandle: true);
+            if (!DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out var jobCopy, 0, false, 2))
+            {
+                processWitness.Dispose();
+                return;
+            }
+            witness = processWitness;
+            jobWitness = new SafeFileHandle(jobCopy, ownsHandle: true);
+            originalProcess = process;
+            originalJob = job;
+            throw new InvalidOperationException("controlled pre-session setup failure");
+        }
+        bool Terminate(IntPtr process, IntPtr job)
+        {
+            Assert.True(CompareObjectHandles(process, Assert.IsType<SafeProcessHandle>(witness).DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(job, Assert.IsType<SafeFileHandle>(jobWitness).DangerousGetHandle()));
+            using var borrowed = new SafeProcessHandle(process, ownsHandle: false);
+            return TerminateOwnedWitness(borrowed, 1);
+        }
+        uint Wait(IntPtr process, uint milliseconds)
+        {
+            Assert.True(CompareObjectHandles(process, Assert.IsType<SafeProcessHandle>(witness).DangerousGetHandle()));
+            if (Interlocked.Increment(ref waitFailures) == 1) return uint.MaxValue;
+            using var borrowed = new SafeProcessHandle(process, ownsHandle: false);
+            return WaitForSingleObject(borrowed, milliseconds);
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), launchPhaseForTest: Phase,
+            launchTerminateForTest: Terminate, launchWaitForTest: Wait);
+        try
+        {
+            var result = await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "pre-session-wait");
+            Assert.True(result.IsError == true);
+            harness.AssertNoPublishedSessions();
+            var process = Assert.IsType<SafeProcessHandle>(witness);
+            var job = Assert.IsType<SafeFileHandle>(jobWitness);
+            Assert.Equal(1, waitFailures);
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            Assert.Equal(0u, WaitForSingleObject(process, 5000));
+            Assert.True(QueryInformationJobObject(job, 1, out var accounting, (uint)Marshal.SizeOf<JobAccounting>(), IntPtr.Zero));
+            Assert.Equal(0u, accounting.ActiveProcesses);
+            Assert.False(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.False(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+        }
+        finally
+        {
+            if (witness is not null)
+            {
+                if (WaitForSingleObject(witness, 0) == 258u) Assert.True(TerminateOwnedWitness(witness, 1));
+                Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+                harness.Fixture.MarkCleanupConfirmed();
+            }
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+            jobWitness?.Dispose();
+            witness?.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCleanupProcesses_UnpublishedStart_OnlyOwnerRetriesExactJob(bool unrelatedFailure)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string muxA = "unpublished-owner-a";
+        const string muxB = "unpublished-owner-b";
+        object? retainedJob = null;
+        var observations = 0;
+        var publishAttempts = 0;
+        var sticky = new IOException("separate recorded cleanup failure");
+        void Observe(object owner)
+        {
+            if (retainedJob is null) retainedJob = owner;
+            if (!ReferenceEquals(retainedJob, owner)) return;
+            if (Interlocked.Increment(ref observations) <= 3)
+                throw new IOException("controlled unconfirmed Job observation");
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), jobObservationForTest: Observe,
+            beforePublishForTest: _ =>
+            {
+                if (Interlocked.Increment(ref publishAttempts) == 1) throw new InvalidOperationException("controlled unpublished start");
+            });
+        harness.EnableLegacyCompat();
+        try
+        {
+            var start = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath, ["pre_build"] = false,
+            }, "public-cleanup-start", muxA));
+            Assert.NotNull(start["error"]);
+            Assert.NotNull(retainedJob);
+            Assert.Equal(2, observations);
+            Assert.False(JobHandle(retainedJob!).IsClosed);
+            harness.AssertNoPublishedSessions();
+            if (unrelatedFailure) harness.InjectRecordedCleanupFailure(sticky);
+
+            var status = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = false }, "public-cleanup-status", muxA));
+            Assert.Equal("status", status["data"]?["action"]?.GetValue<string>());
+            Assert.False(status["data"]?["observations_complete"]?.GetValue<bool>() ?? true);
+            Assert.Equal(2, observations);
+            Assert.False(JobHandle(retainedJob!).IsClosed);
+            var denied = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "public-cleanup-foreign", muxB));
+            Assert.NotNull(denied["error"]);
+            Assert.Equal(2, observations);
+            Assert.False(JobHandle(retainedJob!).IsClosed);
+
+            var first = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "public-cleanup-first", muxA));
+            Assert.NotNull(first["error"]);
+            Assert.False(first["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.True(first["data"]?["remaining_owners"]?.GetValue<int>() >= 1);
+            Assert.Equal(3, observations);
+            Assert.False(JobHandle(retainedJob!).IsClosed);
+            var retry = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "public-cleanup-retry", muxA));
+            Assert.Equal(4, observations);
+            Assert.True(JobHandle(retainedJob!).IsClosed);
+            if (unrelatedFailure)
+            {
+                Assert.NotNull(retry["error"]);
+                Assert.False(retry["data"]?["complete"]?.GetValue<bool>() ?? true);
+                Assert.Same(sticky, harness.RecordedCleanupFailure());
+            }
+            else
+            {
+                Assert.Null(retry["error"]);
+                Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+                var next = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+                {
+                    ["program"] = harness.ProgramPath, ["pre_build"] = false,
+                }, "public-cleanup-next-start", muxA));
+                Assert.True(next["data"]?["success"]?.GetValue<bool>(), next.ToJsonString());
+                var stop = Content(await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "public-cleanup-next-stop", muxA));
+                Assert.True(stop["data"]?["success"]?.GetValue<bool>(), stop.ToJsonString());
+            }
+        }
+        finally
+        {
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null)
+            {
+                failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+                if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            }
+            if (retainedJob is not null && !JobHandle(retainedJob).IsClosed) await FinishObservedJobAsync(retainedJob);
+            if (retainedJob is not null) harness.Fixture.MarkCleanupConfirmed();
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_PreSessionFailure_OnlyOwnerRetriesCreationHandles()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string muxA = "creation-owner-a";
+        const string muxB = "creation-owner-b";
+        SafeProcessHandle? witness = null;
+        SafeFileHandle? jobWitness = null;
+        IntPtr originalProcess = IntPtr.Zero;
+        IntPtr originalJob = IntPtr.Zero;
+        var terminationAttempts = 0;
+        var injected = false;
+        void Phase(string phase, IntPtr process, IntPtr job)
+        {
+            if (injected || phase != "after-assignment") return;
+            if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), out var processCopy, 0, false, 2)) return;
+            var processWitness = new SafeProcessHandle(processCopy, ownsHandle: true);
+            if (!DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out var jobCopy, 0, false, 2))
+            {
+                processWitness.Dispose();
+                return;
+            }
+            injected = true;
+            witness = processWitness;
+            jobWitness = new SafeFileHandle(jobCopy, ownsHandle: true);
+            originalProcess = process;
+            originalJob = job;
+            throw new InvalidOperationException("controlled pre-session setup failure");
+        }
+        bool Terminate(IntPtr process, IntPtr job)
+        {
+            Assert.True(CompareObjectHandles(process, Assert.IsType<SafeProcessHandle>(witness).DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(job, Assert.IsType<SafeFileHandle>(jobWitness).DangerousGetHandle()));
+            if (Interlocked.Increment(ref terminationAttempts) <= 2) return false;
+            using var borrowed = new SafeProcessHandle(process, ownsHandle: false);
+            return TerminateOwnedWitness(borrowed, 1);
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), launchPhaseForTest: Phase,
+            launchTerminateForTest: Terminate);
+        harness.EnableLegacyCompat();
+        try
+        {
+            var start = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath, ["pre_build"] = false,
+            }, "pre-session-public-start", muxA));
+            Assert.NotNull(start["error"]);
+            var process = Assert.IsType<SafeProcessHandle>(witness);
+            var job = Assert.IsType<SafeFileHandle>(jobWitness);
+            Assert.Equal(1, terminationAttempts);
+            Assert.Equal(258u, WaitForSingleObject(process, 0));
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            var status = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = false }, "pre-session-public-status", muxA));
+            Assert.Equal("status", status["data"]?["action"]?.GetValue<string>());
+            Assert.False(status["data"]?["observations_complete"]?.GetValue<bool>() ?? true);
+            Assert.Equal(1, terminationAttempts);
+            var denied = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "pre-session-public-foreign", muxB));
+            Assert.NotNull(denied["error"]);
+            Assert.Equal(1, terminationAttempts);
+            Assert.Equal(258u, WaitForSingleObject(process, 0));
+            var first = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "pre-session-public-first", muxA));
+            Assert.NotNull(first["error"]);
+            Assert.False(first["data"]?["complete"]?.GetValue<bool>() ?? true);
+            Assert.True(first["data"]?["remaining_owners"]?.GetValue<int>() >= 1);
+            Assert.Equal(2, terminationAttempts);
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            var retry = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true }, "pre-session-public-retry", muxA));
+            Assert.Null(retry["error"]);
+            Assert.True(retry["data"]?["complete"]?.GetValue<bool>());
+            Assert.Equal(3, terminationAttempts);
+            Assert.Equal(0u, WaitForSingleObject(process, 5000));
+            Assert.True(QueryInformationJobObject(job, 1, out var accounting, (uint)Marshal.SizeOf<JobAccounting>(), IntPtr.Zero));
+            Assert.Equal(0u, accounting.ActiveProcesses);
+            Assert.False(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.False(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            var next = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath, ["pre_build"] = false,
+            }, "pre-session-public-next", muxA));
+            Assert.True(next["data"]?["success"]?.GetValue<bool>(), next.ToJsonString());
+            var stop = Content(await harness.CallLegacyWithMetaAsync("stop_debug", new JsonObject(), "pre-session-public-stop", muxA));
+            Assert.True(stop["data"]?["success"]?.GetValue<bool>(), stop.ToJsonString());
+        }
+        finally
+        {
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null)
+            {
+                failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+                if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            }
+            if (witness is not null)
+            {
+                if (WaitForSingleObject(witness, 0) == 258u) Assert.True(TerminateOwnedWitness(witness, 1));
+                Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+                harness.Fixture.MarkCleanupConfirmed();
+            }
+            await harness.DisposeAsync();
+            jobWitness?.Dispose();
+            witness?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyCleanupProcesses_PreSessionOwner_ConcurrentShutdownJoinsOneRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string mux = "creation-concurrent-owner";
+        SafeProcessHandle? witness = null;
+        SafeFileHandle? jobWitness = null;
+        IntPtr originalProcess = IntPtr.Zero;
+        IntPtr originalJob = IntPtr.Zero;
+        var attempts = 0;
+        var active = 0;
+        var overlap = 0;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        void Phase(string phase, IntPtr process, IntPtr job)
+        {
+            if (phase != "after-assignment") return;
+            if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), out var processCopy, 0, false, 2)) return;
+            var processWitness = new SafeProcessHandle(processCopy, ownsHandle: true);
+            if (!DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out var jobCopy, 0, false, 2))
+            {
+                processWitness.Dispose();
+                return;
+            }
+            witness = processWitness;
+            jobWitness = new SafeFileHandle(jobCopy, ownsHandle: true);
+            originalProcess = process;
+            originalJob = job;
+            throw new InvalidOperationException("controlled concurrent cleanup setup failure");
+        }
+        bool Terminate(IntPtr process, IntPtr job)
+        {
+            Assert.True(CompareObjectHandles(process, Assert.IsType<SafeProcessHandle>(witness).DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(job, Assert.IsType<SafeFileHandle>(jobWitness).DangerousGetHandle()));
+            if (Interlocked.Increment(ref attempts) == 1) return false;
+            if (Interlocked.Increment(ref active) != 1)
+            {
+                Interlocked.Increment(ref overlap);
+                Interlocked.Decrement(ref active);
+                return false;
+            }
+            try
+            {
+                entered.TrySetResult(true);
+                if (!release.Wait(TimeSpan.FromSeconds(10))) return false;
+                using var borrowed = new SafeProcessHandle(process, ownsHandle: false);
+                return TerminateOwnedWitness(borrowed, 1);
+            }
+            finally { Interlocked.Decrement(ref active); }
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), launchPhaseForTest: Phase,
+            launchTerminateForTest: Terminate);
+        harness.EnableLegacyCompat();
+        Task<CallToolResult>? cleanup = null;
+        Task? shutdown = null;
+        var shutdownStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var start = Content(await harness.CallLegacyWithMetaAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath, ["pre_build"] = false,
+            }, "concurrent-public-start", mux));
+            Assert.NotNull(start["error"]);
+            var process = Assert.IsType<SafeProcessHandle>(witness);
+            var job = Assert.IsType<SafeFileHandle>(jobWitness);
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            Assert.Equal(258u, WaitForSingleObject(process, 0));
+            var denied = Content(await harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "concurrent-public-foreign", "creation-concurrent-foreign"));
+            Assert.NotNull(denied["error"]);
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            cleanup = Task.Run(() => harness.CallLegacyWithMetaAsync("cleanup_processes", new JsonObject { ["force"] = true },
+                "concurrent-public-cleanup", mux));
+            var enteredOrCompleted = await Task.WhenAny(entered.Task, cleanup, Task.Delay(ObservationTimeout));
+            Assert.Same(entered.Task, enteredOrCompleted);
+            await entered.Task;
+            Assert.False(cleanup.IsCompleted, "Cleanup must not report success before the owned attempt drains.");
+            shutdown = Task.Run(async () =>
+            {
+                shutdownStarted.TrySetResult(true);
+                await harness.StopAsync(CancellationToken.None);
+            });
+            await shutdownStarted.Task.WaitAsync(ObservationTimeout);
+            var early = await Task.WhenAny(shutdown, Task.Delay(TimeSpan.FromMilliseconds(300)));
+            Assert.NotSame(shutdown, early);
+            Assert.Equal(258u, WaitForSingleObject(process, 0));
+            Assert.True(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.True(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            release.Set();
+            var cleanupResult = Content(await cleanup.WaitAsync(TimeSpan.FromSeconds(15)));
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Equal(0, Volatile.Read(ref overlap));
+            Assert.Equal(2, Volatile.Read(ref attempts));
+            Assert.Equal(0u, WaitForSingleObject(process, 5000));
+            Assert.True(QueryInformationJobObject(job, 1, out var accounting, (uint)Marshal.SizeOf<JobAccounting>(), IntPtr.Zero));
+            Assert.Equal(0u, accounting.ActiveProcesses);
+            Assert.False(CompareObjectHandles(originalProcess, process.DangerousGetHandle()));
+            Assert.False(CompareObjectHandles(originalJob, job.DangerousGetHandle()));
+            if (cleanupResult["data"]?["complete"]?.GetValue<bool>() == true)
+                Assert.Null(cleanupResult["error"]);
+        }
+        finally
+        {
+            release.Set();
+            if (cleanup is not null) await Record.ExceptionAsync(async () => await cleanup.WaitAsync(TimeSpan.FromSeconds(15)));
+            if (shutdown is not null)
+            {
+                var failure = await Record.ExceptionAsync(() => shutdown.WaitAsync(TimeSpan.FromSeconds(15)));
+                if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            }
+            if (witness is not null)
+            {
+                if (WaitForSingleObject(witness, 0) == 258u) Assert.True(TerminateOwnedWitness(witness, 1));
+                Assert.Equal(0u, WaitForSingleObject(witness, 5000));
+                harness.Fixture.MarkCleanupConfirmed();
+            }
+            var finalFailure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (finalFailure is not null) harness.AcceptObservedShutdownFailure(finalFailure);
+            await harness.DisposeAsync();
+            jobWitness?.Dispose();
+            witness?.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task FailedStart_UnconfirmedJobDrain_ShutdownRetriesExactOwner(int failedObservations)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var observations = new List<object>();
+        var observationGate = new object();
+        var firstObservation = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sentinel = new IOException("controlled job observation failure before drain confirmation");
+        void Observe(object owner)
+        {
+            lock (observationGate)
+            {
+                observations.Add(owner);
+                if (observations.Count <= failedObservations)
+                {
+                    firstObservation.TrySetResult(owner);
+                    throw sentinel;
+                }
+            }
+        }
+
+        var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true), holdLaunchResponse: true,
+            jobObservationForTest: Observe);
+        using var startCancellation = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(ObservationTimeout);
+        var start = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath },
+            "failed-start-job-owner", startCancellation.Token);
+        object? owner = null;
+        Exception? shutdownFailure = null;
+        try
+        {
+            await harness.Fixture.WaitForTranscriptKindAsync("launch-response-gated", deadline.Token);
+            startCancellation.Cancel();
+            owner = await firstObservation.Task.WaitAsync(ObservationTimeout);
+            var handle = Assert.IsAssignableFrom<SafeHandle>(owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+            await AssertUnconfirmedStartFaultAsync(start, sentinel);
+            harness.AssertNoPublishedSessions();
+            Assert.False(handle.IsClosed, "The exact unconfirmed Job handle must remain owned.");
+            shutdownFailure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout));
+            if (failedObservations == 2)
+            {
+                Assert.NotNull(shutdownFailure);
+                Assert.False(handle.IsClosed, "A second unconfirmed drain must retain the Job.");
+                shutdownFailure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout));
+            }
+            Assert.Null(shutdownFailure);
+            lock (observationGate)
+            {
+                Assert.Equal(failedObservations + 1, observations.Count);
+                Assert.All(observations, observed => Assert.Same(owner, observed));
+            }
+            Assert.True(handle.IsClosed, "The exact Job must be released after a confirmed retry.");
+        }
+        finally
+        {
+            startCancellation.Cancel();
+            harness.Fixture.ReleaseThreadsResponse();
+            await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            if (owner is not null)
+            {
+                var handle = Assert.IsAssignableFrom<SafeHandle>(owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+                if (!handle.IsClosed)
+                {
+                    var wait = owner.GetType().GetMethod("WaitForDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                    await Assert.IsAssignableFrom<Task>(wait.Invoke(owner, [TimeSpan.FromSeconds(5)]));
+                    ((IDisposable)owner).Dispose();
+                }
+                harness.Fixture.MarkCleanupConfirmed();
+            }
+            if (shutdownFailure is null)
+            {
+                var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+                if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            }
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task FailedStart_ConcurrentUnconfirmedJobs_ShutdownRetriesBothOwners()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var gate = new object();
+        var observations = new Dictionary<object, int>(ReferenceEqualityComparer.Instance);
+        var sentinel = new IOException("controlled first observation failure");
+        void Observe(object owner)
+        {
+            lock (gate)
+            {
+                observations.TryGetValue(owner, out var count);
+                observations[owner] = count + 1;
+                if (count == 0) throw sentinel;
+            }
+        }
+
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SuppressLifecycleEvents: true),
+            holdLaunchResponse: true, jobObservationForTest: Observe);
+        using var cancellation = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(ObservationTimeout);
+        var first = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "concurrent-owner-1", cancellation.Token);
+        var second = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "concurrent-owner-2", cancellation.Token);
+        try
+        {
+            await harness.Fixture.WaitForDapRequestCountAsync("launch", 2, deadline.Token);
+            cancellation.Cancel();
+            await AssertUnconfirmedStartFaultAsync(first, sentinel);
+            await AssertUnconfirmedStartFaultAsync(second, sentinel);
+            harness.AssertNoPublishedSessions();
+            lock (gate) Assert.Equal(2, observations.Count);
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            lock (gate)
+            {
+                Assert.Equal(2, observations.Count);
+                Assert.All(observations, entry => Assert.Equal(2, entry.Value));
+                foreach (var owner in observations.Keys)
+                {
+                    var handle = Assert.IsAssignableFrom<SafeHandle>(owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+                    Assert.True(handle.IsClosed);
+                }
+            }
+        }
+        finally
+        {
+            cancellation.Cancel();
+            harness.Fixture.ReleaseThreadsResponse();
+            await Record.ExceptionAsync(async () => await Task.WhenAll(first, second).WaitAsync(ObservationTimeout));
+            object[] owners;
+            lock (gate) owners = observations.Keys.ToArray();
+            foreach (var owner in owners)
+            {
+                var handle = Assert.IsAssignableFrom<SafeHandle>(owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+                if (!handle.IsClosed)
+                {
+                    var wait = owner.GetType().GetMethod("WaitForDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                    await Assert.IsAssignableFrom<Task>(wait.Invoke(owner, [TimeSpan.FromSeconds(5)]));
+                    ((IDisposable)owner).Dispose();
+                }
+            }
+            if (owners.Length == 2) harness.Fixture.MarkCleanupConfirmed();
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task FailedAttach_PreDispatchUnconfirmedJob_ShutdownRetriesSameOwnerWithoutTouchingTarget()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        object? job = null;
+        var observations = 0;
+        var beforeInitialize = new InvalidOperationException("controlled pre-attach initialization failure");
+        void Observe(object owner)
+        {
+            job = owner;
+            if (Interlocked.Increment(ref observations) == 1) throw new IOException("controlled attach Job observation failure");
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), jobObservationForTest: Observe,
+            beforeAttachInitializeForTest: _ => throw beforeInitialize);
+        harness.EnableLegacyCompat();
+        using var target = harness.Fixture.StartOwnedTarget();
+        try
+        {
+            var attach = Content(await harness.CallLegacyAsync("attach_debug", new JsonObject { ["process_id"] = target.Id }, "unconfirmed-pre-attach"));
+            Assert.NotNull(attach["error"]);
+            Assert.NotNull(job);
+            Assert.False(JobHandle(job!).IsClosed);
+            Assert.False(target.HasExited);
+            Assert.DoesNotContain(await harness.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "request" && entry.Command is "attach" or "terminate");
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            Assert.Equal(2, observations);
+            Assert.True(JobHandle(job!).IsClosed);
+            Assert.False(target.HasExited);
+        }
+        finally
+        {
+            if (job is not null) await FinishObservedJobAsync(job);
+            if (job is not null) harness.Fixture.MarkCleanupConfirmed();
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await FixtureProcess.StopOwnedTargetAsync(target);
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task FailedPublication_TwoUnconfirmedCleanupAttempts_ShutdownRetriesSameOwner()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        object? job = null;
+        var observations = 0;
+        void Observe(object owner)
+        {
+            if (job is null) job = owner;
+            else Assert.Same(job, owner);
+            if (Interlocked.Increment(ref observations) <= 2) throw new IOException("controlled unpublished Job observation failure");
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), jobObservationForTest: Observe,
+            beforePublishForTest: _ => throw new InvalidOperationException("controlled publication failure"));
+        try
+        {
+            var result = await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "unpublished-unconfirmed");
+            Assert.True(result.IsError == true);
+            harness.AssertNoPublishedSessions();
+            Assert.Equal(2, observations);
+            Assert.NotNull(job);
+            Assert.False(JobHandle(job!).IsClosed);
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            Assert.Equal(3, observations);
+            Assert.True(JobHandle(job!).IsClosed);
+        }
+        finally
+        {
+            if (job is not null) await FinishObservedJobAsync(job);
+            if (job is not null) harness.Fixture.MarkCleanupConfirmed();
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Shutdown_PublishedAndFailedStartJobsUnconfirmed_RetryDrainsBothWithoutStickyFailure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var gate = new object();
+        var observations = new Dictionary<object, int>(ReferenceEqualityComparer.Instance);
+        var fail = true;
+        void Observe(object owner)
+        {
+            lock (gate)
+            {
+                observations.TryGetValue(owner, out var count);
+                observations[owner] = count + 1;
+                if (fail) throw new IOException("controlled retryable Job observation failure");
+            }
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), jobObservationForTest: Observe);
+        using var cancellation = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(ObservationTimeout);
+        Task<CallToolResult>? pending = null;
+        try
+        {
+            var started = Content(await harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "published-owner"));
+            Assert.Equal("start_debug_success", started["kind"]?.GetValue<string>());
+            harness.HoldLaterLaunch();
+            pending = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "failed-owner", cancellation.Token);
+            await harness.Fixture.WaitForTranscriptKindAsync("launch-response-gated", deadline.Token);
+            cancellation.Cancel();
+            var failedStart = await Record.ExceptionAsync(async () => await pending.WaitAsync(ObservationTimeout));
+            Assert.NotNull(failedStart);
+            Assert.Equal("DapStartupCleanupException", failedStart.GetType().Name);
+            var firstShutdown = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout));
+            Assert.NotNull(firstShutdown);
+            lock (gate)
+            {
+                Assert.Equal(2, observations.Count);
+                Assert.All(observations.Keys, owner => Assert.False(JobHandle(owner).IsClosed));
+                fail = false;
+            }
+            await harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout);
+            lock (gate) Assert.All(observations.Keys, owner => Assert.True(JobHandle(owner).IsClosed));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            harness.Fixture.ReleaseThreadsResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(ObservationTimeout));
+            object[] owners;
+            lock (gate) { fail = false; owners = observations.Keys.ToArray(); }
+            foreach (var owner in owners) await FinishObservedJobAsync(owner);
+            if (owners.Length == 2) harness.Fixture.MarkCleanupConfirmed();
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Shutdown_UnconfirmedJobRetry_PreservesSeparatePostCleanupFailure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var gate = new object();
+        var observations = new Dictionary<object, int>(ReferenceEqualityComparer.Instance);
+        var jobFailure = new IOException("controlled unconfirmed Job observation");
+        var callbackFailure = new IOException("controlled confirmed-cleanup callback failure");
+        void Observe(object owner)
+        {
+            lock (gate)
+            {
+                observations.TryGetValue(owner, out var count);
+                observations[owner] = count + 1;
+                if (count == 0 && observations.Count == 2) throw jobFailure;
+            }
+        }
+        var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), holdLaunchResponse: true,
+            jobObservationForTest: Observe, failedStartCleanupCompleted: () => throw callbackFailure);
+        using var cancellation = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(ObservationTimeout);
+        var first = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "sticky-callback-1", cancellation.Token);
+        var second = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath }, "sticky-callback-2", cancellation.Token);
+        try
+        {
+            await harness.Fixture.WaitForDapRequestCountAsync("launch", 2, deadline.Token);
+            cancellation.Cancel();
+            var firstFailure = await Record.ExceptionAsync(async () => await first.WaitAsync(ObservationTimeout));
+            var secondFailure = await Record.ExceptionAsync(async () => await second.WaitAsync(ObservationTimeout));
+            Assert.NotNull(firstFailure);
+            Assert.NotNull(secondFailure);
+            Assert.Equal("DapStartupCleanupException", firstFailure.GetType().Name);
+            Assert.Equal("DapStartupCleanupException", secondFailure.GetType().Name);
+            var failures = FailureTree(firstFailure).Concat(FailureTree(secondFailure)).ToArray();
+            Assert.Contains(failures, error => ReferenceEquals(error, callbackFailure));
+            Assert.Contains(failures, error => ReferenceEquals(error, jobFailure));
+            harness.AssertNoPublishedSessions();
+            var shutdownFailure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None).WaitAsync(ObservationTimeout));
+            Assert.NotNull(shutdownFailure);
+            harness.AcceptObservedShutdownFailure(shutdownFailure);
+            Assert.Contains(FailureTree(shutdownFailure), error => ReferenceEquals(error, callbackFailure));
+            lock (gate)
+            {
+                Assert.Equal(2, observations.Count);
+                Assert.Contains(observations.Values, count => count == 2);
+                Assert.All(observations.Keys, owner => Assert.True(JobHandle(owner).IsClosed));
+            }
+        }
+        finally
+        {
+            cancellation.Cancel();
+            harness.Fixture.ReleaseThreadsResponse();
+            await Record.ExceptionAsync(async () => await Task.WhenAll(first, second).WaitAsync(ObservationTimeout));
+            object[] owners;
+            lock (gate) owners = observations.Keys.ToArray();
+            foreach (var owner in owners) await FinishObservedJobAsync(owner);
+            if (owners.Length == 2) harness.Fixture.MarkCleanupConfirmed();
+            var failure = await Record.ExceptionAsync(() => harness.StopAsync(CancellationToken.None));
+            if (failure is not null) harness.AcceptObservedShutdownFailure(failure);
+            await harness.DisposeAsync();
+        }
+    }
+
+    private static SafeHandle JobHandle(object owner) => Assert.IsAssignableFrom<SafeHandle>(
+        owner.GetType().GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+
+    private static async Task FinishObservedJobAsync(object owner)
+    {
+        if (JobHandle(owner).IsClosed) return;
+        var wait = owner.GetType().GetMethod("WaitForDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await Assert.IsAssignableFrom<Task>(wait.Invoke(owner, [TimeSpan.FromSeconds(5)]));
+        ((IDisposable)owner).Dispose();
+    }
+
     [Fact]
     public async Task ShutdownCancellation_FailedNativeStartupCleanupFault_PreservesCancellationAndExactCleanupFailure()
     {
         Process? adapter = null;
         FixtureProcess? completedFixture = null;
         var cleanupCompleted = false;
+        var observedJobs = new List<object>();
         var cleanupFailure = new IOException("controlled failed-start cleanup sentinel");
         Action afterFailedStartCleanup = () =>
         {
@@ -4108,7 +5018,8 @@ public sealed class RegistryShutdownContractTests
         };
         await using var harness = await RegistryHostHarness.CreateAsync(
             new FixtureConfiguration(SuppressLifecycleEvents: true), holdLaunchResponse: true,
-            failedStartCleanupCompleted: afterFailedStartCleanup);
+            failedStartCleanupCompleted: afterFailedStartCleanup,
+            jobObservationForTest: OperatingSystem.IsWindows() ? observedJobs.Add : null);
         completedFixture = harness.Fixture;
         using var shutdownCancellation = new CancellationTokenSource();
         using var observation = new CancellationTokenSource(ObservationTimeout);
@@ -4135,6 +5046,13 @@ public sealed class RegistryShutdownContractTests
             var completed = await shutdownObservation;
             Assert.True(cleanupCompleted, "The raw cleanup sentinel must be thrown after real failed-start cleanup.");
             Assert.True(completed.AdapterExited);
+            if (OperatingSystem.IsWindows())
+            {
+                var confirmedOwner = Assert.Single(observedJobs);
+                var confirmedHandle = Assert.IsAssignableFrom<SafeHandle>(confirmedOwner.GetType()
+                    .GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(confirmedOwner));
+                Assert.True(confirmedHandle.IsClosed, "The post-cleanup exception must not represent a live Job owner.");
+            }
             Assert.True(shutdown.IsFaulted,
                 "A failed native-start cleanup must fault shared shutdown, not be replaced by shutdown cancellation.");
             Assert.False(shutdown.IsCanceled);
@@ -4206,6 +5124,14 @@ public sealed class RegistryShutdownContractTests
         Assert.True(completed.AdapterExited, "Shutdown must not report cancellation before the exact owned adapter exits.");
     }
 
+    private static async Task AssertUnconfirmedStartFaultAsync(Task<CallToolResult> start, Exception sentinel)
+    {
+        var failure = await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+        Assert.NotNull(failure);
+        Assert.Equal("DapStartupCleanupException", failure.GetType().Name);
+        Assert.Contains(FailureTree(failure), item => ReferenceEquals(item, sentinel));
+    }
+
     private static async Task AssertStartDidNotPublishAsync(Task<CallToolResult> start)
     {
         try
@@ -4256,6 +5182,33 @@ public sealed class RegistryShutdownContractTests
 
         public FixtureProcess Fixture { get; } = fixture;
         public string ProgramPath { get; } = programPath;
+        public void HoldLaterLaunch() => Environment.SetEnvironmentVariable(LaunchGateVariable, "1");
+        public void InjectRecordedCleanupFailure(Exception failure)
+        {
+            var type = registry.GetType();
+            var gate = type.GetField("_lifetimeGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
+            lock (gate)
+            {
+                var field = type.GetField("_startCleanupFailure", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                Assert.Null(field.GetValue(registry));
+                field.SetValue(registry, failure);
+            }
+        }
+        public object? RecordedCleanupFailure() => registry.GetType()
+            .GetField("_startCleanupFailure", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry);
+        public void AssertNoPublishedSessions()
+        {
+            var type = registry.GetType();
+            var lifetimeGate = type.GetField("_lifetimeGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
+            lock (lifetimeGate)
+            {
+                foreach (var name in new[] { "_sessions", "_slots", "_ownedSlots", "_outputs" })
+                {
+                    var entries = Assert.IsAssignableFrom<System.Collections.IDictionary>(type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
+                    Assert.Empty(entries);
+                }
+            }
+        }
         public object? OwnedSlot(string token)
         {
             var type = registry.GetType();
@@ -4282,6 +5235,19 @@ public sealed class RegistryShutdownContractTests
 
         public static ValueTask DisposeSessionAsync(object session) =>
             (ValueTask)session.GetType().GetMethod("DisposeAsync", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(session, [])!;
+
+        public string? LegacyOwnerForTest() => (string?)registry.GetType()
+            .GetField("_legacyOwner", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry);
+        public async Task ExpireLegacyOwnerForTestAsync()
+        {
+            await LegacyGate.WaitAsync();
+            try
+            {
+                registry.GetType().GetField("_legacyOwnerActivity", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .SetValue(registry, Stopwatch.GetTimestamp() - 10 * Stopwatch.Frequency);
+            }
+            finally { LegacyGate.Release(); }
+        }
 
         public SemaphoreSlim LegacyGate => Assert.IsType<SemaphoreSlim>(registry.GetType()
             .GetField("_legacyGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
@@ -4357,7 +5323,10 @@ public sealed class RegistryShutdownContractTests
         public static async Task<RegistryHostHarness> CreateAsync(
             FixtureConfiguration configuration, bool holdLaunchResponse = false, JsonObject? outputScript = null,
             Action? failedStartCleanupCompleted = null, Func<object, ValueTask>? disposeSession = null, Func<string, string>? debuggerPathFactory = null,
-            bool noDebugger = false, Func<CancellationToken, Task<string?>>? provisioner = null, Action<string>? diagnostic = null)
+            bool noDebugger = false, Func<CancellationToken, Task<string?>>? provisioner = null, Action<string>? diagnostic = null,
+            Action<object>? jobObservationForTest = null, Action<object>? beforeAttachInitializeForTest = null,
+            Action<object>? beforePublishForTest = null, Action<string, IntPtr, IntPtr>? launchPhaseForTest = null,
+            Func<IntPtr, IntPtr, bool>? launchTerminateForTest = null, Func<IntPtr, uint, uint>? launchWaitForTest = null)
         {
             var previousLaunchGate = Environment.GetEnvironmentVariable(LaunchGateVariable);
             var previousOutputScript = Environment.GetEnvironmentVariable(OutputScriptVariable);
@@ -4378,7 +5347,29 @@ public sealed class RegistryShutdownContractTests
                 var programType = assembly.GetType("NetCoreDbg.Mcp.Stateless.Program", throwOnError: true)!;
                 var registryType = assembly.GetType("NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry", throwOnError: true)!;
                 object registry;
-                if (disposeSession is not null)
+                if (launchPhaseForTest is not null || launchTerminateForTest is not null || launchWaitForTest is not null)
+                {
+                    Assert.NotNull(launchPhaseForTest);
+                    Assert.NotNull(launchTerminateForTest);
+                    Assert.Null(jobObservationForTest);
+                    Assert.Null(beforeAttachInitializeForTest);
+                    Assert.Null(beforePublishForTest);
+                    Assert.Null(failedStartCleanupCompleted);
+                    Assert.Null(disposeSession);
+                    Assert.Null(provisioner);
+                    registry = registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
+                        binder: null, types: [typeof(string), typeof(Action<string, IntPtr, IntPtr>), typeof(Func<IntPtr, IntPtr, bool>), typeof(Func<IntPtr, uint, uint>)], modifiers: null)!
+                        .Invoke([debuggerPath, launchPhaseForTest, launchTerminateForTest, launchWaitForTest]);
+                }
+                else if (jobObservationForTest is not null || beforeAttachInitializeForTest is not null || beforePublishForTest is not null)
+                {
+                    Assert.Null(disposeSession);
+                    Assert.Null(provisioner);
+                    registry = registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
+                        binder: null, types: [typeof(string), typeof(Action), typeof(Action<object>), typeof(Action<object>), typeof(Action<object>)], modifiers: null)!
+                        .Invoke([debuggerPath, failedStartCleanupCompleted, jobObservationForTest, beforeAttachInitializeForTest, beforePublishForTest]);
+                }
+                else if (disposeSession is not null)
                 {
                     Assert.Null(failedStartCleanupCompleted);
                     var sessionType = assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession", throwOnError: true)!;

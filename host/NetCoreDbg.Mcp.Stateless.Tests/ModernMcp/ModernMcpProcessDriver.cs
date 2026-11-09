@@ -334,7 +334,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             {
                 _fixture.MarkAdapterStartAttempted();
             }
-            if (name is "start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug") observation.StartedOrder = ++_lifecycleOrder;
+            if (name is "start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug" or "cleanup_processes") observation.StartedOrder = ++_lifecycleOrder;
             _requests.Add(observation);
         }
         return observation;
@@ -343,7 +343,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private void CompleteObservation(ModernMcpRequestObservation observation, JsonObject? result)
     {
         if (observation.Method != "tools/call"
-            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
+            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug" or "cleanup_processes"))
         {
             return;
         }
@@ -728,7 +728,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         {
             history = _requests
                 .Where(static request => request.Method == "tools/call"
-                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
+                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "attach_debug" or "stop_debug" or "restart_debug" or "terminate_debug" or "cleanup_processes"))
                 .Select(static request => new ModernMcpRequestObservation(
                     request.Id, request.Method, request.Parameters?.DeepClone())
                 {
@@ -825,6 +825,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private async Task<bool> StopKnownLegacySessionsAsync(ModernMcpRequestObservation[] history)
     {
         ModernMcpRequestObservation? active = null;
+        ModernMcpRequestObservation? unconfirmedStop = null;
         long lastTransition = 0;
         foreach (var request in history)
         {
@@ -903,18 +904,29 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 active = null;
                 lastTransition = request.CompletedOrder;
             }
+            else if (name == "cleanup_processes")
+            {
+                if (active is not null && unconfirmedStop is not null
+                    && IsLegacyCleanupRecovery(active, unconfirmedStop, request))
+                {
+                    active = null;
+                    unconfirmedStop = null;
+                    lastTransition = request.CompletedOrder;
+                }
+            }
             else if (name == "stop_debug")
             {
                 if (IsComplete(request.Result, false)
                     && StringValue(payload?["error"]) is "Debug session is owned by another agent." or "No active debug session.")
                     continue;
-                if (active is not null && StringValue(active.Parameters?["name"]) == "attach_debug"
+                if (active is not null
                     && IsComplete(request.Result, false) && request.StartedOrder > lastTransition
                     && request.CompletedOrder > request.StartedOrder
-                    && JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])
+                    && SameLegacyMux(active.Parameters?["_meta"], request.Parameters?["_meta"])
                     && StringValue(payload?["error"]) is { } stopError
                     && stopError.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase))
                 {
+                    unconfirmedStop = request;
                     lastTransition = request.CompletedOrder;
                     continue;
                 }
@@ -928,10 +940,45 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     || !JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])
                     || !LegacyStopped(request.Result)) return false;
                 active = null;
+                unconfirmedStop = null;
                 lastTransition = request.CompletedOrder;
             }
         }
+        if (unconfirmedStop is not null && StringValue(active?.Parameters?["name"]) != "attach_debug") return false;
         return active is null || await StopKnownLegacySessionAsync(active, []).ConfigureAwait(false);
+    }
+
+    internal static bool IsLegacyCleanupRecovery(ModernMcpRequestObservation active, ModernMcpRequestObservation stop, ModernMcpRequestObservation cleanup)
+    {
+        if (StringValue(active.Parameters?["name"]) is not ("start_debug" or "attach_debug" or "restart_debug")
+            || StringValue(stop.Parameters?["name"]) != "stop_debug"
+            || StringValue(cleanup.Parameters?["name"]) != "cleanup_processes"
+            || active.StartedOrder <= 0 || active.CompletedOrder <= active.StartedOrder
+            || stop.StartedOrder <= active.CompletedOrder || stop.CompletedOrder <= stop.StartedOrder
+            || cleanup.StartedOrder <= stop.CompletedOrder || cleanup.CompletedOrder <= cleanup.StartedOrder
+            || !SameLegacyMux(active.Parameters?["_meta"], stop.Parameters?["_meta"])
+            || !SameLegacyMux(active.Parameters?["_meta"], cleanup.Parameters?["_meta"])
+            || !IsComplete(stop.Result, false) || !IsComplete(cleanup.Result, false)
+            || cleanup.Parameters?["arguments"] is not JsonObject arguments
+            || arguments["force"] is not JsonValue force || !force.TryGetValue<bool>(out var forced) || !forced) return false;
+        var stopPayload = LegacyPayload(stop.Result);
+        var cleanupPayload = LegacyPayload(cleanup.Result);
+        return StringValue(stopPayload?["error"]) is { } error
+            && error.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase)
+            && cleanupPayload is not null && cleanupPayload["error"] is null
+            && cleanupPayload["data"] is JsonObject data
+            && StringValue(data["action"]) == "cleanup"
+            && data["complete"] is JsonValue complete && complete.TryGetValue<bool>(out var completed) && completed
+            && data["remaining_owners"] is JsonValue remaining && remaining.TryGetValue<int>(out var count) && count == 0;
+    }
+
+    private static bool SameLegacyMux(JsonNode? left, JsonNode? right)
+    {
+        if (left is not null and not JsonObject || right is not null and not JsonObject) return false;
+        var leftMux = (left as JsonObject)?["muxSessionId"];
+        var rightMux = (right as JsonObject)?["muxSessionId"];
+        if (leftMux is not null && StringValue(leftMux) is null || rightMux is not null && StringValue(rightMux) is null) return false;
+        return StringComparer.Ordinal.Equals(StringValue(leftMux), StringValue(rightMux));
     }
 
     private async Task<bool> StopKnownLegacySessionAsync(ModernMcpRequestObservation start, ModernMcpRequestObservation[] history)

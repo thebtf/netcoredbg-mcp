@@ -26,6 +26,7 @@ internal static class NativeDebuggerInstaller
     private const int MaxEntries = 4096;
     private const int MaxRedirects = 5;
     private const string ApiPath = "/repos/Samsung/netcoredbg/releases/latest";
+    private const string ReceiptName = ".native-debugger-manifest.json";
     private static readonly SemaphoreSlim ProvisionGate = new(1, 1);
 
     // Callers must use this factory in production: automatic redirects would bypass
@@ -92,6 +93,7 @@ internal static class NativeDebuggerInstaller
             string content = Path.Combine(stage, "content");
             Directory.CreateDirectory(content);
             string archivePath = Path.Combine(stage, "archive");
+            string archiveHash;
             using (var response = await GetAsync(client, assetUri, cancellationToken))
             {
                 if (response.Content.Headers.ContentLength is long length && length != size)
@@ -109,10 +111,13 @@ internal static class NativeDebuggerInstaller
                     hash.AppendData(buffer, 0, read);
                     await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                 }
-                if (count != size || !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), expectedHash))
+                var actualHash = hash.GetHashAndReset();
+                if (count != size || !CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
                     throw new InvalidDataException("Archive size or digest mismatch.");
+                archiveHash = Convert.ToHexString(actualHash).ToLowerInvariant();
             }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var files = new List<(string Path, long Size, string Sha256)>();
             long total = 0;
             using (var file = File.OpenRead(archivePath))
             {
@@ -138,7 +143,8 @@ internal static class NativeDebuggerInstaller
                         else
                         {
                             total = AddSize(total, entry.Length);
-                            await ExtractAsync(entry.DataStream ?? Stream.Null, path, entry.Length, cancellationToken);
+                            var digest = await ExtractAsync(entry.DataStream ?? Stream.Null, path, entry.Length, cancellationToken);
+                            files.Add((Path.GetRelativePath(content, path).Replace(Path.DirectorySeparatorChar, '/'), entry.Length, digest));
                             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, entry.Mode & (UnixFileMode)0x1FF);
                         }
                     }
@@ -159,7 +165,8 @@ internal static class NativeDebuggerInstaller
                         {
                             total = AddSize(total, entry.Length);
                             using var input = entry.Open();
-                            await ExtractAsync(input, path, entry.Length, cancellationToken);
+                            var digest = await ExtractAsync(input, path, entry.Length, cancellationToken);
+                            files.Add((Path.GetRelativePath(content, path).Replace(Path.DirectorySeparatorChar, '/'), entry.Length, digest));
                             if (!OperatingSystem.IsWindows() && mode != 0) File.SetUnixFileMode(path, (UnixFileMode)(mode & 0x1FF));
                         }
                     }
@@ -172,6 +179,17 @@ internal static class NativeDebuggerInstaller
                 var mode = File.GetUnixFileMode(Path.Combine(content, relativeExecutable));
                 if ((mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
                     throw new InvalidDataException("Debugger executable has no execute permission.");
+            }
+            await using (var receipt = new FileStream(Path.Combine(content, ReceiptName), FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
+            {
+                await JsonSerializer.SerializeAsync(receipt, new
+                {
+                    schema = "netcoredbg-mcp.native-debugger-install/1",
+                    asset = assetName,
+                    archiveSha256 = archiveHash,
+                    files = files.OrderBy(file => file.Path, StringComparer.Ordinal)
+                        .Select(file => new { path = file.Path, size = file.Size, sha256 = file.Sha256 }).ToArray(),
+                }, cancellationToken: cancellationToken);
             }
             cancellationToken.ThrowIfCancellationRequested();
             PublishWithoutReplacement(content, target);
@@ -333,6 +351,7 @@ internal static class NativeDebuggerInstaller
         if (name.Length == 0 || name.Contains('\\') || name.StartsWith('/') || name.Contains(':')) throw new InvalidDataException("Invalid archive path.");
         var parts = name.Split('/');
         if (parts.Any(part => part.Length == 0 || part is "." or ".." || part.EndsWith(' ') || part.EndsWith('.'))) throw new InvalidDataException("Invalid archive path component.");
+        if (parts[0].Equals(ReceiptName, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Archive uses the reserved installation receipt path.");
         if (!seen.Add(name) || seen.Count > MaxEntries) throw new InvalidDataException("Duplicate or excessive archive entries.");
         var path = Path.GetFullPath(Path.Combine(root, Path.Combine(parts)));
         if (!path.StartsWith(root + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
@@ -346,20 +365,23 @@ internal static class NativeDebuggerInstaller
         return total + length;
     }
 
-    private static async Task ExtractAsync(Stream input, string path, long length, CancellationToken cancellationToken)
+    private static async Task<string> ExtractAsync(Stream input, string path, long length, CancellationToken cancellationToken)
     {
         if (length < 0 || length > MaxEntry) throw new InvalidDataException("Archive entry exceeds size limit.");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true);
         var buffer = new byte[81920];
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long count = 0;
         int read;
         while ((read = await input.ReadAsync(buffer, cancellationToken)) != 0)
         {
             count += read;
             if (count > length) throw new InvalidDataException("Archive entry exceeds declared size.");
+            hash.AppendData(buffer, 0, read);
             await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
         if (count != length) throw new InvalidDataException("Archive entry is truncated.");
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 }

@@ -661,6 +661,22 @@ internal sealed class ControlledDapAdapter
             }, cancellationToken);
         }
 
+        if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_OBSERVE_SHIM") == "1")
+        {
+            var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Fixture executable is unavailable.");
+            var shim = Path.Combine(Path.GetDirectoryName(executable)!, "dbgshim.dll");
+            string? shimBytes = null;
+            if (File.Exists(shim))
+            {
+                await using var input = new FileStream(shim, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var output = new MemoryStream();
+                await input.CopyToAsync(output, cancellationToken);
+                shimBytes = Convert.ToBase64String(output.ToArray());
+            }
+            var observation = JsonSerializer.Serialize(new { executable, shimBytes });
+            await RecordAsync(new { kind = "shim-observation", arguments = observation }, cancellationToken);
+        }
+
         if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")
         {
             var observed = JsonSerializer.Serialize(new
