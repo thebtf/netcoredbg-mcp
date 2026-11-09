@@ -361,6 +361,7 @@ internal static class Program
         private TaskCompletionSource<bool>? _startsDrained;
         private Exception? _startCleanupFailure;
         private readonly CancellationTokenSource _startShutdown = new();
+        private readonly CancellationTokenSource _provisionShutdown = new();
         private List<(CancellationToken Token, CancellationTokenRegistration Registration)>? _startShutdownRegistrations;
         private bool _startShutdownDisposed;
         private Task? _shutdownTask;
@@ -373,6 +374,8 @@ internal static class Program
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _uiInvokeRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
+        private readonly Func<CancellationToken, Task<string?>> _legacyDebuggerProvisioner;
+        private readonly Action<string> _provisionDiagnostic = static message => Console.Error.WriteLine(message);
         private readonly string? _bridgePath;
         private readonly string? _artifactRoot;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
@@ -5112,6 +5115,9 @@ internal static class Program
         {
             var error = result.StructuredContent is { } content && content.TryGetProperty("error", out var value)
                 ? value.GetString() : "Native operation did not complete successfully.";
+            if (error == "DEBUGGER_PROVISION_PUBLISHED_CLEANUP_UNCONFIRMED"
+                && result.StructuredContent is { } published && published.TryGetProperty("data", out var data))
+                return Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}", data }, false);
             return LegacyError(error ?? "Native operation did not complete successfully.", state);
         }
 
@@ -5143,6 +5149,18 @@ internal static class Program
                 Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
                 Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"))
         {
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Func<CancellationToken, Task<string?>> provisioner)
+            : this(debuggerPath)
+        {
+            _legacyDebuggerProvisioner = provisioner;
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Func<CancellationToken, Task<string?>> provisioner, Action<string> diagnostic)
+            : this(debuggerPath, provisioner)
+        {
+            _provisionDiagnostic = diagnostic;
         }
 
         internal DebugSessionRegistry(string? debuggerPath, string? bridgePath, string? artifactRoot)
@@ -5197,6 +5215,7 @@ internal static class Program
             Action? failedStartCleanupCompleted)
         {
             _debuggerPath = debuggerPath;
+            _legacyDebuggerProvisioner = NativeDebuggerInstaller.ProvisionAsync;
             _bridgePath = bridgePath;
             _artifactRoot = artifactRoot;
             _isUsable = isUsable;
@@ -5205,6 +5224,15 @@ internal static class Program
         }
 
         private string? ResolveLegacyDebuggerPath() => _debuggerPath ?? LegacyDebuggerDiscovery.Resolve(null);
+
+        private void ReportProvisioningDiagnostic(string message)
+        {
+            try { _provisionDiagnostic(message); }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                RecordStartCleanupFailure(exception);
+            }
+        }
 
         internal async ValueTask<CallToolResult> CallAsync(
             RequestContext<CallToolRequestParams> context,
@@ -5363,7 +5391,7 @@ internal static class Program
             }
 
             var debuggerPath = LegacyCompat ? ResolveLegacyDebuggerPath() : _debuggerPath;
-            if (string.IsNullOrWhiteSpace(debuggerPath))
+            if (string.IsNullOrWhiteSpace(debuggerPath) && (!LegacyCompat || debuggerPath is not null))
             {
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
@@ -5483,6 +5511,49 @@ internal static class Program
                     if (dotnetHost is null)
                         return Error("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE");
                     launchOptions = launchOptions with { DotnetHostPath = dotnetHost };
+                }
+                if (debuggerPath is null)
+                {
+                    using var provisionCancellation = CancellationTokenSource.CreateLinkedTokenSource(startupCancellation.Token, _provisionShutdown.Token);
+                    try
+                    {
+                        debuggerPath = await _legacyDebuggerProvisioner(provisionCancellation.Token).ConfigureAwait(false);
+                    }
+                    catch (NativeDebuggerInstalledCleanupException exception)
+                    {
+                        RecordStartCleanupFailure(exception);
+                        ReportProvisioningDiagnostic($"Debugger was installed at {JsonSerializer.Serialize(exception.ExecutablePath)}; cleanup is unconfirmed at {JsonSerializer.Serialize(exception.StagingPath)}.");
+                        if (cancellationToken.IsCancellationRequested) throw;
+                        return Result(new
+                        {
+                            kind = "debugger_provision_published_cleanup_unconfirmed",
+                            error = "DEBUGGER_PROVISION_PUBLISHED_CLEANUP_UNCONFIRMED",
+                            data = new { debuggerPath = exception.ExecutablePath, stagingPath = exception.StagingPath },
+                        }, isError: true);
+                    }
+                    catch (AggregateException exception)
+                    {
+                        RecordStartCleanupFailure(exception);
+                        var stage = exception.Data["StagingPath"] as string;
+                        ReportProvisioningDiagnostic(stage is null
+                            ? "Debugger provisioning cleanup is unconfirmed; staging path unavailable."
+                            : $"Debugger provisioning cleanup is unconfirmed; inspect staging path {JsonSerializer.Serialize(stage)}.");
+                        if (cancellationToken.IsCancellationRequested) throw;
+                        return Error("debugger_provision_cleanup_unconfirmed", "DEBUGGER_PROVISION_CLEANUP_UNCONFIRMED");
+                    }
+                    catch (OperationCanceledException) when (provisionCancellation.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception exception) when (NativeSetup.IsReportableFailure(exception) || exception is InvalidOperationException)
+                    {
+                        return Error("debugger_provision_failed", "DEBUGGER_PROVISION_FAILED");
+                    }
+                    if (!string.IsNullOrWhiteSpace(debuggerPath))
+                        ReportProvisioningDiagnostic($"Debugger provisioning returned {JsonSerializer.Serialize(debuggerPath)}; a managed installation may have been published.");
+                    provisionCancellation.Token.ThrowIfCancellationRequested();
+                    if (string.IsNullOrWhiteSpace(debuggerPath))
+                        return Error("debugger_provision_failed", "DEBUGGER_PROVISION_FAILED");
                 }
                 var token = CreateToken();
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
@@ -7591,6 +7662,7 @@ internal static class Program
             Task startsDrained;
             TaskCompletionSource<bool> completion;
             CancellationToken shutdownToken;
+            bool cancelProvision;
             lock (_lifetimeGate)
             {
                 _shutdownRequested = true;
@@ -7613,14 +7685,16 @@ internal static class Program
                     : (_startsDrained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
                 completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _shutdownTask = completion.Task;
+                cancelProvision = !_startShutdownDisposed;
                 shutdownToken = _startShutdownDisposed ? cancellationToken : _startShutdown.Token;
             }
+            var provisionCancellation = cancelProvision ? _provisionShutdown.CancelAsync() : Task.CompletedTask;
 
             var closes = slots.ToDictionary(static slot => slot, slot => slot.CloseAndDrainAsync(shutdownToken));
             foreach (var entry in owned)
                 _ = CompleteRetirementAsync(entry.Key, entry.Value.Session, entry.Value.Slot, entry.Value.Output, closes[entry.Value.Slot]);
             var smokeCleanup = _legacySmoke.CloseAsync(shutdownToken);
-            _ = DisposeCoreAsync(closes.Values, outputCleanup, startsDrained, smokeCleanup, shutdownToken, completion);
+            _ = DisposeCoreAsync(closes.Values, outputCleanup, startsDrained, smokeCleanup, provisionCancellation, shutdownToken, completion);
             return new ValueTask(completion.Task);
         }
 
@@ -7629,6 +7703,7 @@ internal static class Program
             Task<DapSessionState>[] outputCleanup,
             Task startsDrained,
             Task smokeCleanup,
+            Task provisionCancellation,
             CancellationToken cancellationToken,
             TaskCompletionSource<bool> completion)
         {
@@ -7637,7 +7712,7 @@ internal static class Program
             {
                 try
                 {
-                    await Task.WhenAll(closes.Append(startsDrained).Append(smokeCleanup)).ConfigureAwait(false);
+                    await Task.WhenAll(closes.Append(startsDrained).Append(smokeCleanup).Append(provisionCancellation)).ConfigureAwait(false);
                     await Task.WhenAll(outputCleanup).ConfigureAwait(false);
                 }
                 finally
@@ -7742,7 +7817,11 @@ internal static class Program
             }
             finally
             {
-                if (disposeShutdown) _startShutdown.Dispose();
+                if (disposeShutdown)
+                {
+                    _startShutdown.Dispose();
+                    _provisionShutdown.Dispose();
+                }
             }
 
             shutdownCancellation = default;

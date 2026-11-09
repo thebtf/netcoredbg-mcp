@@ -3497,6 +3497,330 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyStart_MissingDebugger_ProvisionsAndStopsControlledAdapter()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        RegistryHostHarness? harness = null;
+        var calls = 0;
+        async Task<string?> Provision(CancellationToken token)
+        {
+            Interlocked.Increment(ref calls);
+            entered.TrySetResult(true);
+            await release.Task.WaitAsync(token);
+            return harness!.Fixture.ExecutablePath;
+        }
+
+        harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true, provisioner: Provision);
+        await using (harness)
+        {
+            harness.EnableLegacyCompat();
+            Task<CallToolResult>? start = null;
+            try
+            {
+                start = harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "provision-start");
+                await AssertProvisionerEnteredAsync(entered.Task, start);
+                Assert.False(start.IsCompleted);
+                Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+                release.TrySetResult(true);
+                var result = Content(await start.WaitAsync(ObservationTimeout));
+                Assert.True(result["data"]?["success"]?.GetValue<bool>(), result["error"]?.GetValue<string>());
+                Assert.Equal(1, Volatile.Read(ref calls));
+                var stop = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "provision-stop").WaitAsync(ObservationTimeout));
+                Assert.True(stop["data"]?["success"]?.GetValue<bool>(), stop["error"]?.GetValue<string>());
+                var transcript = await harness.Fixture.ReadTranscriptAsync();
+                Assert.Single(transcript, static entry => entry.Kind == "startup");
+                Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "launch");
+                Assert.Single(transcript, static entry => entry.Kind == "request" && entry.Command == "disconnect");
+            }
+            finally
+            {
+                release.TrySetResult(true);
+                if (start is not null) await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("request")]
+    [InlineData("forced")]
+    [InlineData("graceful")]
+    public async Task LegacyStart_ProvisionCancellation_ShutdownJoinsGatedCleanup(string cancellation)
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<string?> Provision(CancellationToken token)
+        {
+            entered.TrySetResult(true);
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, token); return null; }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                cancelled.TrySetResult(true);
+                throw;
+            }
+            finally
+            {
+                await cleanupRelease.Task;
+                cleanupDone.TrySetResult(true);
+            }
+        }
+
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true, provisioner: Provision);
+        harness.EnableLegacyCompat();
+        using var caller = new CancellationTokenSource();
+        using var shutdownCancellation = new CancellationTokenSource();
+        Task<CallToolResult>? start = null;
+        Task? shutdown = null;
+        try
+        {
+            start = harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "provision-cancel-start", caller.Token);
+            await AssertProvisionerEnteredAsync(entered.Task, start);
+            if (cancellation != "request")
+            {
+                shutdown = harness.StopAsync(cancellation == "forced" ? shutdownCancellation.Token : CancellationToken.None);
+                Assert.False(shutdown.IsCompleted);
+                if (cancellation == "forced") shutdownCancellation.Cancel();
+            }
+            else caller.Cancel();
+            await cancelled.Task.WaitAsync(ObservationTimeout);
+            shutdown ??= harness.StopAsync(CancellationToken.None);
+            Assert.False(start.IsCompleted, "Start must retain the provisioner's cleanup.");
+            Assert.False(shutdown.IsCompleted, "Shutdown must join the admitted start and its gated cleanup.");
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+            cleanupRelease.TrySetResult(true);
+            await cleanupDone.Task.WaitAsync(ObservationTimeout);
+            if (cancellation == "request")
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await start.WaitAsync(ObservationTimeout));
+            else
+            {
+                try
+                {
+                    var result = Content(await start.WaitAsync(ObservationTimeout));
+                    Assert.NotNull(result["error"]);
+                    Assert.NotEqual(true, result["data"]?["success"]?.GetValue<bool>());
+                }
+                catch (OperationCanceledException) { }
+            }
+            var shutdownFailure = await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+            if (cancellation == "forced") Assert.IsAssignableFrom<OperationCanceledException>(shutdownFailure);
+            else Assert.Null(shutdownFailure);
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        }
+        finally
+        {
+            caller.Cancel();
+            shutdownCancellation.Cancel();
+            cleanupRelease.TrySetResult(true);
+            if (start is not null) await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            if (shutdown is not null) await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyStart_ProvisionCleanupFailure_IsReportedAndFaultsShutdown()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupFailure = new IOException("controlled provision stage cleanup failure");
+        async Task<string?> Provision(CancellationToken token)
+        {
+            entered.TrySetResult(true);
+            await release.Task;
+            throw new AggregateException(new IOException("controlled provisioning failure"), cleanupFailure);
+        }
+
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true, provisioner: Provision);
+        harness.EnableLegacyCompat();
+        Task<CallToolResult>? start = null;
+        Task? shutdown = null;
+        try
+        {
+            start = harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "provision-cleanup-failure");
+            await AssertProvisionerEnteredAsync(entered.Task, start);
+            shutdown = harness.StopAsync(CancellationToken.None);
+            Assert.False(shutdown.IsCompleted, "Shutdown must await the provisioner's owned cleanup.");
+            release.TrySetResult(true);
+            var response = Content(await start.WaitAsync(ObservationTimeout));
+            Assert.Equal("DEBUGGER_PROVISION_CLEANUP_UNCONFIRMED", response["error"]?.GetValue<string>());
+            var failure = await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+            Assert.NotNull(failure);
+            harness.AcceptObservedShutdownFailure(failure);
+            Assert.Contains(FailureTree(failure), item => ReferenceEquals(item, cleanupFailure));
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        }
+        finally
+        {
+            release.TrySetResult(true);
+            if (start is not null) await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            if (shutdown is not null)
+            {
+                var failure = await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+                if (failure is not null and not TimeoutException) harness.AcceptObservedShutdownFailure(failure);
+            }
+            if ((await harness.Fixture.ReadTranscriptAsync()).Count == 0) harness.Fixture.MarkCleanupConfirmed();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyStart_PublishedDebuggerCleanupFailure_ReportsPathsAndRetainsFailure()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Exception? publishedFailure = null;
+        async Task<string?> Provision(CancellationToken _)
+        {
+            entered.TrySetResult(true);
+            await release.Task;
+            throw publishedFailure!;
+        }
+
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true, provisioner: Provision);
+        harness.EnableLegacyCompat();
+        var debuggerPath = harness.Fixture.ExecutablePath;
+        var stagingPath = Path.Combine(Path.GetDirectoryName(harness.ProgramPath)!, "owned-stage");
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var type = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath)
+            .GetType("NetCoreDbg.Mcp.Stateless.NativeDebuggerInstalledCleanupException", throwOnError: true)!;
+        publishedFailure = Assert.IsAssignableFrom<Exception>(Activator.CreateInstance(type,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, binder: null,
+            args: [debuggerPath, stagingPath, new IOException("controlled stage cleanup failure")], culture: null));
+        Task<CallToolResult>? start = null;
+        Task? shutdown = null;
+        try
+        {
+            start = harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "published-cleanup-start");
+            await AssertProvisionerEnteredAsync(entered.Task, start);
+            shutdown = harness.StopAsync(CancellationToken.None);
+            Assert.False(shutdown.IsCompleted);
+            release.TrySetResult(true);
+            var response = Content(await start.WaitAsync(ObservationTimeout));
+            Assert.Equal("DEBUGGER_PROVISION_PUBLISHED_CLEANUP_UNCONFIRMED", response["error"]?.GetValue<string>());
+            Assert.Equal(debuggerPath, response["data"]?["debuggerPath"]?.GetValue<string>());
+            Assert.Equal(stagingPath, response["data"]?["stagingPath"]?.GetValue<string>());
+            var failure = await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+            Assert.NotNull(failure);
+            harness.AcceptObservedShutdownFailure(failure);
+            Assert.Contains(FailureTree(failure), item => ReferenceEquals(item, publishedFailure));
+            Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+        }
+        finally
+        {
+            release.TrySetResult(true);
+            if (start is not null) await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            if (shutdown is not null)
+            {
+                var failure = await Record.ExceptionAsync(async () => await shutdown.WaitAsync(ObservationTimeout));
+                if (failure is not null and not TimeoutException) harness.AcceptObservedShutdownFailure(failure);
+            }
+            if ((await harness.Fixture.ReadTranscriptAsync()).Count == 0) harness.Fixture.MarkCleanupConfirmed();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyStart_CancelledAfterProvisionPublication_ReportsPathWithoutLaunching()
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var diagnostic = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var caller = new CancellationTokenSource();
+        RegistryHostHarness? harness = null;
+        async Task<string?> Provision(CancellationToken _)
+        {
+            entered.TrySetResult(true);
+            await release.Task;
+            return harness!.Fixture.ExecutablePath;
+        }
+
+        harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true,
+            provisioner: Provision, diagnostic: message => { diagnostic.TrySetResult(message); caller.Cancel(); });
+        await using (harness)
+        {
+            harness.EnableLegacyCompat();
+            Task<CallToolResult>? start = null;
+            try
+            {
+                start = harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "published-cancel-start", caller.Token);
+                await AssertProvisionerEnteredAsync(entered.Task, start);
+                release.TrySetResult(true);
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await start.WaitAsync(ObservationTimeout));
+                var message = await diagnostic.Task.WaitAsync(ObservationTimeout);
+                Assert.Contains(JsonSerializer.Serialize(harness.Fixture.ExecutablePath), message, StringComparison.Ordinal);
+                Assert.Contains("published", message, StringComparison.OrdinalIgnoreCase);
+                Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+            }
+            finally
+            {
+                release.TrySetResult(true);
+                caller.Cancel();
+                if (start is not null) await Record.ExceptionAsync(async () => await start.WaitAsync(ObservationTimeout));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SelectedLegacyDebugger_StartDoesNotProvision()
+    {
+        var calls = 0;
+        Task<string?> Provision(CancellationToken _) { Interlocked.Increment(ref calls); return Task.FromResult<string?>(null); }
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), provisioner: Provision);
+        harness.EnableLegacyCompat();
+        var result = Content(await harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false }, "selected-start").WaitAsync(ObservationTimeout));
+        Assert.True(result["data"]?["success"]?.GetValue<bool>(), result["error"]?.GetValue<string>());
+        var stop = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "selected-stop").WaitAsync(ObservationTimeout));
+        Assert.True(stop["data"]?["success"]?.GetValue<bool>(), stop["error"]?.GetValue<string>());
+        Assert.Single(await harness.Fixture.ReadTranscriptAsync(), static entry => entry.Kind == "startup");
+        Assert.Equal(0, Volatile.Read(ref calls));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyStart_InvalidProgramOrExplicitDebugger_DoesNotProvision(bool invalidDebugger)
+    {
+        var calls = 0;
+        Task<string?> Provision(CancellationToken _) { Interlocked.Increment(ref calls); return Task.FromResult<string?>(null); }
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: !invalidDebugger,
+            debuggerPathFactory: invalidDebugger ? directory => Path.Combine(directory, "missing", "netcoredbg.exe") : null,
+            provisioner: Provision);
+        harness.EnableLegacyCompat();
+        var program = invalidDebugger ? harness.ProgramPath : harness.ProgramPath + ".missing";
+        var result = Content(await harness.CallLegacyAsync("start_debug", new JsonObject { ["program"] = program, ["pre_build"] = false },
+            "no-provision-invalid").WaitAsync(ObservationTimeout));
+        Assert.NotNull(result["error"]);
+        Assert.Equal(0, Volatile.Read(ref calls));
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingDebugger_ModernStartAndLegacyInspection_DoNotProvision(bool inspection)
+    {
+        var calls = 0;
+        Task<string?> Provision(CancellationToken _) { Interlocked.Increment(ref calls); return Task.FromResult<string?>(null); }
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(), noDebugger: true, provisioner: Provision);
+        if (inspection) harness.EnableLegacyCompat();
+        var arguments = new JsonObject { ["program"] = harness.ProgramPath };
+        var result = inspection
+            ? await harness.CallLegacyAsync("inspect_debug_launch_compatibility", arguments, "no-provision-inspection").WaitAsync(ObservationTimeout)
+            : await harness.CallAsync("start_debug", arguments, "no-provision-modern").WaitAsync(ObservationTimeout);
+        if (inspection) Assert.Null(Content(result)["error"]);
+        else Assert.True(result.IsError == true);
+        Assert.Equal(0, Volatile.Read(ref calls));
+        Assert.Empty(await harness.Fixture.ReadTranscriptAsync());
+    }
+
+    private static async Task AssertProvisionerEnteredAsync(Task entered, Task<CallToolResult> start)
+    {
+        var first = await Task.WhenAny(entered, start).WaitAsync(ObservationTimeout);
+        Assert.True(ReferenceEquals(first, entered), "Missing legacy debugger must invoke the provisioner before start completes.");
+        await entered.WaitAsync(ObservationTimeout);
+    }
+
+    [Fact]
     public async Task ShutdownCancellation_DuringUnpublishedStart_CancelsStartupAndWaitsForOwnedAdapterExit()
     {
         await using var harness = await RegistryHostHarness.CreateAsync(
@@ -4032,7 +4356,8 @@ public sealed class RegistryShutdownContractTests
 
         public static async Task<RegistryHostHarness> CreateAsync(
             FixtureConfiguration configuration, bool holdLaunchResponse = false, JsonObject? outputScript = null,
-            Action? failedStartCleanupCompleted = null, Func<object, ValueTask>? disposeSession = null, Func<string, string>? debuggerPathFactory = null)
+            Action? failedStartCleanupCompleted = null, Func<object, ValueTask>? disposeSession = null, Func<string, string>? debuggerPathFactory = null,
+            bool noDebugger = false, Func<CancellationToken, Task<string?>>? provisioner = null, Action<string>? diagnostic = null)
         {
             var previousLaunchGate = Environment.GetEnvironmentVariable(LaunchGateVariable);
             var previousOutputScript = Environment.GetEnvironmentVariable(OutputScriptVariable);
@@ -4046,7 +4371,7 @@ public sealed class RegistryShutdownContractTests
                 fixture = FixtureProcess.Create(configuration);
                 var program = Path.Combine(scratch, "controlled-program.dll");
                 await File.WriteAllBytesAsync(program, []);
-                var debuggerPath = debuggerPathFactory?.Invoke(scratch) ?? fixture.ExecutablePath;
+                var debuggerPath = noDebugger ? null : debuggerPathFactory?.Invoke(scratch) ?? fixture.ExecutablePath;
                 var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(
                     RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
                 var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
@@ -4064,6 +4389,17 @@ public sealed class RegistryShutdownContractTests
                     registry = registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null,
                         types: [typeof(string), typeof(Func<,>).MakeGenericType(sessionType, typeof(bool)), typeof(Func<,>).MakeGenericType(sessionType, typeof(ValueTask))], modifiers: null)!
                         .Invoke([debuggerPath, usableDelegate, disposerDelegate]);
+                }
+                else if (provisioner is not null && failedStartCleanupCompleted is null)
+                {
+                    var diagnosticConstructor = diagnostic is null ? null : registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
+                        binder: null, types: [typeof(string), typeof(Func<CancellationToken, Task<string>>), typeof(Action<string>)], modifiers: null);
+                    var constructor = registryType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null,
+                        types: [typeof(string), typeof(Func<CancellationToken, Task<string>>)], modifiers: null);
+                    registry = diagnosticConstructor is not null ? diagnosticConstructor.Invoke([debuggerPath, provisioner, diagnostic])
+                        : constructor is not null ? constructor.Invoke([debuggerPath, provisioner])
+                        : Activator.CreateInstance(registryType, BindingFlags.Instance | BindingFlags.NonPublic,
+                            binder: null, args: [debuggerPath], culture: null)!;
                 }
                 else
                 {

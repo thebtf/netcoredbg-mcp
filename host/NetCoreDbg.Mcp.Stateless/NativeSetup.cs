@@ -92,7 +92,7 @@ internal static class NativeSetup
         or HttpRequestException or JsonException or OperationCanceledException or AggregateException
         or EntryPointNotFoundException or DllNotFoundException;
 
-    private static string? CurrentAsset()
+    internal static string? CurrentAsset()
     {
         var architecture = RuntimeInformation.ProcessArchitecture;
         if (OperatingSystem.IsWindows()) return architecture == Architecture.X64 ? "win64" : null;

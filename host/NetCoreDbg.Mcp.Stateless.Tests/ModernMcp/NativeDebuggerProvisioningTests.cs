@@ -281,6 +281,39 @@ public sealed class NativeDebuggerProvisioningTests
         }
     }
 
+    [Fact]
+    public async Task CleanupFailureBeforePublicationReportsTheStagingPath()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var install = Installer();
+        var scratch = ModernMcpScratchDirectory.Create();
+        FileStream? heldFile = null;
+        try
+        {
+            var target = Path.Combine(scratch, "managed");
+            string? staging = null;
+            using var handler = new ReleaseHandler(CreateArchive(), "digest", onDownload: () =>
+            {
+                staging = Assert.Single(Directory.GetDirectories(scratch, ".netcoredbg-stage-*"));
+                heldFile = new FileStream(Path.Combine(staging, "held-by-fixture"), FileMode.CreateNew,
+                    FileAccess.ReadWrite, FileShare.ReadWrite);
+            });
+            using var client = new HttpClient(handler);
+
+            var error = await Assert.ThrowsAsync<AggregateException>(() => install(client, new Uri(ApiUrl), target, "win64", CancellationToken.None));
+
+            Assert.NotNull(staging);
+            Assert.Equal(staging, error.Data["StagingPath"]);
+            Assert.False(Directory.Exists(target));
+            Assert.True(Directory.Exists(staging));
+        }
+        finally
+        {
+            heldFile?.Dispose();
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
     private static byte[] CreateTar(string? fault)
     {
         using var output = new MemoryStream();

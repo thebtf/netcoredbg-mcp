@@ -66,11 +66,22 @@ does not change the installed Python default or provide full #552 compatibility.
 
 At host startup, the legacy route uses a nonempty `NETCOREDBG_PATH` as given.
 Otherwise it searches `~/.netcoredbg-mcp/netcoredbg/` (including one directory
-level below it), then `PATH`. Unlike Python discovery, a managed-directory
-enumeration error falls through to `PATH`, which may select a different version.
-An invalid explicit path is not replaced by a different debugger. Ordinary
-startup does not automatically download a debugger; use native setup below
-when provisioning is needed. Complete Python replacement remains open.
+level below it), then `PATH`. If no debugger was found at startup, launch
+inspection and `start_debug` search again, so an installation made while the
+host is running is visible. A valid legacy `start_debug` then automatically
+downloads a supported Samsung release when no debugger is found, using the
+same verified, no-overwrite installer and deadline described below. Inspection
+and `attach_debug` do not download. Concurrent installations in different
+processes can conflict; a failed attempt does not replace the destination.
+Host shutdown requests cancellation and waits for provisioning cleanup. A
+cancelled request can leave an already published installation; the returned
+debugger path is logged to stderr before launch. If publication succeeds but
+staging cleanup fails, the error includes both paths for inspection.
+For `DEBUGGER_PROVISION_FAILED`, run native setup for diagnostic details; do not
+delete an existing destination without inspecting its contents.
+Unlike Python discovery, a managed-directory enumeration error falls through
+to `PATH`, and an invalid explicit path is not replaced by another debugger.
+Complete Python replacement remains open.
 
 In this opt-in mode, `--help` and `--version` exit without starting the MCP
 server; the version is the native host's build version, not the Python package
