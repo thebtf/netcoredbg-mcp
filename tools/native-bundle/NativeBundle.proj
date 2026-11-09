@@ -1,0 +1,36 @@
+<Project DefaultTargets="Publish" TreatAsLocalProperty="_HostProject;_BridgeProject;_ChildPropertiesToRemove;_ChildProperties;_BundleOutput;_BridgeOutput;_BundlePublishDir;_BridgePublishDir;_EscapedBundlePublishDir;_EscapedBridgePublishDir">
+  <PropertyGroup>
+    <_HostProject>$([MSBuild]::Escape('$(MSBuildThisFileDirectory)../../host/NetCoreDbg.Mcp.Stateless/NetCoreDbg.Mcp.Stateless.csproj'))</_HostProject>
+    <_BridgeProject>$([MSBuild]::Escape('$(MSBuildThisFileDirectory)../../bridge/FlaUIBridge.csproj'))</_BridgeProject>
+    <_ChildPropertiesToRemove>TargetFramework;TargetFrameworks;RuntimeIdentifiers;RuntimeFrameworkVersion;PublishUrl;PublishProfile;PublishProfileFullPath;PublishSingleFile;PublishTrimmed;PublishReadyToRun;PublishAot;NoBuild;UseAppHost;OutputPath;OutDir;BaseOutputPath;IntermediateOutputPath;BaseIntermediateOutputPath;MSBuildProjectExtensionsPath;RestoreOutputPath;BridgeTestHost;BundleLegacyBridge</_ChildPropertiesToRemove>
+    <_ChildProperties>RuntimeIdentifier=win-x64;SelfContained=true;PublishSelfContained=true</_ChildProperties>
+  </PropertyGroup>
+
+  <Target Name="ValidateNativeBundle">
+    <Error Condition="!$([MSBuild]::IsOSPlatform('Windows'))" Text="Native bundle publication requires a Windows build host." />
+    <Error Condition="'$(NativeBundleOutput)' == ''" Text="Set NativeBundleOutput to an absolute, previously absent output path." />
+    <Error Condition="!$([System.IO.Path]::IsPathFullyQualified('$(NativeBundleOutput)'))" Text="NativeBundleOutput must be an absolute path." />
+    <PropertyGroup>
+      <_BundleOutput>$([System.IO.Path]::TrimEndingDirectorySeparator($([System.IO.Path]::GetFullPath('$(NativeBundleOutput)'))))</_BundleOutput>
+      <_BridgeOutput>$([System.IO.Path]::Combine('$(_BundleOutput)', 'bridge'))</_BridgeOutput>
+      <_BundlePublishDir>$([MSBuild]::EnsureTrailingSlash('$(_BundleOutput)'))</_BundlePublishDir>
+      <_BridgePublishDir>$([MSBuild]::EnsureTrailingSlash('$(_BridgeOutput)'))</_BridgePublishDir>
+      <_EscapedBundlePublishDir>$([MSBuild]::Escape('$(_BundlePublishDir)'))</_EscapedBundlePublishDir>
+      <_EscapedBridgePublishDir>$([MSBuild]::Escape('$(_BridgePublishDir)'))</_EscapedBridgePublishDir>
+    </PropertyGroup>
+    <Error Condition="Exists('$(_BundleOutput)')" Text="NativeBundleOutput already exists; refusing to overwrite: $(_BundleOutput)" />
+  </Target>
+
+  <Target Name="Restore" DependsOnTargets="ValidateNativeBundle">
+    <MSBuild Projects="$(_HostProject)" Targets="Restore" RemoveProperties="$(_ChildPropertiesToRemove)" Properties="$(_ChildProperties);PublishDir=$(_EscapedBundlePublishDir)" />
+    <MSBuild Projects="$(_BridgeProject)" Targets="Restore" RemoveProperties="$(_ChildPropertiesToRemove)" Properties="$(_ChildProperties);PublishDir=$(_EscapedBridgePublishDir)" />
+  </Target>
+
+  <Target Name="Publish" DependsOnTargets="ValidateNativeBundle">
+    <MSBuild Projects="$(_HostProject)" Targets="Publish" RemoveProperties="$(_ChildPropertiesToRemove)" Properties="$(_ChildProperties);PublishDir=$(_EscapedBundlePublishDir)" />
+    <Error Condition="Exists('$(_BridgeOutput)')" Text="Bridge output already exists; refusing to overwrite: $(_BridgeOutput)" />
+    <MSBuild Projects="$(_BridgeProject)" Targets="Publish" RemoveProperties="$(_ChildPropertiesToRemove)" Properties="$(_ChildProperties);PublishDir=$(_EscapedBridgePublishDir)" />
+    <Error Condition="!Exists('$(_BundleOutput)/NetCoreDbg.Mcp.Stateless.exe') Or !Exists('$(_BundleOutput)/coreclr.dll')" Text="Native host publication did not produce the expected self-contained Windows output." />
+    <Error Condition="!Exists('$(_BridgeOutput)/FlaUIBridge.exe')" Text="Bridge publication did not produce FlaUIBridge.exe in the bundle." />
+  </Target>
+</Project>
