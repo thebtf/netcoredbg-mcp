@@ -88,6 +88,60 @@ public sealed class LegacyDebuggerDiscoveryTests
     }
 
     [Fact]
+    public async Task LegacyStart_DiscoversDebuggerInstalledAfterHostStartup()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        var startAttempted = false;
+        var cleanupConfirmed = false;
+        try
+        {
+            var home = Path.Combine(scratch, "home");
+            var pathDirectory = Path.Combine(scratch, "path");
+            var managed = Path.Combine(home, ".netcoredbg-mcp", "netcoredbg");
+            Directory.CreateDirectory(home);
+            Directory.CreateDirectory(pathDirectory);
+            await using (var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+                InheritEnvironmentVariables: false, AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["HOME"] = home,
+                    ["USERPROFILE"] = home,
+                    ["PATH"] = pathDirectory,
+                    ["NETCOREDBG_PATH"] = null,
+                })))
+            {
+                CopyAdapter(managed);
+                var owner = new JsonObject { ["muxSessionId"] = "late-debugger-discovery" };
+                var inspection = await CallAsync(driver, "inspect_debug_launch_compatibility",
+                    new JsonObject { ["program"] = driver.InertProgramPath }, owner);
+                var shimName = OperatingSystem.IsWindows() ? "dbgshim.dll" : "libdbgshim.so";
+                Assert.Equal(Path.Combine(managed, shimName), inspection["data"]?["activeDbgshim"]?["path"]?.GetValue<string>());
+                startAttempted = true;
+                var started = await CallAsync(driver, "start_debug", new JsonObject
+                {
+                    ["program"] = driver.InertProgramPath,
+                    ["pre_build"] = false,
+                    ["stop_at_entry"] = false,
+                }, owner);
+                if (started["data"]?["success"]?.GetValue<bool>() != true)
+                {
+                    Assert.Empty(await driver.ReadNativeActionsAsync());
+                    startAttempted = false;
+                }
+                Assert.True(started["data"]?["success"]?.GetValue<bool>(), started.ToJsonString());
+                Assert.Contains(await driver.ReadNativeActionsAsync(), static action => action.Command == "launch");
+                var stopped = await CallAsync(driver, "stop_debug", new JsonObject(), owner);
+                Assert.True(stopped["data"]?["success"]?.GetValue<bool>(), stopped.ToJsonString());
+            }
+            cleanupConfirmed = true;
+        }
+        finally
+        {
+            if (!startAttempted || cleanupConfirmed) await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+    [Fact]
     public async Task LegacyInspection_DoesNotReplaceAnExplicitMissingDebuggerWithPathCandidate()
     {
         var scratch = ModernMcpScratchDirectory.Create();

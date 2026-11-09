@@ -2104,7 +2104,7 @@ internal static class Program
                     if (root is null) error = "Resolved project root is required for launch inspection.";
                     else
                     {
-                        try { data = await Task.Run(() => LegacyLaunchCompatibility.Inspect(root, programPath, _debuggerPath), cancellationToken).ConfigureAwait(false); }
+                        try { data = await Task.Run(() => LegacyLaunchCompatibility.Inspect(root, programPath, ResolveLegacyDebuggerPath()), cancellationToken).ConfigureAwait(false); }
                         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
                         { error = exception.Message; }
                     }
@@ -5204,6 +5204,8 @@ internal static class Program
             _failedStartCleanupCompleted = failedStartCleanupCompleted;
         }
 
+        private string? ResolveLegacyDebuggerPath() => _debuggerPath ?? LegacyDebuggerDiscovery.Resolve(null);
+
         internal async ValueTask<CallToolResult> CallAsync(
             RequestContext<CallToolRequestParams> context,
             CancellationToken cancellationToken)
@@ -5360,7 +5362,8 @@ internal static class Program
                     return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
             }
 
-            if (string.IsNullOrWhiteSpace(_debuggerPath))
+            var debuggerPath = LegacyCompat ? ResolveLegacyDebuggerPath() : _debuggerPath;
+            if (string.IsNullOrWhiteSpace(debuggerPath))
             {
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
@@ -5485,7 +5488,7 @@ internal static class Program
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                 adapterStartAttempted?.Invoke();
                 session = await NetCoreDbgSession.StartAsync(
-                    _debuggerPath,
+                    debuggerPath,
                     program!,
                     InitializeTimeout,
                     RequestTimeout,
