@@ -68,9 +68,9 @@ At host startup, the legacy route uses a nonempty `NETCOREDBG_PATH` as given.
 Otherwise it searches `~/.netcoredbg-mcp/netcoredbg/` (including one directory
 level below it), then `PATH`. Unlike Python discovery, a managed-directory
 enumeration error falls through to `PATH`, which may select a different version.
-An invalid explicit path is not replaced by a different debugger. This native
-lookup does not automatically download or build a debugger; general native
-setup and complete Python replacement remain open.
+An invalid explicit path is not replaced by a different debugger. Ordinary
+startup does not automatically download a debugger; use native setup below
+when provisioning is needed. Complete Python replacement remains open.
 
 In this opt-in mode, `--help` and `--version` exit without starting the MCP
 server; the version is the native host's build version, not the Python package
@@ -82,8 +82,20 @@ configuration are retained in sibling backup paths reported by the installer.
 Backups are not removed automatically. The installer refuses malformed or
 excessively nested configuration before replacement; successful configuration
 updates use UTF-8 without BOM. Failures report recovery paths, and replacement
-is not crash-atomic. General `setup` without `--enc` remains unavailable in
-the native host; the installed Python entry point remains the default.
+is not crash-atomic. Without `--enc`, `--legacy-compat setup` (or `--setup`)
+prints a JSON MCP client configuration for this exact source-built apphost or
+`dotnet` and managed host. It reuses an existing debugger or downloads the
+latest matching Samsung GitHub release into the managed directory, verifying
+the release's published SHA-256 digest. Download supports Windows x64, Linux
+x64/arm64 and macOS arm64; a missing digest or an existing destination without
+a usable debugger fails without overwriting it. Linux and macOS require an
+available exclusive directory-rename primitive. Interrupted setup can leave a
+`.netcoredbg-stage-*` directory; a cleanup failure reports its path. An invalid
+explicit debugger or `FLAUI_BRIDGE_PATH` fails without falling back. A valid
+explicit bridge is included, or on Windows the existing managed bridge is used
+when present. Diagnostics go to stderr. Setup does not cache dbgshim, build a
+bridge, edit a client configuration or modify PATH. File checks and release
+digests do not prove binary compatibility. Python remains the installed default.
 
 The source-built legacy `attach_debug` route is Windows-only. It retains a
 handle to the requested process and, after a possible attach write, sends at
