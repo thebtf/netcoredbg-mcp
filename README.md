@@ -130,16 +130,18 @@ Linux and macOS shim caching remains unimplemented. Setup does not edit client
 configuration or modify PATH. File checks and release digests do not prove binary
 compatibility. Python remains the installed default.
 
-For a Windows x64 source candidate, publish the host and bridge once each as
-self-contained outputs:
+For a Windows x64 source candidate, use the .NET 10 SDK to publish the host,
+compiler and bridge as self-contained .NET 10 outputs. Ordinary source builds and
+the separately published read-only preview keep their existing runtime targets:
 
 ```powershell
 dotnet msbuild tools/native-bundle/NativeBundle.proj -restore -target:Publish -p:Configuration=Release "-p:NativeBundleOutput=C:\path\new-bundle"
 ```
 
 Keep the full output tree, including bridge sidecars. Omit `-restore` only when
-both projects have already been restored with matching build inputs. The output
-directory must not exist; partial output after failure is retained for inspection.
+the host, compiler and bridge have already been restored with matching build
+inputs. The output directory must not exist; partial output after failure is
+retained for inspection.
 The existence check is not an atomic reservation against another writer changing
 the output path or its ancestors. This is a candidate build route, not an
 installed release or proof of safe UI operation.

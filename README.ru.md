@@ -62,6 +62,12 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
 
+Для экспериментального Windows x64 bundle команда `tools/native-bundle/NativeBundle.proj`
+собирает host, compiler и bridge как самодостаточные приложения на .NET 10; для
+сборки нужен .NET 10 SDK. Обычная сборка из исходников и отдельно опубликованный
+preview сохраняют прежние runtime targets. Это не установленный релиз и не
+подтверждение работы UI. Команда сборки приведена в [английском README](README.md).
+
 The source-built `attach_debug` route is Windows-only. It retains the target
 handle, sends at most one non-terminating disconnect and reports CLR detach as
 unconfirmed. Cleanup can wait for the target to exit; safety after an unexpected

@@ -28,6 +28,22 @@ public sealed class NativeBundleProducerTests
         Assert.False(Directory.Exists(sandbox.ConflictingOutput));
     }
 
+    [WindowsBundleProducerTheory]
+    [InlineData("host/NetCoreDbg.Mcp.Stateless/NetCoreDbg.Mcp.Stateless.csproj", "net8.0", "net10.0")]
+    [InlineData("tools/enc_compiler/EncCompiler.csproj", "net8.0", "net10.0")]
+    [InlineData("bridge/FlaUIBridge.csproj", "net8.0-windows", "net10.0-windows")]
+    public async Task Publish_UsesSupportedRuntimeWithoutChangingOrdinaryBuilds(string relativeProject, string ordinary, string bundled)
+    {
+        await using var sandbox = await Sandbox.CreateAsync();
+        var project = Path.Combine(RepositoryLayout.Root, relativeProject.Replace('/', Path.DirectorySeparatorChar));
+        var defaultResult = await sandbox.RunAsync(restore: false, frameworkProject: project);
+        Assert.True(defaultResult.ExitCode == 0, defaultResult.Error);
+        Assert.Equal(ordinary, defaultResult.Output.Trim());
+        var bundleResult = await sandbox.RunAsync(restore: false, frameworkProject: project, bundleRuntime: true);
+        Assert.True(bundleResult.ExitCode == 0, bundleResult.Error);
+        Assert.Equal(bundled, bundleResult.Output.Trim());
+    }
+
     [WindowsBundleProducerFact]
     public async Task Publish_CheckoutPathWithApostrophe_ResolvesBothProjects()
     {
@@ -140,6 +156,7 @@ public sealed class NativeBundleProducerTests
                 <Error Condition="'$(RuntimeIdentifier)' != 'win-x64'" Text="Wrong RID: $(RuntimeIdentifier)" />
                 <Error Condition="'$(SelfContained)' != 'true'" Text="Wrong SelfContained: $(SelfContained)" />
                 <Error Condition="'$(PublishSelfContained)' != 'true'" Text="Wrong PublishSelfContained: $(PublishSelfContained)" />
+                <Error Condition="'$(NativeBundleRuntime)' != 'true'" Text="Wrong NativeBundleRuntime: $(NativeBundleRuntime)" />
                 <Error Condition="'$(PublishDir)' != '$(_ExpectedDir)'" Text="Wrong PublishDir: $(PublishDir); expected $(_ExpectedDir)" />
               </Target>
               <Target Name="Restore" DependsOnTargets="ValidateFixture">
@@ -155,7 +172,7 @@ public sealed class NativeBundleProducerTests
             </Project>
             """;
 
-        internal async Task<ProcessResult> RunAsync(bool restore)
+        internal async Task<ProcessResult> RunAsync(bool restore, string? frameworkProject = null, bool bundleRuntime = false)
         {
             using var process = new Process { StartInfo = new ProcessStartInfo(Dotnet)
             {
@@ -164,20 +181,29 @@ public sealed class NativeBundleProducerTests
             } };
             var args = process.StartInfo.ArgumentList;
             args.Add("msbuild");
-            args.Add(Coordinator);
-            if (restore) args.Add("-restore");
-            args.Add("-target:Publish");
+            args.Add(frameworkProject ?? Coordinator);
             args.Add("-nologo");
             args.Add("-nodeReuse:false");
-            args.Add("-maxCpuCount:1");
-            args.Add($"-property:NativeBundleOutput={Output}");
-            args.Add("-property:RuntimeIdentifier=wrong-rid");
-            args.Add("-property:SelfContained=false");
-            args.Add("-property:PublishSelfContained=false");
-            args.Add($"-property:PublishDir={ConflictingOutput}{Path.DirectorySeparatorChar}");
-            args.Add($"-property:_FixtureLog={Log}");
-            args.Add($"-property:_ExpectedHostDir={Output}{Path.DirectorySeparatorChar}");
-            args.Add($"-property:_ExpectedBridgeDir={Path.Combine(Output, "bridge")}{Path.DirectorySeparatorChar}");
+            if (frameworkProject is not null)
+            {
+                args.Add("-getProperty:TargetFramework");
+                if (bundleRuntime) args.Add("-property:NativeBundleRuntime=true");
+            }
+            else
+            {
+                if (restore) args.Add("-restore");
+                args.Add("-target:Publish");
+                args.Add("-maxCpuCount:1");
+                args.Add($"-property:NativeBundleOutput={Output}");
+                args.Add("-property:RuntimeIdentifier=wrong-rid");
+                args.Add("-property:SelfContained=false");
+                args.Add("-property:PublishSelfContained=false");
+                args.Add("-property:NativeBundleRuntime=false");
+                args.Add($"-property:PublishDir={ConflictingOutput}{Path.DirectorySeparatorChar}");
+                args.Add($"-property:_FixtureLog={Log}");
+                args.Add($"-property:_ExpectedHostDir={Output}{Path.DirectorySeparatorChar}");
+                args.Add($"-property:_ExpectedBridgeDir={Path.Combine(Output, "bridge")}{Path.DirectorySeparatorChar}");
+            }
             var environment = process.StartInfo.Environment;
             environment["HOME"] = Root;
             environment["USERPROFILE"] = Root;
@@ -187,6 +213,7 @@ public sealed class NativeBundleProducerTests
             environment.Remove("MSBUILD_EXE_PATH");
             environment.Remove("MSBuildSDKsPath");
             environment.Remove("DOTNET_HOST_PATH");
+            environment.Remove("NativeBundleRuntime");
 
             var started = false;
             var exited = false;
