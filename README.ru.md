@@ -62,6 +62,12 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
 
+Для экспериментального Windows x64 bundle команда `tools/native-bundle/NativeBundle.proj`
+собирает host, compiler и bridge как самодостаточные приложения на .NET 10; для
+сборки нужен .NET 10 SDK. Обычная сборка из исходников и отдельно опубликованный
+preview сохраняют прежние runtime targets. Это не установленный релиз и не
+подтверждение работы UI. Команда сборки приведена в [английском README](README.md).
+
 The source-built `attach_debug` route is Windows-only. It retains the target
 handle, sends at most one non-terminating disconnect and reports CLR detach as
 unconfirmed. Cleanup can wait for the target to exit; safety after an unexpected
@@ -89,10 +95,11 @@ the session and terminate a launched debuggee.
 возможен `PASS` даже без сессии и наблюдений. Запрос с чужим mux ID отклоняется,
 прямое чтение без ID разрешено. Эта проверка не присваивает и не удерживает
 владение; именованный запрос отклоняется, если до выдачи результата появился
-другой именованный владелец. Сравнение имён использует правила .NET, а не полный Unicode `casefold` Python;
-отображение и нормализация путей тоже следуют правилам .NET. Полная совместимость
-не заявлена (#552, #550). Отдельный инструмент не записывает evidence в хранилище
-Python runtime-smoke.
+другой именованный владелец. Имена процессов и модулей сравниваются с Unicode
+15.1 `casefold`, как в проверенной версии Python 3.13; другие версии Python
+могут отличаться. Отображение и нормализация путей следуют правилам .NET. Полная
+совместимость не заявлена (#552, #550). Инструмент не записывает evidence в
+хранилище Python runtime-smoke.
 
 `get_build_diagnostics(include_warnings=true)` возвращает результат последней
 принятой legacy pre-build и сохраняет его после stop. Новая pre-build очищает

@@ -3,7 +3,7 @@
     <_HostProject>$([MSBuild]::Escape('$(MSBuildThisFileDirectory)../../host/NetCoreDbg.Mcp.Stateless/NetCoreDbg.Mcp.Stateless.csproj'))</_HostProject>
     <_BridgeProject>$([MSBuild]::Escape('$(MSBuildThisFileDirectory)../../bridge/FlaUIBridge.csproj'))</_BridgeProject>
     <_ChildPropertiesToRemove>TargetFramework;TargetFrameworks;RuntimeIdentifiers;RuntimeFrameworkVersion;PublishUrl;PublishProfile;PublishProfileFullPath;PublishSingleFile;PublishTrimmed;PublishReadyToRun;PublishAot;NoBuild;UseAppHost;OutputPath;OutDir;BaseOutputPath;IntermediateOutputPath;BaseIntermediateOutputPath;MSBuildProjectExtensionsPath;RestoreOutputPath;BridgeTestHost;BundleLegacyBridge</_ChildPropertiesToRemove>
-    <_ChildProperties>RuntimeIdentifier=win-x64;SelfContained=true;PublishSelfContained=true</_ChildProperties>
+    <_ChildProperties>RuntimeIdentifier=win-x64;SelfContained=true;PublishSelfContained=true;NativeBundleRuntime=true</_ChildProperties>
   </PropertyGroup>
 
   <Target Name="ValidateNativeBundle">
