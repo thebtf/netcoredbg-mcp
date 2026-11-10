@@ -188,10 +188,10 @@ produce warnings; without expectations and `require_active_process`, `PASS` can
 occur even without a session or observations. An identified foreign mux owner is
 refused, an untagged direct read remains allowed, and this read does not claim
 or hold ownership. A named read is refused if a different named owner appears before
-it publishes its result. Native name matching uses .NET case-insensitive comparison
-and invariant lowercasing, not Python's full Unicode `casefold`; path display and
-normalization also follow .NET rules. Full parity remains open (#552, #550). The
-standalone tool does not populate Python runtime-smoke evidence storage.
+it publishes its result. Process and module names use Unicode 15.1 case folding,
+matching the observed Python 3.13 profile; other Python versions may differ.
+Path display and normalization follow .NET rules. Full parity remains open
+(#552, #550). The standalone tool does not populate Python runtime-smoke evidence storage.
 
 `get_build_diagnostics(include_warnings=true)` reads the latest accepted legacy
 pre-build result, retained across stop. A new pre-build clears the prior result;
