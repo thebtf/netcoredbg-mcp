@@ -15,14 +15,15 @@ stop it deliberately, and inspect the state that explains the behavior.
 
 **Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.17**
 
-The prepared v0.23.17 PATCH fixes nullable launch environments (#362): string
+The v0.23.17 PATCH fixes nullable launch environments (#362): string
 overrides survive beside `null`, and `null` removes inherited variables, including
 Windows case variants. An idle adapter uses guarded drain/restart; with
 `pre_build=False`, removal requests refuse an active debuggee without stopping it.
 The parent and pre-build environments stay unchanged. Python remains the default.
 Upgrade and restart the MCP server; this does not hot-reload shared receivers.
-See the [release notes](RELEASE_NOTES.md) for scope and verification boundaries;
-preparation is not publication.
+Version 0.23.17 is published on [GitHub](https://github.com/thebtf/netcoredbg-mcp/releases/tag/v0.23.17)
+and [PyPI](https://pypi.org/project/netcoredbg-mcp/0.23.17/). The [release notes](RELEASE_NOTES.md)
+describe its scope and verification boundaries; this checkout also contains unreleased source work.
 
 ## What it enables
 
@@ -115,11 +116,16 @@ reparse-point cache directories are refused, but the path checks do not pin
 ancestors against replacement by another process during setup. For an eligible
 managed Windows installation, a legacy launch can use a same-major cached shim
 from a per-session debugger copy without changing the shared installation or cache.
-Eligibility requires a native installation receipt and a compatible cached shim;
-older or unsupported installations fall back to their configured debugger. While
-the private copy is owned, its ancestor directory handles may prevent those
-directories from being renamed or removed until cleanup completes. The receipt
-records local consistency, not authenticity against a same-user writer.
+Eligibility requires a native installation receipt and a compatible cached shim.
+For a standard Python-managed Windows installation with a matching GitHub version
+record, setup may download that exact official release, verify its published
+SHA-256 and compare the existing package before adding only the receipt. It does
+not replace the debugger, shim, configuration, or an existing receipt. Verification
+has a 10-second deadline; missing digests, offline access, or mismatches leave the
+configured debugger in use without staging. During verification and while a
+private copy is owned, ancestor directory handles may prevent those directories
+from being renamed or removed until cleanup completes. The receipt records local
+consistency, not authenticity against a concurrent same-user writer.
 Linux and macOS shim caching remains unimplemented. Setup does not edit client
 configuration or modify PATH. File checks and release digests do not prove binary
 compatibility. Python remains the installed default.

@@ -74,6 +74,29 @@ internal static class NativeSetup
                 downloaded = true;
             }
 
+            if (!downloaded && OperatingSystem.IsWindows())
+            {
+                var home = LegacyDebuggerDiscovery.GetHomeDirectory();
+                if (!string.IsNullOrWhiteSpace(home))
+                {
+                    using var client = NativeDebuggerInstaller.CreateHttpClient();
+                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    LegacyReceiptOutcome outcome;
+                    try
+                    {
+                        outcome = await NativeLegacyReceiptMigration.TryUpgradeAsync(client, home, debugger, deadline.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+                    {
+                        outcome = LegacyReceiptOutcome.Unavailable;
+                    }
+                    if (outcome == LegacyReceiptOutcome.Verified)
+                        await Console.Error.WriteLineAsync("Verified receipt-only migration for the existing managed debugger.").ConfigureAwait(false);
+                    else if (outcome == LegacyReceiptOutcome.Unavailable)
+                        await Console.Error.WriteLineAsync("Warning: receipt verification did not complete; inspect preceding diagnostics before relying on shim staging.").ConfigureAwait(false);
+                }
+            }
+
             try
             {
                 var cacheHome = LegacyDebuggerDiscovery.GetHomeDirectory();
@@ -96,7 +119,7 @@ internal static class NativeSetup
             if (bridge is not null) environment["FLAUI_BRIDGE_PATH"] = bridge;
 
             var config = new { mcpServers = new Dictionary<string, object> { ["netcoredbg"] = new { command = Path.GetFullPath(processPath), args, env = environment } } };
-            await Console.Error.WriteLineAsync(downloaded ? "Downloaded a verified managed debugger." : "Existing debugger reused; no download was needed.").ConfigureAwait(false);
+            await Console.Error.WriteLineAsync(downloaded ? "Downloaded a verified managed debugger." : "Existing debugger reused; no replacement was installed.").ConfigureAwait(false);
             await Console.Error.WriteLineAsync(bridge is null
                 ? "Warning: FlaUI bridge not found; setup does not build it."
                 : "FlaUI bridge configured; setup did not build it.").ConfigureAwait(false);

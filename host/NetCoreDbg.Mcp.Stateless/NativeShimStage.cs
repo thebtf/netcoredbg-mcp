@@ -41,6 +41,7 @@ internal sealed class NativeShimStage
     internal static Action<FileStream, string, int>? AfterBufferedWriteForTest = null;
     internal static Action<string>? BeforeRootCreateForTest = null;
     internal static Action<SafeFileHandle>? BeforeIdentityQueryForTest = null;
+    internal static Func<bool>? FailSameObjectMetadataForTest = null;
     internal static Action<string>? BeforeCleanupForTest = null;
     internal static Action<string>? BeforeDeleteForTest = null;
 
@@ -452,7 +453,7 @@ internal sealed class NativeShimStage
         if (stream.ReadByte() != -1) throw new IOException("File changed while reading.");
         return bytes;
     }
-    private static List<SafeFileHandle> PinAncestors(string path)
+    internal static List<SafeFileHandle> PinAncestors(string path)
     {
         var handles = new List<SafeFileHandle>();
         try
@@ -486,7 +487,7 @@ internal sealed class NativeShimStage
         }
     }
 
-    private static void RequireDirectoryHandle(SafeFileHandle handle)
+    internal static void RequireDirectoryHandle(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandle(handle, out var info) || (info.Attributes & 0x400) != 0 || (info.Attributes & 0x10) == 0)
             throw new IOException("Expected a pinned non-reparse directory.");
@@ -496,7 +497,15 @@ internal sealed class NativeShimStage
     private static SafeFileHandle CreateOwned(SafeFileHandle parent, string name, bool directory) =>
         OpenRelative(parent, name, directory, create: true);
 
-    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string component, bool directory, bool create)
+    internal static SafeFileHandle OpenExistingDirectory(SafeFileHandle parent, string name) =>
+        OpenRelative(parent, name, directory: true, create: false);
+
+    internal static SafeFileHandle CreateReceiptTemporary(SafeFileHandle parent, string name) =>
+        OpenRelative(parent, name, directory: false, create: true, deleteAccess: true);
+
+    internal static void EnsureStableIdentity(SafeFileHandle handle) => _ = GetStableIdentity(handle);
+
+    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string component, bool directory, bool create, bool deleteAccess = false)
     {
         if (string.IsNullOrEmpty(component) || component is "." or ".." || component.IndexOfAny(['\\', '/', ':']) >= 0 || component.Length > 32766)
             throw new IOException("Invalid relative staging component.");
@@ -509,7 +518,7 @@ internal sealed class NativeShimStage
             var attributes = new ObjectAttributes { Length = Marshal.SizeOf<ObjectAttributes>(), RootDirectory = parent.DangerousGetHandle(), ObjectName = namePointer, Attributes = 0x40 | 0x1000 };
             // Files are written through the creation handle; no DELETE access is retained.
             var access = directory ? (create ? 0x00010000u : 0u) | 0x00100000 | 0x80 | 0x20 | 0x01
-                : 0x40000000u | 0x00100000 | 0x80;
+                : 0x40000000u | 0x00100000 | 0x80 | (deleteAccess ? 0x00010000u : 0u);
             const uint share = 1 | 2; // Prevent replacement until the creation handle is closed.
             var options = 0x00200000u | 0x20u | (directory ? 0x01u : 0x40u);
             var status = NtCreateFile(out var handle, access, ref attributes, out _, IntPtr.Zero, 0, share, create ? 2u : 1u, options, IntPtr.Zero, 0);
@@ -580,6 +589,23 @@ internal sealed class NativeShimStage
         using (probe) RequireSameHandle(owner, probe, directory);
     }
 
+    internal static bool? IsSameObjectAtPath(SafeFileHandle owner, string path)
+    {
+        try
+        {
+            using var probe = OpenPath(path, 0x80, 1 | 2 | 4, directory: false);
+            if ((FailSameObjectMetadataForTest?.Invoke() ?? false) || !GetFileInformationByHandle(probe, out var attributes)) return null;
+            if ((attributes.Attributes & (0x400 | 0x10)) != 0) return null;
+            var left = GetStableIdentity(owner);
+            var right = GetStableIdentity(probe);
+            return left.VolumeSerialNumber == right.VolumeSerialNumber && left.FileIdLow == right.FileIdLow && left.FileIdHigh == right.FileIdHigh;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
+        {
+            return null;
+        }
+    }
+
     private static void RequireSameHandle(SafeFileHandle owner, SafeFileHandle probe, bool directory)
     {
         if (!GetFileInformationByHandle(probe, out var info) ||
@@ -600,7 +626,7 @@ internal sealed class NativeShimStage
         return info;
     }
 
-    private static void DeleteOwned(SafeFileHandle handle)
+    internal static void DeleteOwned(SafeFileHandle handle)
     {
         var disposition = new FileDispositionInformation { DeleteFile = true };
         if (!SetFileInformationByHandle(handle, 4, ref disposition, (uint)Marshal.SizeOf<FileDispositionInformation>()))

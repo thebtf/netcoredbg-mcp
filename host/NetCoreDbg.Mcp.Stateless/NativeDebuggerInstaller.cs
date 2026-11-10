@@ -212,7 +212,7 @@ internal static class NativeDebuggerInstaller
         return result!;
     }
 
-    private static (long Size, byte[] Hash, Uri AssetUri) ParseManifest(byte[] bytes, string assetName)
+    internal static (long Size, byte[] Hash, Uri AssetUri) ParseManifest(byte[] bytes, string assetName)
     {
         try
         {
@@ -283,7 +283,7 @@ internal static class NativeDebuggerInstaller
 
     private static bool IsHttpsHost(Uri uri, string host) => uri.IsAbsoluteUri && uri.Scheme == Uri.UriSchemeHttps && uri.Host.Equals(host, StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort && uri.UserInfo.Length == 0;
 
-    private static async Task<HttpResponseMessage> GetAsync(HttpClient client, Uri uri, CancellationToken cancellationToken)
+    internal static async Task<HttpResponseMessage> GetAsync(HttpClient client, Uri uri, CancellationToken cancellationToken)
     {
         for (int redirects = 0; ; redirects++)
         {
@@ -306,7 +306,7 @@ internal static class NativeDebuggerInstaller
         }
     }
 
-    private static async Task<byte[]> ReadBoundedAsync(HttpContent content, long limit, CancellationToken cancellationToken)
+    internal static async Task<byte[]> ReadBoundedAsync(HttpContent content, long limit, CancellationToken cancellationToken)
     {
         if (content.Headers.ContentLength > limit) throw new InvalidDataException("Response exceeds size limit.");
         await using var input = await content.ReadAsStreamAsync(cancellationToken);
@@ -344,7 +344,7 @@ internal static class NativeDebuggerInstaller
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => Count(await inner.ReadAsync(buffer, cancellationToken));
     }
 
-    private static string EntryPath(string root, string name, bool directory, HashSet<string> seen)
+    internal static string EntryPath(string root, string name, bool directory, HashSet<string> seen)
     {
         while (name.StartsWith("./", StringComparison.Ordinal)) name = name[2..];
         if (directory) name = name.TrimEnd('/');
@@ -359,7 +359,7 @@ internal static class NativeDebuggerInstaller
         return path;
     }
 
-    private static long AddSize(long total, long length)
+    internal static long AddSize(long total, long length)
     {
         if (length < 0 || length > MaxEntry || total > MaxTotal - length) throw new InvalidDataException("Archive extraction exceeds size limit.");
         return total + length;
