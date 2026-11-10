@@ -1,11 +1,12 @@
 # netcoredbg-mcp v0.23.17
 
 Prepared: 2026-10-27
+Published: 2026-10-27 ([GitHub Release](https://github.com/thebtf/netcoredbg-mcp/releases/tag/v0.23.17), [PyPI](https://pypi.org/project/netcoredbg-mcp/0.23.17/)).
 
 ## Summary
 
 `v0.23.17` is a nonbreaking PATCH for nullable launch environments (#362).
-These notes describe the prepared candidate, not a publication receipt.
+These notes retain the prepared candidate's scope and evidence; publication is recorded separately above.
 
 ## Fixed behavior
 
@@ -77,9 +78,8 @@ There is no shared-server restart or hot-reload claim.
 The independently reported bare-adapter-name edge when removing `PATH` is repaired.
 The installed consumer resolved the private adapter and runtime host, observed the
 requested `PATH` absence and neighboring override, and closed all six observed
-owned process identities. These verification records do not establish publication;
-independent review, immutable tagging, and fresh public-package delivery remain
-separate release obligations.
+owned process identities. These verification records are candidate evidence;
+they do not by themselves prove publication or that a particular installation is updated.
 
 ---
 

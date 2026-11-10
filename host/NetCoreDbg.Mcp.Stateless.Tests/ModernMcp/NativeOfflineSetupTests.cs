@@ -102,7 +102,7 @@ public sealed class NativeOfflineSetupTests
             var env = config.GetProperty("env");
             Assert.Equal(debugger, env.GetProperty("NETCOREDBG_PATH").GetString());
             Assert.Equal(bridge, env.GetProperty("FLAUI_BRIDGE_PATH").GetString());
-            Assert.Contains("download", error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("no replacement was installed", error, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("dbgshim", error, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("bridge", error, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("transport reading messages", error, StringComparison.OrdinalIgnoreCase);
