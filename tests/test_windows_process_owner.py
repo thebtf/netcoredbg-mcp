@@ -391,6 +391,7 @@ async def test_live_attached_owner_wait_cancels_without_blocking_worker_or_force
     assert "terminate-job" not in events and "terminate-process" not in events
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_pre_dispatch_attach_abort_restores_normal_launch_cleanup(monkeypatch, cancelled):

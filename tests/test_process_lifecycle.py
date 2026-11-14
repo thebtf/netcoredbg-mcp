@@ -290,6 +290,7 @@ async def test_launched_stop_still_terminates_and_finalizes(with_owner):
     assert manager.process_registry.owner_count == 0
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_attach_mode_is_bound_before_request_and_survives_request_failure():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -315,6 +316,7 @@ async def test_attach_mode_is_bound_before_request_and_survives_request_failure(
     client.prepare_attach_safe.assert_awaited_once_with("early-attach")
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_attach_safety_preparation_failure_blocks_dispatch():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -342,6 +344,7 @@ async def test_attach_safety_preparation_failure_blocks_dispatch():
     client.attach.assert_awaited_once_with(44012, just_my_code=False)
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_failed_pre_dispatch_policy_restore_blocks_reuse():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -388,6 +391,7 @@ async def test_never_dispatched_restore_timeout_keeps_owner_until_late_recovery(
     client.stop.assert_awaited_once_with(expected_owner=client.adapter_owner)
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_public_debug_state_retains_requested_attach_pid_after_readmission():
     from netcoredbg_mcp.dap.protocol import DAPResponse
@@ -608,6 +612,7 @@ async def test_public_cleanup_counts_native_confirmed_root_not_callback(
     assert result.complete is True and result.terminated == expected_count
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_rejected_second_attach_does_not_reset_existing_target_state():
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -697,6 +702,7 @@ async def test_posix_cleanup_does_not_count_stale_signal_exit_as_forced_root(mon
     assert result.terminated == 0
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_successful_attach_without_process_event_connects_public_ui(monkeypatch):
     from netcoredbg_mcp.dap.protocol import DAPResponse
@@ -766,6 +772,7 @@ async def test_successful_attach_without_process_event_connects_public_ui(monkey
     assert manager.process_registry.owner_count == 0
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_failed_attach_ack_does_not_publish_target_pid(monkeypatch):
     from netcoredbg_mcp.dap.protocol import DAPResponse

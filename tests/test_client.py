@@ -1946,6 +1946,7 @@ async def test_posix_policy_ack_timeouts_retain_owner_and_late_ack_recovers(monk
     assert not run.attach_dispatched
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 async def test_terminal_before_preparation_does_not_strand_attach_mode():
     from netcoredbg_mcp.dap.client import DapTerminalTrigger

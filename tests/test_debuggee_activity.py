@@ -479,6 +479,7 @@ async def test_debuggee_activity_rejects_lifecycle_replacement(
     assert "data" not in result
 
 
+@pytest.mark.usefixtures("synthetic_attach_target")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["launch", "attach"])
 async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
@@ -492,6 +493,7 @@ async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
     manager._enable_hot_reload_if_supported = AsyncMock()  # type: ignore[method-assign]
     manager._sync_all_breakpoints = AsyncMock()  # type: ignore[method-assign]
     manager._client.set_exception_breakpoints = AsyncMock()
+    manager._client.prepare_attach_safe = AsyncMock()
     manager._client.launch = AsyncMock(return_value=SimpleNamespace(success=True))
     manager._client.attach = AsyncMock(return_value=SimpleNamespace(success=True))
     manager._client.configuration_done = AsyncMock(return_value=SimpleNamespace(success=True))
@@ -514,6 +516,8 @@ async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
     result = await registry.tools["debuggee_activity"](SimpleNamespace(), window_ms=1)
 
     assert result["error"] == "debug session changed during activity window"
+    if route == "attach":
+        manager._client.prepare_attach_safe.assert_awaited_once()
     assert "data" not in result
 
 

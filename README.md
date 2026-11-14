@@ -1201,9 +1201,11 @@ ui_click(automation_id="saveButton")
 
 ### Selected windows and query ownership
 
-All UI and UI-evidence tools registered by one server share the same lazy backend
+Most UI and UI-evidence tools registered by one server share the same lazy backend
 and selected-window state. A successful `ui_switch_window` therefore scopes
-subsequent `ui_find_element` and `ui_query` calls to the same live window.
+subsequent `ui_find_element` and `ui_query` calls to the same live window. The
+provider-only `ui_text` replacement described below uses a separate helper and
+does not inherit that selected-window state.
 
 On the Windows FlaUI backend, unrooted element searches stay inside the selected
 window while it remains live. If that window closes, searches can use the sole
@@ -1223,6 +1225,47 @@ owning live top-level window of that resolved element, including explicit
 container roots and queries without an element selector. If ownership cannot be
 proven, `title` and `automation_id` are empty strings rather than the retained
 selected window's metadata.
+
+### Text replacement without synthesized input
+
+On the Windows Python entry point, call
+`ui_text(action="set_text", automation_id="field", text="new value", replacement_mode="provider_value")`
+to request one UI Automation ValuePattern assignment. The mode is required:
+omitting it refuses the replacement instead of focusing the field and sending
+keyboard input. Runtime-smoke `ui.text.set_text` requires the same mode; the
+separate `ui.text.type_replace_selection` action remains a global-input action.
+
+The provider route searches the debuggee's top-level windows and requires one
+complete, uniquely matching selector using `automation_id`, `name`, and/or
+`control_type`. Criteria are exact and conjunctive; `TextBox` denotes UIA `Edit`.
+Runtime-smoke also accepts `automationId` and `controlType`; conflicting aliases
+are refused. `root_id`, `rootAutomationId`, and XPath are not supported by this
+replacement route. Incomplete or ambiguous searches, unavailable values,
+read-only/password/disabled targets, and changes to the captured process or
+element identity are refused before the assignment. A DAP run must still be
+active when the request is admitted and immediately before dispatch. NUL and
+unpaired Unicode surrogates are rejected; other text is passed literally.
+
+Provider replacement currently requires an attached debuggee whose exact process
+instance was observed at attach admission and remains live. If that observation
+is unavailable, attach can still succeed, but provider replacement is refused.
+For launched debuggees, a PID-only DAP process event cannot establish the original
+instance, so provider replacement is refused until stronger launch authority exists.
+An exited or unobservable adapter owner also prevents provider dispatch.
+
+The helper makes no explicit keyboard, pointer, or focus calls and does not retry
+the assignment. UI Automation or the application provider can still change focus
+or trigger application behavior; caret, selection, undo, and binding semantics
+are provider-dependent. Success requires a complete same-target readback that
+matches the requested value. The operation is not an atomic compare-and-set.
+
+An older or incompatible helper is refused before any replacement text is sent.
+If an outcome is `unknown`, do not assume the assignment was cancelled or retry
+it. The running server refuses another provider replacement for that process
+instance until the original outcome is known or the original process exits.
+Restarting the server loses this in-memory fence and does not resolve the prior
+uncertainty. The replacement result does not echo the requested or observed text.
+
 
 
 ### Physical numeric keypad input

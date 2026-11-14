@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from ..ui import provider_text
 from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_range,
@@ -26,8 +26,6 @@ from ..ui.grid import (
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.list_items import invoke_list_item, toggle_list_item_child
 from ..ui.text import assert_text_selection, read_textbox_state
-from .runtime_smoke_v2.actions import ActionContext
-from .runtime_smoke_v2.actions.ui_text_input import handle_ui_text_type_replace_selection
 
 BackendProvider = Callable[[], Awaitable[Any]]
 OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
@@ -858,11 +856,25 @@ def ui_operation_adapters(
         )
 
     async def text_set_text(**args: Any) -> dict[str, Any]:
-        selector = _selector(args)
-        text = args.get("text")
-        action = {"selector": selector, "text": text}
-        context = ActionContext(service_adapters=adapters, clock=time.monotonic)
-        return await handle_ui_text_type_replace_selection(action, context)
+        selector = args.get("selector")
+        if args.get("replacement_mode") == "provider_value" and isinstance(selector, dict):
+            selector = dict(selector)
+            for alias, canonical in (
+                ("automationId", "automation_id"),
+                ("controlType", "control_type"),
+            ):
+                if alias not in selector:
+                    continue
+                value = selector.pop(alias)
+                if canonical in selector and selector[canonical] != value:
+                    return provider_text.blocked("invalid_selector")
+                selector[canonical] = value
+        return await provider_text.replace_for_session(
+            session,
+            selector=selector,
+            text=args.get("text"),
+            replacement_mode=args.get("replacement_mode"),
+        )
 
     async def invoke(*, app_dispatch_only: bool = False, **args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)

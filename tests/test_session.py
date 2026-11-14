@@ -900,6 +900,7 @@ class TestSessionManagerTransportFences:
         finally:
             await manager.close_resource_update_notifications()
 
+    @pytest.mark.usefixtures("synthetic_attach_target")
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation", ("launch", "attach"))
     async def test_launch_and_attach_reject_a_terminal_current_generation(self, operation: str):
@@ -942,6 +943,7 @@ class TestSessionManagerTransportFences:
 
         assert manager.state.state is DebugState.TERMINATED
 
+    @pytest.mark.usefixtures("synthetic_attach_target")
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation", ("launch", "attach"))
     async def test_launch_and_attach_reject_negative_configuration_done(self, operation: str):
@@ -1008,6 +1010,7 @@ class TestSessionManagerTransportFences:
         finally:
             await manager.close_resource_update_notifications()
 
+    @pytest.mark.usefixtures("synthetic_attach_target")
     @pytest.mark.asyncio
     async def test_attach_serializes_start_and_completion_against_prebuild(self, tmp_path):
         """Pre-build cannot interleave after attach starts its adapter generation."""
